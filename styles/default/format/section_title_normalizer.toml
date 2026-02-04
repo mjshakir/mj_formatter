@@ -1,0 +1,8 @@
+[policy]
+name = "section_title_normalizer"
+enabled = true
+
+[policy.mapping]
+"Standard cpp library" = "Standard cpp library"
+"User Defined libraries" = "User-defined libraries"
+"Main Header" = "Main Header"

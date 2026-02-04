@@ -1,0 +1,4 @@
+[policy]
+name = "brace_style"
+enabled = false
+style = "kr" # kr | allman | stroustrup

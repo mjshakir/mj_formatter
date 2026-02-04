@@ -1,0 +1,30 @@
+[policy]
+name = "include_order"
+enabled = true
+
+# Order for header files
+order_header = ["standard", "third_party", "project", "local"]
+# Order for source files
+order_source = ["main", "standard", "third_party", "project", "local"]
+
+# Group titles
+[policy.group_titles]
+main = "Main header"
+standard = "Standard headers"
+third_party = "Third-party headers"
+project = "Project headers"
+local = "Local headers"
+
+# Optional third-party label overrides
+[policy.third_party_labels]
+# fmt = "fmt"
+
+# Optional project include classification
+project_headers = []
+project_prefixes = []
+
+# Main header extension candidates
+main_header_extensions = [".hpp", ".h", ".hh", ".hxx"]
+
+# Separator length (matches comment style)
+separator_length = 64

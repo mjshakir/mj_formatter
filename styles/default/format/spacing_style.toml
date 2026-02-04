@@ -1,0 +1,6 @@
+[policy]
+name = "spacing_style"
+enabled = false
+
+# options: spaces_4 | spaces_2 | tabs
+indent_style = "spaces_4"

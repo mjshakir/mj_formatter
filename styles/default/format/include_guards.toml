@@ -1,0 +1,6 @@
+[policy]
+name = "include_guards"
+enabled = false
+
+# options: pragma_once | include_guard | both
+mode = "pragma_once"

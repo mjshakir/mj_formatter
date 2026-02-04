@@ -1,0 +1,4 @@
+[policy]
+name = "line_wrap"
+enabled = false
+max_length = 100

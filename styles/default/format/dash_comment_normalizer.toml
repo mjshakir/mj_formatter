@@ -1,0 +1,10 @@
+[policy]
+name = "dash_comment_normalizer"
+enabled = true
+
+# modes: threshold | auto
+mode = "auto"
+long_length = 64
+short_length = 28
+long_threshold = 50
+min_length = 28

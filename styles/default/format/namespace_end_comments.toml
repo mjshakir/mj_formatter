@@ -1,0 +1,9 @@
+[policy]
+name = "namespace_end_comments"
+enabled = false
+
+# apply to these block types
+blocks = ["namespace", "if", "class", "struct", "while", "function"]
+
+# if a block exceeds this many lines, replace name with (...)
+max_named_lines = 40

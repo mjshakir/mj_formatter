@@ -1,0 +1,8 @@
+[policy]
+name = "snake_case"
+enabled = false
+
+# apply to: variables | functions | both
+apply_to = "both"
+# exclude class/namespace names
+exclude_class_namespace = true

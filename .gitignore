@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pytest_cache
+*.benchmarks
+# Virtual env
+venv/
+
+# Caches & logs
+.cache/
+logs/
+
+# Reports & backups
+reports/
+backups/
+
+# Local config overrides
+.env

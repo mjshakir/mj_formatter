@@ -1,0 +1,3 @@
+# Optional: prebuilt grammars bundle
+# May not be available on all Python/CPU combos (e.g. 3.13 aarch64)
+tree-sitter-languages>=1.7.0

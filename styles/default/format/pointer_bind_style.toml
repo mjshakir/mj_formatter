@@ -1,0 +1,6 @@
+[policy]
+name = "pointer_bind_style"
+enabled = false
+
+# options: bind_to_type | bind_to_name
+style = "bind_to_type"

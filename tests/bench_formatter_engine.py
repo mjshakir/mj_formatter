@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from mj_formatter.core.formatter_engine import FormatterEngine
+from mj_formatter.core.structs import AppConfig
+
+
+def _make_config() -> AppConfig:
+    return AppConfig(
+        root=".",
+        include_patterns=(),
+        exclude_patterns=(),
+        jobs=0,
+        check=False,
+        backup=False,
+        backup_mode="suffix",
+        backup_suffix=".bak",
+        backup_dir="backups",
+        report_path="report.jsonl",
+        cache_enabled=False,
+        cache_path="cache.bin",
+        log_level="ERROR",
+        log_file=None,
+        policies_default="none",
+        policies_enabled=frozenset(),
+        policies_disabled=frozenset(),
+        policies_order=(),
+        policy_settings={"align_assignments": {"enabled": True}},
+    )
+
+
+def _make_text(lines: int = 2000) -> str:
+    rows = []
+    for i in range(lines):
+        rows.append(f"m_value{i} = other.m_value{i};\n")
+    return "".join(rows)
+
+
+def test_benchmark_align_assignments(benchmark) -> None:
+    config = _make_config()
+    engine = FormatterEngine(config)
+    text = _make_text()
+    benchmark(engine.apply, text, "bench.cpp")

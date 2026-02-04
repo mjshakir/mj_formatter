@@ -1,0 +1,46 @@
+[formatter]
+root = "."
+include = ["include/**/*.hpp", "include/**/*.h", "src/**/*.cpp", "src/**/*.hpp", "src/**/*.h"]
+exclude = [
+  "build/**",
+  "build-*/**",
+  ".git/**",
+  "scripts/**",
+  "**/*.bak",
+]
+
+# 0 means auto (CPU count)
+jobs = 0
+
+# if true, only reports issues; does not write changes
+check = false
+
+# backup controls
+backup = true
+backup_mode = "suffix" # "suffix" or "mirror"
+backup_suffix = ".bak"
+backup_dir = "scripts/mj_formatter/backups"
+
+# reporting
+report_path = "scripts/mj_formatter/reports/format_report.jsonl"
+
+# cache
+cache_enabled = true
+cache_path = "scripts/mj_formatter/.cache/cache.bin"
+
+# logging
+log_level = "INFO"
+log_file = "scripts/mj_formatter/logs/mj_formatter.log"
+
+[policies]
+# default can be "all" or "none"
+default = "all"
+# explicit overrides
+enabled = []
+disabled = []
+# optional order; if empty, registry order is used
+order = []
+# style pack folder under styles/<style>/
+style = "default"
+# optional explicit policy files (relative to config.toml)
+files = []

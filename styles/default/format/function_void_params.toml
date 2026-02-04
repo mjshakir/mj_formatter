@@ -1,0 +1,8 @@
+[policy]
+name = "function_void_params"
+enabled = false
+
+# Require (void) for empty parameter lists
+require_void = true
+# Enforce no space between function name and (
+no_space_before_paren = true

@@ -1,0 +1,4 @@
+[policy]
+name = "pragma_once_spacing"
+enabled = false
+blank_lines_after = 1
