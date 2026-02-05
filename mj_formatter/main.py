@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
@@ -11,6 +12,7 @@ from typing import Iterable
 
 from .core.app_config import AppConfig
 from .core.config_loader import ConfigLoader
+from .core.backup_manifest import BackupManifest
 from .core.file_cache import FileCache
 from .core.file_finder import FileFinder
 from .core.file_result import FileResult
@@ -38,6 +40,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--report", help="Path to JSONL report")
     parser.add_argument("--log-level", help="Log level")
     parser.add_argument("--log-file", help="Log file path")
+    parser.add_argument("--verbose", action="store_true", help="Print per-file violations")
     parser.add_argument(
         "--backup",
         action=argparse.BooleanOptionalAction,
@@ -58,17 +61,74 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _run_workers(paths: list[str], processor: FileProcessor, jobs: int) -> list[FileResult]:
+_WORKER_PROCESSOR: FileProcessor | None = None
+
+
+def _cpu_count() -> int:
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return len(os.sched_getaffinity(0))
+        except Exception:
+            pass
+    return os.cpu_count() or 1
+
+
+def _ensure_backup_run_id(config: AppConfig) -> str | None:
+    if not config.backup or config.check:
+        return None
+    run_id = os.environ.get("MJ_FORMATTER_BACKUP_RUN")
+    if run_id:
+        return run_id
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    os.environ["MJ_FORMATTER_BACKUP_RUN"] = run_id
+    return run_id
+
+
+def _get_mp_context():
+    if sys.platform.startswith("linux"):
+        try:
+            return get_context("fork")
+        except ValueError:
+            pass
+    return get_context("spawn")
+
+
+def _init_worker(config: AppConfig) -> None:
+    global _WORKER_PROCESSOR
+    _WORKER_PROCESSOR = FileProcessor(config)
+
+
+def _process_path(path: str) -> FileResult:
+    if _WORKER_PROCESSOR is None:
+        raise RuntimeError("Worker not initialized")
+    return _WORKER_PROCESSOR(path)
+
+
+def _run_workers(paths: list[str], config: AppConfig, jobs: int) -> list[FileResult]:
+    if not paths:
+        return []
+    jobs = min(jobs, len(paths))
     if jobs <= 1:
+        processor = FileProcessor(config)
         return [processor(path) for path in paths]
 
-    ctx = get_context("spawn")
-    chunksize = max(1, len(paths) // (jobs * 4) or 1)
-    with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as executor:
-        return list(executor.map(processor, paths, chunksize=chunksize))
+    ctx = _get_mp_context()
+    chunksize = max(1, len(paths) // (jobs * 2) or 1)
+    with ProcessPoolExecutor(
+        max_workers=jobs,
+        mp_context=ctx,
+        initializer=_init_worker,
+        initargs=(config,),
+    ) as executor:
+        return list(executor.map(_process_path, paths, chunksize=chunksize))
 
 
-def _log_summary(logger: logging.Logger, results: Iterable[FileResult], check_only: bool) -> int:
+def _log_summary(
+    logger: logging.Logger,
+    results: Iterable[FileResult],
+    check_only: bool,
+    verbose: bool,
+) -> int:
     files = 0
     changed = 0
     errors = 0
@@ -81,6 +141,14 @@ def _log_summary(logger: logging.Logger, results: Iterable[FileResult], check_on
         if result.error:
             errors += 1
         violations += len(result.violations)
+        if verbose and result.violations:
+            logger.info("violations in %s (%d)", result.path, len(result.violations))
+            for violation in result.violations:
+                line = f"  - {violation.policy}: {violation.message} (line {violation.line}"
+                if violation.column is not None:
+                    line += f", col {violation.column}"
+                line += ")"
+                logger.info("%s", line)
 
     logger.info("files processed: %s", files)
     logger.info("files changed: %s", changed)
@@ -214,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_policies:
         return _list_policies(logger, config)
 
+    backup_run_id = _ensure_backup_run_id(config)
+
     finder = FileFinder(config)
     all_files = finder.collect()
 
@@ -242,10 +312,9 @@ def main(argv: list[str] | None = None) -> int:
 
     jobs = config.jobs
     if jobs <= 0:
-        jobs = os.cpu_count() or 1
+        jobs = _cpu_count()
 
-    processor = FileProcessor(config)
-    processed = _run_workers(files_to_process, processor, jobs)
+    processed = _run_workers(files_to_process, config, jobs)
 
     if config.cache_enabled:
         for result in processed:
@@ -255,8 +324,16 @@ def main(argv: list[str] | None = None) -> int:
 
     results = cache_hits + processed
     ReportWriter(config.report_path).write(results)
+    if backup_run_id:
+        BackupManifest(
+            backup_dir=config.backup_dir,
+            run_id=backup_run_id,
+            root=config.root,
+            mode=config.backup_mode,
+            suffix=config.backup_suffix,
+        ).write(results)
 
-    return _log_summary(logger, results, config.check)
+    return _log_summary(logger, results, config.check, args.verbose)
 
 
 if __name__ == "__main__":

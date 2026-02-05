@@ -15,6 +15,8 @@ class FileIO:
         self._backup_mode = config.backup_mode
         self._backup_suffix = config.backup_suffix
         self._backup_dir = Path(config.backup_dir)
+        self._backup_run = os.environ.get("MJ_FORMATTER_BACKUP_RUN")
+        self._backup_root = self._backup_dir / self._backup_run if self._backup_run else self._backup_dir
 
     def read_text(self, path: str) -> str:
         with open(path, "r", encoding="utf-8") as handle:
@@ -36,13 +38,12 @@ class FileIO:
     def _make_backup(self, path: str) -> tuple[str | None, str | None]:
         try:
             src = Path(path)
-            if self._backup_mode == "mirror":
-                rel = src.resolve().relative_to(self._root)
-                dest = self._backup_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                dest = Path(f"{path}{self._backup_suffix}")
-                dest = self._unique_path(dest)
+            rel = src.resolve().relative_to(self._root)
+            dest = self._backup_root / rel
+            if self._backup_mode != "mirror":
+                dest = dest.with_name(dest.name + self._backup_suffix)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest = self._unique_path(dest)
             shutil.copy2(src, dest)
             return str(dest), None
         except Exception as exc:

@@ -1,13 +1,6 @@
 [policy]
 name = "naming_conventions"
-enabled = false
+enabled = true
 
-# prefixes
-member_prefix = "m_"
-static_prefix = "s_"
-pointer_prefix = "p_"
-constexpr_prefix = "C_"
-local_prefix = "_"
-
-# allow structs to skip member prefix
-allow_structs_without_member_prefix = true
+# standards: mj (default), google, llvm, qt
+standard = "mj"

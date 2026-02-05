@@ -10,8 +10,11 @@ from .policy_base import Policy
 class AlignAssignmentsPolicy(Policy):
     name = "align_assignments"
     description = "Align consecutive assignments by '='"
+    _operators = set("=<>!+-*/%&|^")
 
     def apply(self, context: ParseContext) -> PolicyResult:
+        if "=" not in context.text:
+            return PolicyResult(text=context.text, violations=[], edits=[])
         lines = context.text.splitlines(keepends=True)
         if not lines:
             return PolicyResult(text=context.text, violations=[], edits=[])
@@ -86,13 +89,12 @@ class AlignAssignmentsPolicy(Policy):
 
     def _find_assignment(self, line: str) -> int | None:
         code = line.split("//", 1)[0]
-        operators = set("=<>!+-*/%&|^")
         for idx, ch in enumerate(code):
             if ch != "=":
                 continue
             prev = code[idx - 1] if idx > 0 else ""
             nxt = code[idx + 1] if idx + 1 < len(code) else ""
-            if prev in operators or nxt in operators:
+            if prev in self._operators or nxt in self._operators:
                 continue
             prefix = code[:idx].rstrip()
             if prefix.endswith("operator"):

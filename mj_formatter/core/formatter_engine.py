@@ -54,14 +54,7 @@ class FormatterEngine:
                     context.warnings.append("clang parsing requested but not implemented")
                     logger.warning("clang parsing requested but not implemented")
 
-            context = ParseContext(
-                text=current,
-                path=path,
-                tree_sitter_tree=context.tree_sitter_tree,
-                tree_sitter_lang=context.tree_sitter_lang,
-                clang_ast=context.clang_ast,
-                warnings=context.warnings,
-            )
+            context.text = current
             result = policy.apply(context)
             current = result.text
             violations.extend(result.violations)

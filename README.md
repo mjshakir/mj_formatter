@@ -4,16 +4,30 @@ Standalone, policy‑driven formatter prototype for C++ sources. It is **not** p
 
 ## Install
 
+Editable install (adds `mj_formatter` CLI):
+
 ```bash
-python -m venv scripts/mj_formatter/.venv
-source scripts/mj_formatter/.venv/bin/activate
-pip install -r scripts/mj_formatter/requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Optional tree-sitter grammars:
+
+```bash
+pip install -e .[tree-sitter]
+```
+
+If you prefer requirements files:
+
+```bash
+pip install -r requirements.txt
 ```
 
 Optional tree‑sitter grammars (only if your platform supports it):
 
 ```bash
-pip install -r scripts/mj_formatter/requirements-tree-sitter.txt
+pip install -r requirements-tree-sitter.txt
 ```
 
 ## Run
@@ -21,30 +35,60 @@ pip install -r scripts/mj_formatter/requirements-tree-sitter.txt
 Dry run (no writes):
 
 ```bash
-python scripts/mj_formatter/run.py --config scripts/mj_formatter/config/config.toml --root . --check
+mj_formatter --config config/config.toml --root . --check
 ```
 
 Apply formatting:
 
 ```bash
-python scripts/mj_formatter/run.py --config scripts/mj_formatter/config/config.toml --root .
+mj_formatter --config config/config.toml --root .
 ```
+
+## CLI Options
+
+| Option | Description | Notes |
+| --- | --- | --- |
+| `--config PATH` | Config TOML path | Defaults to `config/config.toml` if present |
+| `--style NAME` | Style pack under `styles/` | Overrides `[policies].style` |
+| `--root PATH` | Root directory for discovery | Defaults to `.` |
+| `--include GLOB` | Include glob (repeatable) | Example: `--include "src/**/*.cpp"` |
+| `--exclude GLOB` | Exclude glob (repeatable) | Excludes are applied early during discovery |
+| `--enable LIST` | Enable policies (CSV) | Example: `--enable a,b,c` |
+| `--disable LIST` | Disable policies (CSV) | Example: `--disable a,b,c` |
+| `--jobs N` | Worker processes | `0` = auto (CPU affinity aware) |
+| `--check` | Check only, no writes | Exit code `1` if violations |
+| `--report PATH` | JSONL report path | Also writes `.summary.json` |
+| `--log-level LEVEL` | Logging level | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `--log-file PATH` | Log file path | Console logs are always enabled |
+| `--backup/--no-backup` | Toggle backups | Uses config defaults if not set |
+| `--cache/--no-cache` | Toggle cache | Uses config defaults if not set |
+| `--list-styles` | List styles and exit | |
+| `--list-policies` | List policies and exit | Shows enabled/disabled status |
+| `--validate-registry` | Validate policy registry | |
+| `--undo` | Restore backups and delete them | |
+| `--undo-no-delete` | Restore backups and keep them | |
 
 ## Styles
 
 Project configuration:
 ```
-scripts/mj_formatter/config/config.toml
+config/config.toml
 ```
 
 Style pack layout:
 ```
-scripts/mj_formatter/styles/<style_name>/
+styles/<style_name>/
   format/*.toml          # one policy per file
   enable/enable.toml     # enable/disable list
 ```
 
 Policies not listed in `enable.toml` are **disabled by default** and produce a warning with an enable example.
+
+## Performance Notes
+
+- File discovery uses a single `os.walk` and prunes excluded directories early for large repos.
+- Parallelism is process-based (not threads). On Linux it prefers `fork` for faster startup; elsewhere it uses `spawn`.
+- `--jobs 0` picks the available CPU count (honors CPU affinity in containers/cgroups).
 
 ## Policy Control
 
@@ -65,17 +109,17 @@ You can enable/disable policies in multiple ways:
 
 List styles:
 ```bash
-python scripts/mj_formatter/run.py --list-styles
+mj_formatter --list-styles
 ```
 
 List policies (table with status):
 ```bash
-python scripts/mj_formatter/run.py --list-policies --style default
+mj_formatter --list-policies --style default
 ```
 
 Validate registry:
 ```bash
-python scripts/mj_formatter/run.py --validate-registry
+mj_formatter --validate-registry
 ```
 
 ## Undo
@@ -83,13 +127,13 @@ python scripts/mj_formatter/run.py --validate-registry
 Restore from latest backups (deletes backups on success):
 
 ```bash
-python scripts/mj_formatter/run.py --undo --config scripts/mj_formatter/config/config.toml
+mj_formatter --undo --config config/config.toml
 ```
 
 Restore without deleting backups:
 
 ```bash
-python scripts/mj_formatter/run.py --undo-no-delete --config scripts/mj_formatter/config/config.toml
+mj_formatter --undo-no-delete --config config/config.toml
 ```
 
 ## Reports & Backups
@@ -108,14 +152,14 @@ Policies can declare `parse_mode`:
 ## Tests and Benchmarks
 
 ```bash
-pip install -r scripts/mj_formatter/requirements-dev.txt
-python -m pytest -q scripts/mj_formatter
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
 Benchmark (via pytest‑benchmark):
 
 ```bash
-python -m pytest -q scripts/mj_formatter/tests/bench_formatter_engine.py
+python -m pytest -q tests/bench_formatter_engine.py
 ```
 
 ## Env

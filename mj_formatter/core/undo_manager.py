@@ -37,20 +37,51 @@ class UndoManager:
         return True, None
 
     def _find_latest_backup(self, target: Path) -> Path | None:
-        if self._backup_mode == "mirror":
-            try:
-                rel = target.resolve().relative_to(self._root)
-            except Exception:
-                return None
-            candidate = self._backup_dir / rel
-            return candidate if candidate.exists() else None
+        try:
+            rel = target.resolve().relative_to(self._root)
+        except Exception:
+            rel = None
 
-        base = Path(f"{target}{self._backup_suffix}")
+        if rel is not None:
+            run_dirs = self._list_run_dirs()
+            for run_dir in sorted(run_dirs, reverse=True):
+                candidate = run_dir / rel
+                if self._backup_mode != "mirror":
+                    candidate = candidate.with_name(candidate.name + self._backup_suffix)
+                found = self._latest_numbered(candidate)
+                if found is not None:
+                    return found
+
+            if self._backup_mode == "mirror":
+                candidate = self._backup_dir / rel
+                if candidate.exists():
+                    return candidate
+
+        if self._backup_mode != "mirror":
+            base = Path(f"{target}{self._backup_suffix}")
+            found = self._latest_numbered(base)
+            if found is not None:
+                return found
+
+        return None
+
+    def _list_run_dirs(self) -> list[Path]:
+        if not self._backup_dir.exists():
+            return []
+        run_dirs: list[Path] = []
+        for entry in self._backup_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            run_dirs.append(entry)
+        return run_dirs
+
+    def _latest_numbered(self, base: Path) -> Path | None:
         if base.exists():
             return base
 
-        # Look for numbered backups: .bak.1, .bak.2, ... pick highest
-        parent = target.parent
+        parent = base.parent
+        if not parent.exists():
+            return None
         prefix = base.name + "."
         matches = []
         for item in parent.iterdir():

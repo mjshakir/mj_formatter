@@ -14,13 +14,13 @@ class FileProcessor:
         self._config = config
         self._engine: FormatterEngine | None = None
         self._file_io: FileIO | None = None
-
-    def __call__(self, path: str) -> FileResult:
-        logger = logging.getLogger("mj_formatter")
-        if not logger.handlers:
+        self._logger = logging.getLogger("mj_formatter")
+        if not self._logger.handlers:
             from .log_setup import LogSetup
             LogSetup().configure(self._config.log_level, self._config.log_file)
-            logger = logging.getLogger("mj_formatter")
+            self._logger = logging.getLogger("mj_formatter")
+
+    def __call__(self, path: str) -> FileResult:
         try:
             if self._engine is None:
                 self._engine = FormatterEngine(self._config)
@@ -37,7 +37,7 @@ class FileProcessor:
             try:
                 original = self._file_io.read_text(path)
             except Exception as exc:
-                logger.error("read failed for %s: %s", path, exc)
+                self._logger.error("read failed for %s: %s", path, exc)
                 return FileResult(
                     path=path,
                     changed=False,
@@ -51,7 +51,7 @@ class FileProcessor:
             try:
                 result = self._engine.apply(original, path)
             except Exception as exc:
-                logger.error("policy failure for %s: %s", path, exc)
+                self._logger.error("policy failure for %s: %s", path, exc)
                 return FileResult(
                     path=path,
                     changed=False,
@@ -67,7 +67,7 @@ class FileProcessor:
             if changed and not self._config.check:
                 backup_path, error = self._file_io.write_text(path, result.text)
                 if error:
-                    logger.error("write failed for %s: %s", path, error)
+                    self._logger.error("write failed for %s: %s", path, error)
                     return FileResult(
                         path=path,
                         changed=False,
@@ -97,7 +97,7 @@ class FileProcessor:
                 cache_hit=False,
             )
         except Exception as exc:
-            logger.error("unexpected failure for %s: %s", path, exc)
+            self._logger.error("unexpected failure for %s: %s", path, exc)
             return FileResult(
                 path=path,
                 changed=False,

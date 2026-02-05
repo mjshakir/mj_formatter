@@ -18,3 +18,6 @@ backups/
 
 # Local config overrides
 .env
+
+# ignore build files
+mj_formatter.egg-info/
