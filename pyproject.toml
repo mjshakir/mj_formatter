@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mj-formatter"
+version = "0.1.0"
+description = "Standalone, policy-driven formatter prototype for C++ sources."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "tomli>=2.0.1; python_version < '3.11'",
+  "tree-sitter>=0.21.3",
+]
+
+[project.optional-dependencies]
+tree-sitter = ["tree-sitter-languages>=1.7.0"]
+
+[project.scripts]
+mj_formatter = "mj_formatter.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mj_formatter*"]
