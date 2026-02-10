@@ -27,10 +27,15 @@ report_path = "scripts/mj_formatter/reports/format_report.jsonl"
 # cache
 cache_enabled = true
 cache_path = "scripts/mj_formatter/.cache/cache.bin"
+policy_cache_path = "styles/default/cache/policy_cache.bin"
+sort_results = true
 
 # logging
 log_level = "INFO"
 log_file = "scripts/mj_formatter/logs/mj_formatter.log"
+clang_args = []
+clang_compdb = ""
+clang_args_mode = "merge"
 
 [policies]
 # default can be "all" or "none"

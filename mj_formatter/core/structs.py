@@ -20,6 +20,12 @@ class AppConfig:
     cache_path: str
     log_level: str
     log_file: str | None
+    profile_enabled: bool
+    policy_cache_path: str
+    sort_results: bool
+    clang_args: tuple[str, ...]
+    clang_compdb_path: str | None
+    clang_args_mode: str
     policies_default: str
     policies_enabled: frozenset[str]
     policies_disabled: frozenset[str]
@@ -48,6 +54,8 @@ class PolicyResult:
     text: str
     violations: list[Violation]
     edits: list[Edit]
+    profile: dict[str, float] = field(default_factory=dict)
+    parse_modes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -59,6 +67,8 @@ class FileResult:
     error: str | None
     backup_path: str | None
     cache_hit: bool
+    profile: dict[str, float] | None = None
+    parse_modes: dict[str, str] | None = None
 
 
 @dataclass

@@ -12,7 +12,9 @@ class PolicySelector:
         self._registry = registry
 
     def resolve(self) -> list[str]:
-        available = list(self._registry.names())
+        available = list(self._config.policy_settings.keys())
+        if not available:
+            available = list(self._registry.names())
         enabled: set[str] = set()
 
         if self._config.policies_default != "none":

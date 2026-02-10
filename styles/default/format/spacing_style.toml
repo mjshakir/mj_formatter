@@ -1,6 +1,7 @@
 [policy]
 name = "spacing_style"
 enabled = false
+type = "python"
 
 # options: spaces_4 | spaces_2 | tabs
 indent_style = "spaces_4"

@@ -84,6 +84,31 @@ styles/<style_name>/
 
 Policies not listed in `enable.toml` are **disabled by default** and produce a warning with an enable example.
 
+## Policy Types (Plan B)
+
+Policies are configured in TOML and instantiated by type:
+- `type = "align_columns"` (declarative)
+- `type = "trim_trailing_whitespace"` (declarative)
+- `type = "regex_replace"` (declarative)
+- `type = "python"` (uses built-in Python policies)
+- `type = "lua"` (optional Lua policy; requires `pip install -e .[lua]`)
+
+Example:
+```toml
+[policy]
+name = "align_assignments"
+enabled = true
+type = "align_columns"
+operator = "="
+ignore_in = ["for", "if", "while", "switch"]
+```
+
+Lua helpers available via `mj`:
+- `mj.regex_replace(text, pattern, repl, flags)`
+- `mj.split_lines(text)`
+- `mj.join_lines(lines)`
+- `mj.log(level, message)`
+
 ## Performance Notes
 
 - File discovery uses a single `os.walk` and prunes excluded directories early for large repos.

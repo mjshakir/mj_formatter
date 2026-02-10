@@ -1,3 +1,6 @@
 [policy]
 name = "align_assignments"
 enabled = true
+type = "align_columns"
+operator = "="
+ignore_in = ["for", "if", "while", "switch"]

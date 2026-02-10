@@ -4,15 +4,17 @@ import argparse
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from typing import Iterable
+from dataclasses import dataclass
 
 from .core.app_config import AppConfig
 from .core.config_loader import ConfigLoader
-from .core.backup_manifest import BackupManifest
+from .core.backup_manifest import BackupManifest, BackupManifestConfig
 from .core.file_cache import FileCache
 from .core.file_finder import FileFinder
 from .core.file_result import FileResult
@@ -22,8 +24,10 @@ from .core.table_printer import TablePrinter
 from .core.processor import FileProcessor
 from .core.report_writer import ReportWriter
 from .core.undo_manager import UndoManager
+from .core.policy_factory import PolicyFactory
 from .policies.registry import PolicyRegistry
 from .core.structs import FileIOConfig, TableData, TableStyle
+from .core.metrics import MetricsConfig, MetricsProcess, MetricsClient
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -41,6 +45,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--log-level", help="Log level")
     parser.add_argument("--log-file", help="Log file path")
     parser.add_argument("--verbose", action="store_true", help="Print per-file violations")
+    parser.add_argument("--profile", action="store_true", help="Profile policy timings")
     parser.add_argument(
         "--backup",
         action=argparse.BooleanOptionalAction,
@@ -62,6 +67,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 _WORKER_PROCESSOR: FileProcessor | None = None
+_WORKER_METRICS: MetricsClient | None = None
+
+
+@dataclass(frozen=True)
+class WorkerRunConfig:
+    config: AppConfig
+    jobs: int
+    metrics: MetricsClient | None
+
+
+@dataclass(frozen=True)
+class SummaryContext:
+    results: Iterable[FileResult]
+    check_only: bool
+    verbose: bool
+    elapsed: float
+    jobs: int
 
 
 def _cpu_count() -> int:
@@ -93,9 +115,12 @@ def _get_mp_context():
     return get_context("spawn")
 
 
-def _init_worker(config: AppConfig) -> None:
+def _init_worker(config: AppConfig, metrics_queue) -> None:
     global _WORKER_PROCESSOR
-    _WORKER_PROCESSOR = FileProcessor(config)
+    global _WORKER_METRICS
+    metrics_client = MetricsClient(metrics_queue) if metrics_queue is not None else None
+    _WORKER_METRICS = metrics_client
+    _WORKER_PROCESSOR = FileProcessor(config, metrics_client)
 
 
 def _process_path(path: str) -> FileResult:
@@ -104,44 +129,49 @@ def _process_path(path: str) -> FileResult:
     return _WORKER_PROCESSOR(path)
 
 
-def _run_workers(paths: list[str], config: AppConfig, jobs: int) -> list[FileResult]:
+def _run_workers(paths: list[str], run_config: WorkerRunConfig) -> list[FileResult]:
     if not paths:
         return []
-    jobs = min(jobs, len(paths))
+    jobs = min(run_config.jobs, len(paths))
     if jobs <= 1:
-        processor = FileProcessor(config)
+        processor = FileProcessor(run_config.config, run_config.metrics)
         return [processor(path) for path in paths]
 
     ctx = _get_mp_context()
-    chunksize = max(1, len(paths) // (jobs * 2) or 1)
+    chunksize = max(1, len(paths) // (jobs * 4) or 1)
     with ProcessPoolExecutor(
         max_workers=jobs,
         mp_context=ctx,
         initializer=_init_worker,
-        initargs=(config,),
+        initargs=(run_config.config, run_config.metrics.queue if run_config.metrics else None),
     ) as executor:
         return list(executor.map(_process_path, paths, chunksize=chunksize))
 
 
-def _log_summary(
-    logger: logging.Logger,
-    results: Iterable[FileResult],
-    check_only: bool,
-    verbose: bool,
-) -> int:
+def _log_summary(logger: logging.Logger, context: SummaryContext) -> int:
     files = 0
     changed = 0
     errors = 0
     violations = 0
+    cache_hits = 0
+    policy_counts: dict[str, int] = {}
+    policy_times: dict[str, float] = {}
 
-    for result in results:
+    for result in context.results:
         files += 1
         if result.changed:
             changed += 1
         if result.error:
             errors += 1
         violations += len(result.violations)
-        if verbose and result.violations:
+        if result.cache_hit:
+            cache_hits += 1
+        for violation in result.violations:
+            policy_counts[violation.policy] = policy_counts.get(violation.policy, 0) + 1
+        if result.profile:
+            for name, ms in result.profile.items():
+                policy_times[name] = policy_times.get(name, 0.0) + float(ms)
+        if context.verbose and result.violations:
             logger.info("violations in %s (%d)", result.path, len(result.violations))
             for violation in result.violations:
                 line = f"  - {violation.policy}: {violation.message} (line {violation.line}"
@@ -154,10 +184,24 @@ def _log_summary(
     logger.info("files changed: %s", changed)
     logger.info("violations: %s", violations)
     logger.info("errors: %s", errors)
+    logger.info("cache hits: %s", cache_hits)
+    logger.info("jobs used: %s", context.jobs)
+    logger.info("elapsed: %.3fs", context.elapsed)
+    if context.elapsed > 0:
+        logger.info("throughput: %.2f files/s", files / context.elapsed)
+    if policy_counts:
+        top = sorted(policy_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        logger.info("top policies: %s", ", ".join(f"{name}={count}" for name, count in top))
+    if policy_times:
+        top_time = sorted(policy_times.items(), key=lambda item: item[1], reverse=True)[:5]
+        logger.info(
+            "top policy times (ms): %s",
+            ", ".join(f"{name}={ms:.2f}" for name, ms in top_time),
+        )
 
     if errors:
         return 2
-    if check_only and violations:
+    if context.check_only and violations:
         return 1
     return 0
 
@@ -184,22 +228,25 @@ def _list_styles(logger: logging.Logger) -> int:
 def _list_policies(logger: logging.Logger, config: AppConfig) -> int:
     registry = PolicyRegistry()
     selector = PolicySelector(config, registry)
+    factory = PolicyFactory(config)
     enabled = set(selector.resolve())
     use_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
     style = TableStyle(use_color=use_color, padding=2, max_width=120)
     printer = TablePrinter(style)
 
     rows: list[list[str]] = []
-    for name, cls in sorted(registry.items(), key=lambda item: item[0]):
+    for name in sorted(factory.available_names()):
         status = "ENABLED" if name in enabled else "DISABLED"
         if use_color:
             if status == "ENABLED":
                 status = f"\x1b[32m{status}\x1b[0m"
             else:
                 status = f"\x1b[31m{status}\x1b[0m"
-        parse_mode = str(getattr(cls, "parse_mode", "text"))
-        description = str(getattr(cls, "description", ""))
-        rows.append([name, status, parse_mode, description])
+        settings = config.policy_settings.get(name, {})
+        if not isinstance(settings, dict):
+            settings = {}
+        meta = factory.describe(name, settings)
+        rows.append([name, status, meta.get("parse_mode", "text"), meta.get("description", "")])
 
     table = TableData(
         headers=["Policy", "Status", "Parse", "Description"],
@@ -233,6 +280,7 @@ def _validate_registry(logger: logging.Logger) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    start_time = time.perf_counter()
     args = _parse_args(argv)
     if args.validate_registry and not args.list_policies and not args.list_styles:
         logger = LogSetup().configure("INFO", None)
@@ -259,9 +307,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         manager = UndoManager(io_config)
         targets = manager.collect_targets(
-            Path(config.root),
-            config.include_patterns,
-            config.exclude_patterns,
+            UndoManager.CollectTargetsArgs(
+                root=Path(config.root),
+                include=config.include_patterns,
+                exclude=config.exclude_patterns,
+            )
         )
         restored, errors = manager.restore_all(targets, delete_backup=not args.undo_no_delete)
         logger.info("restored files: %s", restored)
@@ -307,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
                         error=None,
                         backup_path=None,
                         cache_hit=True,
+                        profile=None,
+                        parse_modes=None,
                     )
                 )
 
@@ -314,7 +366,20 @@ def main(argv: list[str] | None = None) -> int:
     if jobs <= 0:
         jobs = _cpu_count()
 
-    processed = _run_workers(files_to_process, config, jobs)
+    metrics_process = MetricsProcess(
+        MetricsConfig(
+            log_level=config.log_level,
+            log_file=config.log_file,
+            output_path=f"{config.report_path}.metrics.json",
+            client_buffer_size=512,
+        )
+    )
+    metrics_client = metrics_process.start(_get_mp_context())
+    run_config = WorkerRunConfig(config=config, jobs=jobs, metrics=metrics_client)
+    try:
+        processed = _run_workers(files_to_process, run_config)
+    finally:
+        metrics_process.stop()
 
     if config.cache_enabled:
         for result in processed:
@@ -326,14 +391,26 @@ def main(argv: list[str] | None = None) -> int:
     ReportWriter(config.report_path).write(results)
     if backup_run_id:
         BackupManifest(
-            backup_dir=config.backup_dir,
-            run_id=backup_run_id,
-            root=config.root,
-            mode=config.backup_mode,
-            suffix=config.backup_suffix,
+            BackupManifestConfig(
+                backup_dir=config.backup_dir,
+                run_id=backup_run_id,
+                root=config.root,
+                mode=config.backup_mode,
+                suffix=config.backup_suffix,
+            )
         ).write(results)
 
-    return _log_summary(logger, results, config.check, args.verbose)
+    elapsed = time.perf_counter() - start_time
+    return _log_summary(
+        logger,
+        SummaryContext(
+            results=results,
+            check_only=config.check,
+            verbose=args.verbose,
+            elapsed=elapsed,
+            jobs=jobs,
+        ),
+    )
 
 
 if __name__ == "__main__":

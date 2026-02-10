@@ -18,6 +18,7 @@ enabled = [
   "include_guards",
   "naming_conventions",
   "snake_case",
+  "lua_macro_spacing",
 ]
 
 disabled = []

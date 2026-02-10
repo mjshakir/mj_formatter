@@ -1,6 +1,7 @@
 [policy]
 name = "include_guards"
 enabled = false
+type = "python"
 
 # options: pragma_once | include_guard | both
 mode = "pragma_once"

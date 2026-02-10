@@ -1,6 +1,10 @@
 [policy]
 name = "dash_comment_normalizer"
 enabled = true
+type = "lua"
+script = "styles/default/lua/dash_comment_normalizer.lua"
+function = "apply"
+sandbox = true
 
 # modes: threshold | auto
 mode = "auto"

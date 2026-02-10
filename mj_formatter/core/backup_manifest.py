@@ -18,22 +18,24 @@ class BackupEntry:
     relative_path: str | None
 
 
+@dataclass(frozen=True)
+class BackupManifestConfig:
+    backup_dir: str
+    run_id: str
+    root: str
+    mode: str
+    suffix: str
+    created_at: str | None = None
+
+
 class BackupManifest:
-    def __init__(
-        self,
-        backup_dir: str,
-        run_id: str,
-        root: str,
-        mode: str,
-        suffix: str,
-        created_at: str | None = None,
-    ) -> None:
-        self._backup_dir = Path(backup_dir)
-        self._run_id = run_id
-        self._root = Path(root).resolve()
-        self._mode = mode
-        self._suffix = suffix
-        self._created_at = created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    def __init__(self, config: BackupManifestConfig) -> None:
+        self._backup_dir = Path(config.backup_dir)
+        self._run_id = config.run_id
+        self._root = Path(config.root).resolve()
+        self._mode = config.mode
+        self._suffix = config.suffix
+        self._created_at = config.created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._run_dir = self._backup_dir / self._run_id
         self._manifest_path = self._run_dir / "backup_manifest.toml"
 
@@ -73,6 +75,8 @@ class BackupManifest:
     def _render(self, entries: list[BackupEntry]) -> str:
         lines = [
             "[meta]",
+            "format_version = 1",
+            'tool = "mj_formatter"',
             f'run_id = "{self._escape(self._run_id)}"',
             f'created_at = "{self._escape(self._created_at)}"',
             f'root = "{self._escape(str(self._root))}"',

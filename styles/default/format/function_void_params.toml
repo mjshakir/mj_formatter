@@ -1,6 +1,7 @@
 [policy]
 name = "function_void_params"
 enabled = false
+type = "python"
 
 # Require (void) for empty parameter lists
 require_void = true

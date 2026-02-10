@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass
 
 from .app_config import AppConfig
 
@@ -30,12 +31,19 @@ class ConfigLoader:
 
         return None
 
+    @dataclass(frozen=True)
+    class PolicySourceArgs:
+        args: Any
+        data: dict[str, Any]
+        base_dir: Path
+
     def _resolve_policy_sources(
         self,
-        args: Any,
-        data: dict[str, Any],
-        base_dir: Path,
+        policy_args: "ConfigLoader.PolicySourceArgs",
     ) -> tuple[Path, list[Path], Path | None]:
+        args = policy_args.args
+        data = policy_args.data
+        base_dir = policy_args.base_dir
         policies = data.get("policies", {})
         style_name = getattr(args, "style", None) or policies.get("style")
         policy_dir = policies.get("policy_dir")
@@ -132,7 +140,9 @@ class ConfigLoader:
         policies = data.get("policies", {})
 
         base_dir = Path(getattr(args, "config", None) or self._resolve_config_path(args) or Path.cwd()).resolve().parent
-        style_root, policy_files, enable_file = self._resolve_policy_sources(args, data, base_dir)
+        style_root, policy_files, enable_file = self._resolve_policy_sources(
+            ConfigLoader.PolicySourceArgs(args=args, data=data, base_dir=base_dir)
+        )
         policy_settings = self._load_policy_files(policy_files)
 
         inline_policy_settings = data.get("policy", {})
@@ -180,10 +190,23 @@ class ConfigLoader:
 
         report_path = str(getattr(args, "report", None) or formatter.get("report_path", "format_report.jsonl"))
         cache_path = str(formatter.get("cache_path", "scripts/mj_formatter/.cache/cache.bin"))
+        policy_cache_path = str(
+            formatter.get(
+                "policy_cache_path",
+                str(style_root / "cache" / "policy_cache.bin"),
+            )
+        )
 
         log_level = str(getattr(args, "log_level", None) or formatter.get("log_level", "INFO"))
         log_file = str(getattr(args, "log_file", None) or formatter.get("log_file", "")) or None
+        profile_enabled = bool(getattr(args, "profile", False) or formatter.get("profile", False))
+        sort_results = bool(formatter.get("sort_results", True))
 
+        clang_args = tuple(formatter.get("clang_args", []) or [])
+        clang_compdb_path = formatter.get("clang_compdb", None)
+        if clang_compdb_path:
+            clang_compdb_path = str(clang_compdb_path)
+        clang_args_mode = str(formatter.get("clang_args_mode", "merge")).lower()
         policies_default = str(policies.get("default", "all")).lower()
         enabled = set(policies.get("enabled", []))
         disabled = set(policies.get("disabled", []))
@@ -215,6 +238,12 @@ class ConfigLoader:
             cache_path=cache_path,
             log_level=log_level,
             log_file=log_file,
+            profile_enabled=profile_enabled,
+            policy_cache_path=policy_cache_path,
+            sort_results=sort_results,
+            clang_args=clang_args,
+            clang_compdb_path=clang_compdb_path,
+            clang_args_mode=clang_args_mode,
             policies_default=policies_default,
             policies_enabled=frozenset(enabled),
             policies_disabled=frozenset(disabled),

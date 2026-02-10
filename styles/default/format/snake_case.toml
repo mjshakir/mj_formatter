@@ -1,6 +1,7 @@
 [policy]
 name = "snake_case"
 enabled = false
+type = "python"
 
 # apply to: variables | functions | both
 apply_to = "both"

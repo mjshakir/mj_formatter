@@ -1,6 +1,7 @@
 [policy]
 name = "naming_conventions"
 enabled = true
+type = "python"
 
 # standards: mj (default), google, llvm, qt
 standard = "mj"

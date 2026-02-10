@@ -1,6 +1,7 @@
 [policy]
 name = "namespace_end_comments"
 enabled = false
+type = "python"
 
 # apply to these block types
 blocks = ["namespace", "if", "class", "struct", "while", "function"]

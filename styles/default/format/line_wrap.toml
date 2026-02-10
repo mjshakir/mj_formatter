@@ -1,4 +1,5 @@
 [policy]
 name = "line_wrap"
 enabled = false
+type = "python"
 max_length = 100

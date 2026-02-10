@@ -1,4 +1,5 @@
 [policy]
 name = "pragma_once_spacing"
 enabled = false
+type = "python"
 blank_lines_after = 1
