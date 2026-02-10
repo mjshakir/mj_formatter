@@ -7,17 +7,27 @@ __pycache__/
 *.benchmarks
 # Virtual env
 venv/
+.venv/
 
 # Caches & logs
 .cache/
 logs/
+*.log
+*.luac
+styles/**/cache/*
+!styles/**/cache/.gitkeep
 
 # Reports & backups
 reports/
 backups/
+scripts/mj_formatter/.cache/
+scripts/mj_formatter/reports/
+scripts/mj_formatter/backups/
+scripts/mj_formatter/logs/
+*.bak
 
 # Local config overrides
 .env
-
+/conda/
 # ignore build files
 mj_formatter.egg-info/
