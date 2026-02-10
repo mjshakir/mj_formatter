@@ -1,0 +1,7 @@
+[policy]
+name = "lua_macro_spacing"
+type = "lua"
+enabled = true
+script = "styles/default/lua/macro_spacing.lua"
+function = "apply"
+sandbox = true
