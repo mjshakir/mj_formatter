@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from ..core.edit import Edit
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.types import Edit
+from ..core.types import ParseContext
+from ..core.types import PolicyResult
+from ..core.types import Violation
 from .policy_base import Policy
 from dataclasses import dataclass
+import re
 
 
 class AlignAssignmentsPolicy(Policy):
@@ -13,6 +14,11 @@ class AlignAssignmentsPolicy(Policy):
     description = "Align consecutive assignments by '='"
     _operators = set("=<>!+-*/%&|^")
     _default_ignore = ("for", "if", "while", "switch")
+    _non_assignment_patterns = (
+        re.compile(r"\)\s*=\s*(?:delete|default)\s*;"),
+        re.compile(r"\)\s*=\s*0\s*;"),
+        re.compile(r"^\s*template\s*<"),
+    )
 
     def apply(self, context: ParseContext) -> PolicyResult:
         if "=" not in context.text:
@@ -110,6 +116,8 @@ class AlignAssignmentsPolicy(Policy):
 
     def _find_assignment(self, line: str, operator: str) -> int | None:
         code = line.split("//", 1)[0]
+        if self._is_non_assignment_context(code):
+            return None
         for idx in range(len(code)):
             if not code.startswith(operator, idx):
                 continue
@@ -122,6 +130,15 @@ class AlignAssignmentsPolicy(Policy):
                 continue
             return idx
         return None
+
+    def _is_non_assignment_context(self, code: str) -> bool:
+        stripped = code.strip()
+        if not stripped:
+            return False
+        for pattern in self._non_assignment_patterns:
+            if pattern.search(stripped):
+                return True
+        return False
 
     def _is_control_statement(self, line: str, ignore_in: tuple[str, ...]) -> bool:
         stripped = line.lstrip()

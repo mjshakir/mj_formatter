@@ -2,6 +2,7 @@
 name = "include_order"
 enabled = true
 type = "python"
+touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whitespace_only
 
 # Order for header files
 order_header = ["standard", "third_party", "project", "local"]

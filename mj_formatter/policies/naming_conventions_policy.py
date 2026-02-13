@@ -1,25 +1,28 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
+from enum import Enum
+from collections.abc import Mapping
 
-from ..core.edit import Edit
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.types import Edit
+from ..core.types import ParseContext
+from ..core.types import PolicyResult
+from ..core.types import Violation
 from .policy_base import Policy
-from ..utils.warn_once import warn_once
+from ..core.utilities import warn_once
+from ..core.types import SemanticContext, SemanticSymbol, SemanticReference
 
 
 @dataclass(frozen=True)
 class _Decl:
     name: str
-    kind: str  # local | member | global | function | class | struct | namespace | macro
+    kind: str  # param | local | member | global | function | class | struct | namespace | macro
     is_static: bool = False
     is_const: bool = False
     is_constexpr: bool = False
     is_consteval: bool = False
+    is_atomic: bool = False
     is_pointer: bool = False
     smart_ptr: str | None = None  # shared | unique | weak
     is_template_type: bool = False
@@ -29,123 +32,193 @@ class _Decl:
 
 
 @dataclass(frozen=True)
-class _FuncMatch:
-    name: str
-    scope_name: str | None = None
+class _SemanticRenameDecision:
+    usr: str
+    old_name: str
+    new_name: str
+    line: int
+    risk: str
+    confidence: float
+    reference_count: int
+    parser_consensus: float
+    scope_purity: float
+
+
+class ParserConsensusMode(str, Enum):
+    OFF = "off"
+    ADVISORY = "advisory"
+    STRICT = "strict"
+
+    @classmethod
+    def from_config(cls, value: object) -> "ParserConsensusMode":
+        if isinstance(value, ParserConsensusMode):
+            return value
+        raw = str(value or cls.ADVISORY.value).strip().lower()
+        for item in cls:
+            if item.value == raw:
+                return item
+        return cls.ADVISORY
 
 
 class NamingConventionsPolicy(Policy):
     name = "naming_conventions"
     description = "Enforce naming conventions with prefixes"
-    parse_mode = "text"
-
-    _control_keywords = {"if", "for", "while", "switch", "catch"}
-    _skip_name_keywords = {
-        "if",
-        "for",
-        "while",
-        "switch",
-        "catch",
-        "return",
-        "sizeof",
-        "alignof",
-        "operator",
-    }
-    _builtin_types = {
-        "void",
-        "bool",
-        "char",
-        "short",
-        "int",
-        "long",
-        "float",
-        "double",
-        "signed",
-        "unsigned",
-        "size_t",
-        "ssize_t",
-        "auto",
-    }
-    _param_scope_re = re.compile(
-        r"^\s*(?:[\w:<>,\s*&]+)\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)\s*\(([^)]*)\)\s*(const)?\s*(?:noexcept\s*)?(?:\:\s*[^\\{]*)?\{",
-        re.MULTILINE,
-    )
-    _var_decl_re = re.compile(
-        r"""
-            ^\s*
-            (?P<qualifiers>(?:consteval|constexpr|const|static)\s+)*
-            (?P<type>[\w:<>,*&][\w:<>,\s*&]*?)\s+
-            (?P<name>[A-Za-z_]\w*)
-            \s*(?:=|;|,|\[|\(|$)
-            """,
-        re.VERBOSE,
-    )
-    _signature_re = re.compile(
-        r"^\s*[\w:<>,\s*&]+\s+[A-Za-z_]\w*\s*\(.*\)\s*(const)?\s*[;{]\s*$"
-    )
-    _word_re = re.compile(r"\b[A-Za-z_]\w*\b")
-    _template_decl_re = re.compile(r"template\s*<([^>]+)>", re.DOTALL)
-    _template_param_re = re.compile(r"\b(?:typename|class)\s+([A-Za-z_]\w*)")
-    _std_function_re = re.compile(r"\bstd::function\s*<", re.IGNORECASE)
-
+    parse_mode = "clang"
+    requires_code_context = True
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)
         self._standard = str(self._config.get("standard", "mj")).lower()
         self._standards = self._build_standards()
         self._rules = self._standards.get(self._standard, self._standards["mj"])
+        self._skip_name_keywords = self._config_set("skip_name_keywords") | self._config_set("control_keywords")
+        self._reserved_identifiers = self._config_set("reserved_identifiers")
+        self._builtin_types = self._config_set("builtin_types")
+        self._use_semantic_rename = bool(self._config.get("use_semantic_rename", True))
+        self._min_confidence = float(self._config.get("min_confidence", 0.75))
+        self._max_risk = str(self._config.get("max_risk", "medium")).lower()
+        self._risk_rank = {"low": 0, "medium": 1, "high": 2}
+        self._max_risk_rank = self._risk_rank.get(self._max_risk, 1)
+        self._parser_consensus_mode = ParserConsensusMode.from_config(
+            self._config.get("parser_consensus_mode", ParserConsensusMode.ADVISORY.value)
+        )
+        self._parser_consensus_min = float(self._config.get("parser_consensus_min", 0.70))
+        self._strict_local_scope = bool(self._config.get("strict_local_scope", True))
+        self._prefer_clang_semantic = bool(self._config.get("prefer_clang_semantic", True))
         self._use_tree_sitter = bool(self._config.get("use_tree_sitter", True))
-        if self._use_tree_sitter:
+        if self._prefer_clang_semantic:
+            self.parse_mode = "clang"
+        elif self._use_tree_sitter:
             self.parse_mode = "tree_sitter"
+        else:
+            # Keep clang as the primary backend when parser preference is disabled.
+            self.parse_mode = "clang"
 
     def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
         if not text:
             return PolicyResult(text=text, violations=[], edits=[])
 
-        code_mask = self._code_mask(text)
-        code_text = self._masked_text(text, code_mask)
-        lines = text.splitlines(keepends=True)
+        semantic_context = None
+        semantic_file_counts: dict[str, int] = {}
+        semantic_consensus_scores: dict[str, float] = {}
+        semantic_reference_consensus_scores: dict[str, float] = {}
+        semantic_declaration_consensus_scores: dict[str, float] = {}
+        semantic_reference_counts: dict[str, int] = {}
+        semantic_scope_purity: dict[str, float] = {}
+        semantic_project_reference_counts: dict[str, int] = {}
+        semantic_project_consensus_scores: dict[str, float] = {}
+        semantic_refs_by_usr: Mapping[str, tuple[SemanticReference, ...]] = {}
+        semantic_non_decl_ref_counts: Mapping[str, int] = {}
+        semantic_class_names: tuple[str, ...] = ()
+        if context.code_context is not None:
+            semantic_context = getattr(context.code_context, "semantic_context", None)
+            semantic_file_counts = getattr(context.code_context, "semantic_file_counts", {}) or {}
+            semantic_consensus_scores = getattr(context.code_context, "semantic_consensus_scores", {}) or {}
+            semantic_reference_consensus_scores = (
+                getattr(context.code_context, "semantic_reference_consensus_scores", {}) or {}
+            )
+            semantic_declaration_consensus_scores = (
+                getattr(context.code_context, "semantic_declaration_consensus_scores", {}) or {}
+            )
+            semantic_reference_counts = getattr(context.code_context, "semantic_reference_counts", {}) or {}
+            semantic_scope_purity = getattr(context.code_context, "semantic_scope_purity", {}) or {}
+            semantic_project_reference_counts = (
+                getattr(context.code_context, "semantic_project_reference_counts", {}) or {}
+            )
+            semantic_project_consensus_scores = (
+                getattr(context.code_context, "semantic_project_consensus_scores", {}) or {}
+            )
+            semantic_refs_by_usr = getattr(context.code_context, "semantic_refs_by_usr", {}) or {}
+            semantic_non_decl_ref_counts = (
+                getattr(context.code_context, "semantic_non_declaration_ref_counts", {}) or {}
+            )
+            semantic_class_names = tuple(getattr(context.code_context, "semantic_class_names", ()) or ())
 
-        template_params = self._collect_template_params(code_text)
         tree = context.tree_sitter_tree
-        use_tree = (
-            self._use_tree_sitter
-            and tree is not None
-            and getattr(getattr(tree, "root_node", None), "has_error", False) is False
-        )
-        if use_tree and tree is not None:
+        use_tree = self._use_tree_sitter and tree is not None
+
+        decls: list[_Decl] = []
+        semantic_decls: list[_Decl] = []
+        tree_decls: list[_Decl] = []
+        if isinstance(semantic_context, SemanticContext):
+            semantic_decls = self._collect_declarations_semantic(semantic_context)
+        if use_tree:
             tree_decls = self._collect_declarations_tree_sitter(
                 NamingConventionsPolicy.TreeDeclArgs(
                     text=text,
                     tree=tree,
-                    template_params=template_params,
                 )
             )
-            code_lines = code_text.splitlines(keepends=True)
-            regex_decls = self._collect_declarations(
-                NamingConventionsPolicy.CollectDeclsArgs(
-                    code_lines=code_lines,
-                    template_params=template_params,
-                )
-            )
-            tree_names = {decl.name for decl in tree_decls}
-            decls = tree_decls + [decl for decl in regex_decls if decl.name not in tree_names]
+        if self._prefer_clang_semantic and semantic_decls and tree_decls:
+            semantic_names = {decl.name for decl in semantic_decls}
+            tree_decls = [
+                decl
+                for decl in tree_decls
+                if decl.kind in {"macro", "namespace", "class", "struct"} or decl.name in semantic_names
+            ]
+
+        if self._prefer_clang_semantic:
+            decls.extend(semantic_decls)
+            decls.extend(tree_decls)
         else:
-            code_lines = code_text.splitlines(keepends=True)
-            decls = self._collect_declarations(
-                NamingConventionsPolicy.CollectDeclsArgs(
-                    code_lines=code_lines,
-                    template_params=template_params,
+            decls.extend(tree_decls)
+            decls.extend(semantic_decls)
+
+        if not decls:
+            if not use_tree and not isinstance(semantic_context, SemanticContext):
+                warn_once(
+                    "naming_conventions_parser_unavailable",
+                    "naming_conventions: parser context unavailable, skipping policy (enable clang and/or tree-sitter-languages)",
+                )
+            return PolicyResult(text=text, violations=[], edits=[])
+
+        decls = self._dedupe_decls(decls)
+        decls = [decl for decl in decls if self._is_identifier_name(decl.name)]
+        rename_map, conflicts = self._build_rename_map(decls)
+        has_semantic = isinstance(semantic_context, SemanticContext)
+        if not has_semantic and rename_map:
+            # Name-only rename maps are unsafe for variable symbols when semantic refs
+            # are unavailable (param/local/member collisions by identifier text).
+            variable_names = {decl.name for decl in decls if decl.kind in {"param", "local", "member", "global"}}
+            dropped = 0
+            for name in list(rename_map.keys()):
+                if name in variable_names:
+                    rename_map.pop(name, None)
+                    dropped += 1
+            if dropped > 0:
+                warn_once(
+                    "naming_conventions_textual_variable_rename_disabled",
+                    "naming_conventions: semantic context unavailable; skipped textual variable renames for safety",
+                )
+
+        if not rename_map and not conflicts and not (
+            self._use_semantic_rename and isinstance(semantic_context, SemanticContext)
+        ):
+            return PolicyResult(text=text, violations=[], edits=[])
+
+        semantic_decisions: list[_SemanticRenameDecision] = []
+        semantic_skips: list[str] = []
+        used_semantic = self._use_semantic_rename and isinstance(semantic_context, SemanticContext)
+        if used_semantic:
+            updated, edits, semantic_decisions, semantic_skips = self._apply_semantic_renames(
+                NamingConventionsPolicy.SemanticRenameArgs(
+                    text=text,
+                    rename_map=rename_map,
+                    semantic=semantic_context,
+                    file_counts=semantic_file_counts,
+                    consensus_scores=semantic_consensus_scores,
+                    reference_consensus_scores=semantic_reference_consensus_scores,
+                    declaration_consensus_scores=semantic_declaration_consensus_scores,
+                    reference_counts=semantic_reference_counts,
+                    scope_purity=semantic_scope_purity,
+                    project_reference_counts=semantic_project_reference_counts,
+                    project_consensus_scores=semantic_project_consensus_scores,
+                    refs_by_usr=semantic_refs_by_usr,
+                    non_declaration_ref_counts=semantic_non_decl_ref_counts,
+                    class_names=semantic_class_names,
                 )
             )
-        if not decls:
-            return PolicyResult(text=text, violations=[], edits=[])
-
-        rename_map, conflicts = self._build_rename_map(decls)
-        if not rename_map and not conflicts:
-            return PolicyResult(text=text, violations=[], edits=[])
-
-        if use_tree and context.tree_sitter_tree is not None:
+        elif use_tree and context.tree_sitter_tree is not None:
             updated, edits = self._apply_renames_tree_sitter(
                 text,
                 rename_map,
@@ -153,28 +226,47 @@ class NamingConventionsPolicy(Policy):
             )
         else:
             warn_once(
-                "naming_conventions_regex_fallback",
-                "naming_conventions: regex fallback is less accurate; install tree-sitter-languages for better results",
+                "naming_conventions_no_tree_for_textual_rename",
+                "naming_conventions: semantic rename disabled and tree-sitter unavailable; skipping rename pass",
             )
-            updated, edits = self._apply_renames(
-                NamingConventionsPolicy.ApplyRenamesArgs(
-                    lines=lines,
-                    code_mask=code_mask,
-                    rename_map=rename_map,
-                )
-            )
+            updated, edits = text, []
 
         violations: list[Violation] = []
-        for decl in decls:
-            if decl.name in rename_map:
+        if used_semantic:
+            for decision in semantic_decisions:
                 violations.append(
                     Violation(
                         policy=self.name,
-                        message=f"Rename {decl.kind} '{decl.name}' -> '{rename_map[decl.name]}'",
-                        line=decl.line,
-                        column=1,
+                        message=(
+                            f"Semantic rename '{decision.old_name}' -> '{decision.new_name}' "
+                            f"[risk={decision.risk} confidence={decision.confidence:.2f} refs={decision.reference_count} "
+                            f"consensus={decision.parser_consensus:.2f} scope_purity={decision.scope_purity:.2f}]"
+                        ),
+                            line=decision.line,
+                            column=1,
+                        )
                     )
+        else:
+            for decl in decls:
+                if decl.name in rename_map:
+                    violations.append(
+                        Violation(
+                            policy=self.name,
+                            message=f"Rename {decl.kind} '{decl.name}' -> '{rename_map[decl.name]}'",
+                            line=decl.line,
+                            column=1,
+                        )
+                    )
+
+        for message in semantic_skips:
+            violations.append(
+                Violation(
+                    policy=self.name,
+                    message=message,
+                    line=1,
+                    column=1,
                 )
+            )
         for name, reason in conflicts.items():
             violations.append(
                 Violation(
@@ -190,199 +282,61 @@ class NamingConventionsPolicy(Policy):
 
         return PolicyResult(text=updated, violations=violations, edits=edits)
 
-    def _build_standards(self) -> dict[str, dict[str, object]]:
-        return {
-            "mj": {
-                "local_prefix": "_",
-                "member_prefix": "m_",
-                "global_prefix": "g_",
-                "static_prefix": "s_",
-                "const_prefix": "c_",
-                "pointer_prefix": "p_",
-                "shared_ptr_prefix": "sp_",
-                "unique_ptr_prefix": "up_",
-                "weak_ptr_prefix": "wp_",
-                "constexpr_prefix_upper": "C_",
-                "static_prefix_upper": "S_",
-                "function_case": "snake",
-                "type_case": "camel",
-                "namespace_case": "camel",
-                "macro_case": "upper_snake",
-                "constexpr_case": "upper_snake",
-            },
-            "google": {
-                "local_prefix": "",
-                "member_prefix": "",
-                "global_prefix": "g_",
-                "static_prefix": "",
-                "const_prefix": "",
-                "pointer_prefix": "",
-                "shared_ptr_prefix": "",
-                "unique_ptr_prefix": "",
-                "weak_ptr_prefix": "",
-                "constexpr_prefix_upper": "k",
-                "static_prefix_upper": "",
-                "function_case": "camel",
-                "type_case": "camel",
-                "namespace_case": "lower",
-                "macro_case": "upper_snake",
-                "constexpr_case": "camel",
-            },
-            "llvm": {
-                "local_prefix": "",
-                "member_prefix": "m",
-                "global_prefix": "",
-                "static_prefix": "",
-                "const_prefix": "",
-                "pointer_prefix": "",
-                "shared_ptr_prefix": "",
-                "unique_ptr_prefix": "",
-                "weak_ptr_prefix": "",
-                "constexpr_prefix_upper": "k",
-                "static_prefix_upper": "",
-                "function_case": "camel",
-                "type_case": "camel",
-                "namespace_case": "lower",
-                "macro_case": "upper_snake",
-                "constexpr_case": "camel",
-            },
-            "qt": {
-                "local_prefix": "",
-                "member_prefix": "m_",
-                "global_prefix": "",
-                "static_prefix": "",
-                "const_prefix": "",
-                "pointer_prefix": "",
-                "shared_ptr_prefix": "",
-                "unique_ptr_prefix": "",
-                "weak_ptr_prefix": "",
-                "constexpr_prefix_upper": "k",
-                "static_prefix_upper": "",
-                "function_case": "camel",
-                "type_case": "camel",
-                "namespace_case": "camel",
-                "macro_case": "upper_snake",
-                "constexpr_case": "camel",
-            },
-        }
+    def _config_set(self, key: str) -> set[str]:
+        value = self._config.get(key, None)
+        if value is None:
+            return set()
+        if isinstance(value, (list, tuple, set)):
+            result = {str(item).strip() for item in value if str(item).strip()}
+            return result
+        return set()
 
-    @dataclass(frozen=True)
-    class CollectDeclsArgs:
-        code_lines: list[str]
-        template_params: set[str]
+    def _build_standards(self) -> dict[str, dict[str, object]]:
+        config_standards = self._config.get("standards")
+        standards: dict[str, dict[str, object]] = {}
+        if isinstance(config_standards, Mapping):
+            for raw_name, raw_rules in config_standards.items():
+                if not isinstance(raw_rules, Mapping):
+                    continue
+                name = str(raw_name).strip().lower()
+                if not name:
+                    continue
+                standards[name] = {str(key): value for key, value in raw_rules.items()}
+
+        if not standards:
+            standards["mj"] = self._fallback_standard()
+            return standards
+
+        if "mj" not in standards:
+            first = next(iter(standards.values()))
+            standards["mj"] = dict(first)
+        return standards
+
+    def _fallback_standard(self) -> dict[str, object]:
+        return {
+            "local_prefix": "_",
+            "member_prefix": "m_",
+            "global_prefix": "g_",
+            "static_prefix": "s_",
+            "const_prefix": "c_",
+            "atomic_prefix": "a_",
+            "pointer_prefix": "p_",
+            "shared_ptr_prefix": "sp_",
+            "unique_ptr_prefix": "up_",
+            "weak_ptr_prefix": "wp_",
+            "constexpr_prefix_upper": "C_",
+            "static_prefix_upper": "S_",
+            "function_case": "snake",
+            "type_case": "camel",
+            "namespace_case": "camel",
+            "macro_case": "upper_snake",
+            "constexpr_case": "upper_snake",
+        }
 
     @dataclass(frozen=True)
     class TreeDeclArgs:
         text: str
         tree: Any
-        template_params: set[str]
-
-    def _collect_declarations(self, args: "NamingConventionsPolicy.CollectDeclsArgs") -> list[_Decl]:
-        decls: list[_Decl] = []
-        text = "".join(args.code_lines)
-        for match in self._param_scope_re.finditer(text):
-            params = match.group(2)
-            line_no = text.count("\n", 0, match.start()) + 1
-            decls.extend(
-                self._param_decls(
-                    NamingConventionsPolicy.ParamDeclArgs(
-                        params=params,
-                        template_params=args.template_params,
-                        line_no=line_no,
-                    )
-                )
-            )
-        brace_depth = 0
-        pending_class: str | None = None
-        pending_namespace: str | None = None
-        pending_function: str | None = None
-        class_stack: list[tuple[str, int]] = []
-        function_stack: list[int] = []
-        template_depth = 0
-
-        for idx, line in enumerate(args.code_lines):
-            line_no = idx + 1
-            stripped = line.strip()
-            if stripped.startswith("#define"):
-                macro = stripped.split()
-                if len(macro) >= 2:
-                    decls.append(_Decl(name=macro[1], kind="macro", line=line_no))
-                continue
-
-            class_name = self._extract_class_name(line)
-            if class_name:
-                kind = "class" if "class" in line else "struct"
-                name = class_name
-                decls.append(_Decl(name=name, kind=kind, line=line_no))
-                pending_class = name
-
-            ns_match = re.search(r"\bnamespace\s+([A-Za-z_]\w*)", line)
-            if ns_match:
-                name = ns_match.group(1)
-                decls.append(_Decl(name=name, kind="namespace", line=line_no))
-                pending_namespace = name
-
-            func_match = self._match_function(line)
-            if func_match:
-                pending_function = func_match.name
-                decls.append(
-                    _Decl(
-                        name=func_match.name,
-                        kind="function",
-                        scope_name=func_match.scope_name,
-                        line=line_no,
-                    )
-                )
-
-            prev_template_depth = template_depth
-            template_depth = self._update_template_depth(line, template_depth)
-            if not self._in_template_params(line, prev_template_depth):
-                var_decl = self._match_variable_decl(
-                    NamingConventionsPolicy.MatchVarArgs(
-                        line=line,
-                        template_params=args.template_params,
-                    )
-                )
-                if var_decl:
-                    decl = var_decl
-                    decl = _Decl(
-                        name=decl.name,
-                        kind=self._scope_kind(class_stack, function_stack),
-                        is_static=decl.is_static,
-                        is_const=decl.is_const,
-                        is_constexpr=decl.is_constexpr,
-                        is_consteval=decl.is_consteval,
-                        is_pointer=decl.is_pointer,
-                        smart_ptr=decl.smart_ptr,
-                        is_template_type=decl.is_template_type,
-                        is_std_function=decl.is_std_function,
-                        scope_name=class_stack[-1][0] if class_stack else None,
-                        line=line_no,
-                    )
-                    decls.append(decl)
-
-            opens = line.count("{")
-            closes = line.count("}")
-
-            for _ in range(opens):
-                brace_depth += 1
-                if pending_class:
-                    class_stack.append((pending_class, brace_depth))
-                    pending_class = None
-                elif pending_namespace:
-                    pending_namespace = None
-                elif pending_function:
-                    function_stack.append(brace_depth)
-                    pending_function = None
-
-            for _ in range(closes):
-                if class_stack and class_stack[-1][1] == brace_depth:
-                    class_stack.pop()
-                if function_stack and function_stack[-1] == brace_depth:
-                    function_stack.pop()
-                brace_depth = max(0, brace_depth - 1)
-
-        return decls
 
     def _collect_declarations_tree_sitter(self, args: "NamingConventionsPolicy.TreeDeclArgs") -> list[_Decl]:
         text = args.text
@@ -396,12 +350,10 @@ class NamingConventionsPolicy(Policy):
             return decls
 
         class_names: set[str] = set()
+        template_param_names = self._collect_template_params_from_tree(root, data)
 
         def node_text(node: Any) -> str:
             return data[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
-
-        def is_macro_like(name: str) -> bool:
-            return name.isupper() and "_" in name
 
         def extract_identifier(node: Any, allow_type: bool = True) -> str | None:
             stack = [node]
@@ -415,6 +367,84 @@ class NamingConventionsPolicy(Policy):
                     continue
                 stack.extend(reversed(current.children))
             return None
+
+        def looks_like_macro_name(name: str) -> bool:
+            return bool(name) and name.isupper() and "_" in name
+
+        def extract_rightmost_identifier(node: Any) -> Any | None:
+            best = None
+            stack = [node]
+            while stack:
+                current = stack.pop()
+                if current.type in {"identifier", "field_identifier"}:
+                    if best is None or current.start_byte > best.start_byte:
+                        best = current
+                if current.type in {"parameter_list", "template_parameter_list", "template_parameter"}:
+                    continue
+                stack.extend(reversed(current.children))
+            return best
+
+        def contains_descendant_type(node: Any, types: set[str]) -> bool:
+            stack_local = [node]
+            while stack_local:
+                current = stack_local.pop()
+                if current.type in types:
+                    return True
+                stack_local.extend(reversed(current.children))
+            return False
+
+        def unwrap_declarator_name_node(node: Any) -> Any | None:
+            current = node
+            while current is not None:
+                if current.type in {"identifier", "field_identifier"}:
+                    return current
+                if current.type in {"qualified_identifier", "scoped_identifier"}:
+                    return extract_rightmost_identifier(current)
+                next_decl = current.child_by_field_name("declarator")
+                if next_decl is not None and next_decl is not current:
+                    current = next_decl
+                    continue
+                child_decl = None
+                for child in current.children:
+                    if child.type in {
+                        "pointer_declarator",
+                        "reference_declarator",
+                        "array_declarator",
+                        "parenthesized_declarator",
+                        "qualified_identifier",
+                        "scoped_identifier",
+                        "identifier",
+                        "field_identifier",
+                    }:
+                        child_decl = child
+                        break
+                current = child_decl
+            return None
+
+        def declaration_name_nodes(node: Any) -> list[tuple[Any, Any]]:
+            pairs: list[tuple[Any, Any]] = []
+            if node.type == "declaration":
+                for child in node.children:
+                    if child.type == "init_declarator":
+                        if contains_descendant_type(child, {"function_declarator"}):
+                            continue
+                        name_node = unwrap_declarator_name_node(child)
+                        if name_node is not None:
+                            pairs.append((name_node, node))
+                    elif child.type in {"identifier", "field_identifier", "pointer_declarator", "reference_declarator"}:
+                        if contains_descendant_type(child, {"function_declarator"}):
+                            continue
+                        name_node = unwrap_declarator_name_node(child)
+                        if name_node is not None:
+                            pairs.append((name_node, node))
+                return pairs
+            if node.type == "field_declaration":
+                if contains_descendant_type(node, {"function_declarator"}):
+                    return pairs
+                name_node = unwrap_declarator_name_node(node)
+                if name_node is not None:
+                    pairs.append((name_node, node))
+            return pairs
 
         def decl_prefix_text(node: Any, name_node: Any) -> str:
             return data[node.start_byte:name_node.start_byte].decode("utf-8", errors="ignore")
@@ -449,21 +479,16 @@ class NamingConventionsPolicy(Policy):
                     "template_parameter",
                     "template_type_parameter",
                     "type_parameter_declaration",
-                    "parameter_declaration",
-                    "optional_parameter_declaration",
                     "template_parameter_list",
                 },
             )
 
         def template_type_from_prefix(prefix: str) -> bool:
-            tokens = re.findall(r"[A-Za-z_]\w*", prefix)
-            if not tokens:
-                return False
-            return tokens[-1] in args.template_params
+            token = self._last_identifier_token(prefix)
+            return bool(token) and token in template_param_names
 
         def extract_qualified_parts(node: Any) -> list[str]:
-            text = node_text(node)
-            return re.findall(r"~?[A-Za-z_]\w*", text)
+            return self._identifier_tokens(node_text(node), include_tilde=True)
 
         stack = [root]
         while stack:
@@ -472,19 +497,21 @@ class NamingConventionsPolicy(Policy):
 
             if node_type in {"class_specifier", "struct_specifier"}:
                 name = None
+                has_body = False
                 for child in node.children:
                     if child.type == "type_identifier":
                         name = node_text(child)
-                        break
+                    if child.type == "field_declaration_list":
+                        has_body = True
                 if name is None:
                     name = extract_identifier(node, allow_type=True)
-                if not name or is_macro_like(name):
+                if not name or looks_like_macro_name(name) or not has_body:
                     line_no = node.start_point[0]
                     if 0 <= line_no < len(lines):
                         fallback = self._extract_class_name(lines[line_no])
-                        if fallback:
+                        if fallback and not looks_like_macro_name(fallback):
                             name = fallback
-                if name and not is_macro_like(name):
+                if name and not looks_like_macro_name(name):
                     class_names.add(name)
                     decls.append(
                         _Decl(
@@ -496,7 +523,7 @@ class NamingConventionsPolicy(Policy):
 
             elif node_type == "namespace_definition":
                 name = extract_identifier(node, allow_type=False)
-                if name and not is_macro_like(name):
+                if name:
                     decls.append(_Decl(name=name, kind="namespace", line=node.start_point[0] + 1))
 
             elif node_type in {"preproc_def", "preproc_function_def"}:
@@ -518,8 +545,11 @@ class NamingConventionsPolicy(Policy):
                             func_decl = child
                             break
                 if func_decl is not None:
-                    name = extract_identifier(func_decl, allow_type=False)
-                    if name and not is_macro_like(name):
+                    name_node = extract_rightmost_identifier(func_decl)
+                    name = node_text(name_node) if name_node is not None else None
+                    if name is None:
+                        name = extract_identifier(func_decl, allow_type=False)
+                    if name:
                         scope_name = None
                         for child in func_decl.children:
                             if child.type in {"qualified_identifier", "scoped_identifier"}:
@@ -549,12 +579,13 @@ class NamingConventionsPolicy(Policy):
                     stack_name.extend(reversed(current.children))
                 if name_node is not None and not is_template_param_node(name_node):
                     name = node_text(name_node)
-                    if name and not is_macro_like(name):
+                    if name:
                         prefix = decl_prefix_text(node, name_node)
                         is_constexpr = "constexpr" in prefix
                         is_consteval = "consteval" in prefix
                         is_static = "static" in prefix
                         is_const = "const" in prefix and not is_constexpr and not is_consteval
+                        is_atomic = self._is_atomic_type(prefix)
                         is_ptr = is_pointer_decl(name_node)
                         smart_ptr = None
                         if "shared_ptr" in prefix:
@@ -568,11 +599,12 @@ class NamingConventionsPolicy(Policy):
                         decls.append(
                             _Decl(
                                 name=name,
-                                kind="local",
+                                kind="param",
                                 is_static=is_static,
                                 is_const=is_const,
                                 is_constexpr=is_constexpr,
                                 is_consteval=is_consteval,
+                                is_atomic=is_atomic,
                                 is_pointer=is_ptr,
                                 smart_ptr=smart_ptr,
                                 is_template_type=is_template_type,
@@ -582,187 +614,52 @@ class NamingConventionsPolicy(Policy):
                             )
                         )
 
-            if node_type in {"init_declarator", "field_declaration", "declaration"}:
-                if node_type == "init_declarator":
-                    decl_node = node.parent or node
-                else:
-                    decl_node = node
-                if any(child.type == "function_declarator" for child in node.children):
-                    stack.extend(reversed(node.children))
-                    continue
-                if has_ancestor(decl_node, {"function_declarator"}):
-                    stack.extend(reversed(node.children))
-                    continue
-                name_node = None
-                name_node = None
-                stack_name = [node]
-                while stack_name:
-                    current = stack_name.pop()
-                    if current.type in {"identifier", "field_identifier"}:
-                        name_node = current
-                        break
-                    if current.type in {"parameter_list", "template_parameter_list", "template_parameter"}:
+            if node_type in {"field_declaration", "declaration"}:
+                for name_node, decl_node in declaration_name_nodes(node):
+                    if is_template_param_node(name_node):
                         continue
-                    stack_name.extend(reversed(current.children))
-                if name_node is not None and not is_template_param_node(name_node):
                     if has_ancestor(name_node, {"enumerator", "enum_specifier"}):
-                        stack.extend(reversed(node.children))
                         continue
                     name = node_text(name_node)
-                    if name and not is_macro_like(name):
-                        prefix = decl_prefix_text(decl_node, name_node)
-                        is_constexpr = "constexpr" in prefix
-                        is_consteval = "consteval" in prefix
-                        is_static = "static" in prefix
-                        is_const = "const" in prefix and not is_constexpr and not is_consteval
-                        is_ptr = is_pointer_decl(name_node)
-                        smart_ptr = None
-                        if "shared_ptr" in prefix:
-                            smart_ptr = "shared"
-                        elif "unique_ptr" in prefix:
-                            smart_ptr = "unique"
-                        elif "weak_ptr" in prefix:
-                            smart_ptr = "weak"
-                        is_std_function = "std::function" in prefix
-                        is_template_type = template_type_from_prefix(prefix)
-                        decls.append(
-                            _Decl(
-                                name=name,
-                                kind=scope_kind(name_node),
-                                is_static=is_static,
-                                is_const=is_const,
-                                is_constexpr=is_constexpr,
-                                is_consteval=is_consteval,
-                                is_pointer=is_ptr,
-                                smart_ptr=smart_ptr,
-                                is_template_type=is_template_type,
-                                is_std_function=is_std_function,
-                                scope_name=None,
-                                line=name_node.start_point[0] + 1,
-                            )
+                    if not name:
+                        continue
+                    prefix = decl_prefix_text(decl_node, name_node)
+                    is_constexpr = "constexpr" in prefix
+                    is_consteval = "consteval" in prefix
+                    is_static = "static" in prefix
+                    is_const = "const" in prefix and not is_constexpr and not is_consteval
+                    is_atomic = self._is_atomic_type(prefix)
+                    is_ptr = is_pointer_decl(name_node)
+                    smart_ptr = None
+                    if "shared_ptr" in prefix:
+                        smart_ptr = "shared"
+                    elif "unique_ptr" in prefix:
+                        smart_ptr = "unique"
+                    elif "weak_ptr" in prefix:
+                        smart_ptr = "weak"
+                    is_std_function = "std::function" in prefix
+                    is_template_type = template_type_from_prefix(prefix)
+                    decls.append(
+                        _Decl(
+                            name=name,
+                            kind=scope_kind(name_node),
+                            is_static=is_static,
+                            is_const=is_const,
+                            is_constexpr=is_constexpr,
+                            is_consteval=is_consteval,
+                            is_atomic=is_atomic,
+                            is_pointer=is_ptr,
+                            smart_ptr=smart_ptr,
+                            is_template_type=is_template_type,
+                            is_std_function=is_std_function,
+                            scope_name=None,
+                            line=name_node.start_point[0] + 1,
                         )
+                    )
 
             stack.extend(reversed(node.children))
 
         return decls
-
-    def _match_function(self, line: str) -> _FuncMatch | None:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            return None
-        if any(stripped.startswith(k + " ") for k in self._control_keywords):
-            return None
-        if "::~" in line:
-            return None
-        match = re.search(r"\b([A-Za-z_]\w*(?:::\w+)*)\s*\(", line)
-        if not match:
-            return None
-        prefix = line[: match.start()]
-        if not prefix.strip():
-            return None
-        if "=" in prefix or "." in prefix or "->" in prefix:
-            return None
-        if "return" in prefix:
-            return None
-        full = match.group(1)
-        parts = full.split("::")
-        if len(parts) >= 2:
-            last = parts[-1]
-            prev = parts[-2]
-            if last == prev or last == f"~{prev}":
-                return None
-        name = parts[-1]
-        if name in self._skip_name_keywords:
-            return None
-        scope_name = parts[-2] if len(parts) >= 2 else None
-        return _FuncMatch(name=name, scope_name=scope_name)
-
-    @dataclass(frozen=True)
-    class MatchVarArgs:
-        line: str
-        template_params: set[str]
-
-    def _match_variable_decl(self, args: "NamingConventionsPolicy.MatchVarArgs") -> _Decl | None:
-        line = args.line
-        stripped = line.lstrip()
-        if stripped.startswith("template"):
-            return None
-        if re.match(r"^[A-Za-z_]\w*(?:::\w+)?\s*\(", stripped):
-            return None
-        if re.match(r"^~[A-Za-z_]\w*\s*\(", stripped):
-            return None
-        if stripped.startswith(("return ", "return(", "throw ", "throw(", "case ", "break", "continue", "goto ")):
-            return None
-        if stripped.startswith("static_assert"):
-            return None
-        if "operator" in line and "(" in line:
-            return None
-        for keyword in self._control_keywords:
-            if stripped.startswith(keyword + " ") or stripped.startswith(keyword + "("):
-                return None
-        if "(" in line and ")" in line and ";" not in line and "{" in line:
-            return None
-        if re.search(r"\b(class|struct|namespace|enum|using)\b", line):
-            return None
-        if re.search(r"\btypedef\b", line):
-            return None
-
-        if "=" not in line and ";" not in line:
-            return None
-
-        type_and_name = self._var_decl_re.search(line)
-        if not type_and_name:
-            return None
-
-        name_end = type_and_name.end("name")
-        tail = line[name_end:]
-        paren_idx = tail.find("(")
-        eq_idx = tail.find("=")
-        if paren_idx != -1 and (eq_idx == -1 or paren_idx < eq_idx):
-            return None
-
-        typ = type_and_name.group("type")
-        name = type_and_name.group("name")
-
-        prefix = line[: type_and_name.start("name")]
-        is_static = re.search(r"\bstatic\b", prefix) is not None
-        is_constexpr = re.search(r"\bconstexpr\b", prefix) is not None
-        is_consteval = re.search(r"\bconsteval\b", prefix) is not None
-        is_const = re.search(r"\bconst\b", prefix) is not None and not is_constexpr and not is_consteval
-        is_pointer = "*" in typ
-
-        smart_ptr = None
-        if "shared_ptr" in typ:
-            smart_ptr = "shared"
-        elif "unique_ptr" in typ:
-            smart_ptr = "unique"
-        elif "weak_ptr" in typ:
-            smart_ptr = "weak"
-        is_std_function = bool(self._std_function_re.search(typ))
-        is_template_type = False
-        type_token = typ.strip().split()[-1] if typ.strip() else ""
-        if type_token in args.template_params:
-            is_template_type = True
-
-        return _Decl(
-            name=name,
-            kind="var",
-            is_static=is_static,
-            is_const=is_const,
-            is_constexpr=is_constexpr,
-            is_consteval=is_consteval,
-            is_pointer=is_pointer,
-            smart_ptr=smart_ptr,
-            is_template_type=is_template_type,
-            is_std_function=is_std_function,
-        )
-
-    def _scope_kind(self, class_stack: list[tuple[str, int]], function_stack: list[int]) -> str:
-        if function_stack:
-            return "local"
-        if class_stack:
-            return "member"
-        return "global"
 
     def _build_rename_map(self, decls: list[_Decl]) -> tuple[dict[str, str], dict[str, str]]:
         rename: dict[str, str] = {}
@@ -771,6 +668,12 @@ class NamingConventionsPolicy(Policy):
         class_names = {d.name for d in decls if d.kind in {"class", "struct"}}
 
         for decl in decls:
+            if decl.name in self._reserved_identifiers:
+                continue
+            if decl.name in self._skip_name_keywords:
+                continue
+            if decl.name in self._builtin_types:
+                continue
             target = self._target_name(decl, class_names)
             if not target or target == decl.name:
                 if decl.kind in {"function", "class", "struct", "namespace"}:
@@ -803,18 +706,356 @@ class NamingConventionsPolicy(Policy):
             return self._to_camel(decl.name)
 
         if decl.kind == "function":
-            if decl.name in class_names or decl.name.lstrip("~") in class_names:
+            base_name = decl.name.lstrip("~")
+            if decl.name in class_names or base_name in class_names:
                 return decl.name
             if decl.scope_name and (
-                decl.name == decl.scope_name or decl.name.lstrip("~") == decl.scope_name
+                decl.name == decl.scope_name or base_name == decl.scope_name
             ):
                 return decl.name
+            if decl.scope_name and (
+                self._normalized_identifier_key(base_name)
+                == self._normalized_identifier_key(decl.scope_name)
+            ):
+                return f"~{decl.scope_name}" if decl.name.startswith("~") else decl.scope_name
             return self._to_snake(decl.name)
 
-        if decl.kind in {"local", "member", "global"}:
+        if decl.kind in {"param", "local", "member", "global"}:
             return self._name_variable(decl)
 
         return None
+
+    @dataclass(frozen=True)
+    class SemanticRenameArgs:
+        text: str
+        rename_map: dict[str, str]
+        semantic: SemanticContext
+        file_counts: dict[str, int]
+        consensus_scores: dict[str, float]
+        reference_consensus_scores: dict[str, float]
+        declaration_consensus_scores: dict[str, float]
+        reference_counts: dict[str, int]
+        scope_purity: dict[str, float]
+        project_reference_counts: dict[str, int]
+        project_consensus_scores: dict[str, float]
+        refs_by_usr: Mapping[str, tuple[SemanticReference, ...]]
+        non_declaration_ref_counts: Mapping[str, int]
+        class_names: tuple[str, ...]
+
+    def _apply_semantic_renames(
+        self,
+        args: "NamingConventionsPolicy.SemanticRenameArgs",
+    ) -> tuple[str, list[Edit], list[_SemanticRenameDecision], list[str]]:
+        symbols = list(args.semantic.symbols)
+        code_mask = self._code_mask(args.text)
+        code_text = self._masked_text(args.text, code_mask)
+        code_occurrence_map = self._identifier_count_map(code_text, include_tilde=True)
+        text_occurrence_map = self._identifier_count_map(args.text, include_tilde=True)
+        text_bytes = args.text.encode("utf-8", errors="ignore")
+        refs_by_usr: Mapping[str, tuple[SemanticReference, ...]] = args.refs_by_usr
+        non_decl_ref_count_by_usr: Mapping[str, int] = args.non_declaration_ref_counts
+        class_names = set(args.class_names)
+        if not refs_by_usr:
+            local_refs: dict[str, list[SemanticReference]] = {}
+            local_non_decl_counts: dict[str, int] = {}
+            for ref in args.semantic.references:
+                local_refs.setdefault(ref.usr, []).append(ref)
+                if not ref.is_declaration:
+                    local_non_decl_counts[ref.usr] = local_non_decl_counts.get(ref.usr, 0) + 1
+            refs_by_usr = {usr: tuple(items) for usr, items in local_refs.items()}
+            non_decl_ref_count_by_usr = local_non_decl_counts
+        if not class_names:
+            class_names = {
+                symbol.name
+                for symbol in symbols
+                if symbol.scope_kind in {"class", "struct"}
+            }
+
+        replacements: dict[tuple[int, int], str] = {}
+        decisions: list[_SemanticRenameDecision] = []
+        skips: list[str] = []
+        processed_usrs: set[str] = set()
+
+        for symbol in symbols:
+            if symbol.usr in processed_usrs:
+                continue
+            processed_usrs.add(symbol.usr)
+            old = symbol.name
+            if not self._is_identifier_name(old):
+                continue
+            if old in self._reserved_identifiers or old in self._skip_name_keywords or old in self._builtin_types:
+                continue
+
+            target = None
+            if symbol.scope_kind not in {"param", "local", "member", "global"}:
+                target = args.rename_map.get(old)
+            if target is None:
+                semantic_decl = self._decl_from_semantic(symbol)
+                if semantic_decl is None:
+                    continue
+                target = self._target_name(semantic_decl, class_names)
+            if not target or target == old:
+                continue
+
+            refs = list(refs_by_usr.get(symbol.usr, ()))
+            non_decl_ref_count = int(non_decl_ref_count_by_usr.get(symbol.usr, 0))
+            code_occurrence_count = int(code_occurrence_map.get(old, 0))
+            if code_occurrence_count > len(refs):
+                skips.append(
+                    f"Skipped semantic rename for '{old}': incomplete reference map "
+                    f"(occurrences={code_occurrence_count}, refs={len(refs)})"
+                )
+                continue
+            project_ref_count = int(args.project_reference_counts.get(symbol.usr, 0))
+            if symbol.scope_kind in {"member", "global"} and non_decl_ref_count <= 0 and project_ref_count <= 0:
+                skips.append(
+                    f"Skipped semantic rename for '{old}': no non-declaration reference evidence "
+                    "(member/global symbols require references)"
+                )
+                continue
+            if non_decl_ref_count <= 0:
+                occurrence_count = int(text_occurrence_map.get(old, 0))
+                if occurrence_count > 1:
+                    skips.append(
+                        f"Skipped semantic rename for '{old}': incomplete reference map "
+                        f"(occurrences={occurrence_count}, refs={len(refs)})"
+                    )
+                    continue
+            parser_consensus = float(args.consensus_scores.get(symbol.usr, symbol.parser_consensus))
+            reference_consensus = float(args.reference_consensus_scores.get(symbol.usr, parser_consensus))
+            declaration_consensus = float(args.declaration_consensus_scores.get(symbol.usr, parser_consensus))
+            project_consensus = float(args.project_consensus_scores.get(symbol.usr, 0.0))
+            parser_consensus = self._blended_parser_consensus(
+                local_consensus=parser_consensus,
+                reference_consensus=reference_consensus,
+                declaration_consensus=declaration_consensus,
+                project_consensus=project_consensus,
+                project_ref_count=project_ref_count,
+            )
+            if self._parser_consensus_mode == ParserConsensusMode.OFF:
+                parser_consensus = 1.0
+            scope_purity = float(args.scope_purity.get(symbol.usr, 1.0))
+            if self._strict_local_scope and symbol.scope_kind in {"param", "local"} and scope_purity < 0.999:
+                skips.append(
+                    f"Skipped semantic rename for '{old}': local symbol escapes function scope "
+                    f"(scope_purity={scope_purity:.2f})"
+                )
+                continue
+            if self._parser_consensus_mode == ParserConsensusMode.STRICT and parser_consensus < self._parser_consensus_min:
+                skips.append(
+                    f"Skipped semantic rename for '{old}': parser consensus {parser_consensus:.2f} "
+                    f"below strict threshold {self._parser_consensus_min:.2f}"
+                )
+                continue
+            risk, confidence = self._semantic_risk_and_confidence(
+                refs=refs,
+                file_count=int(args.file_counts.get(symbol.usr, 1)),
+                project_ref_count=project_ref_count,
+                parser_consensus=parser_consensus,
+                reference_consensus=reference_consensus,
+                declaration_consensus=declaration_consensus,
+                scope_purity=scope_purity,
+                is_local=symbol.scope_kind in {"param", "local"},
+                ref_count_hint=int(args.reference_counts.get(symbol.usr, 0)),
+            )
+            if confidence < self._min_confidence:
+                skips.append(
+                    f"Skipped semantic rename for '{old}': confidence {confidence:.2f} below {self._min_confidence:.2f}"
+                )
+                continue
+            if self._risk_rank.get(risk, 2) > self._max_risk_rank:
+                skips.append(
+                    f"Skipped semantic rename for '{old}': risk {risk} exceeds max_risk {self._max_risk}"
+                )
+                continue
+
+            if not refs:
+                refs = [
+                    SemanticReference(
+                        usr=symbol.usr,
+                        start=symbol.start,
+                        end=symbol.end,
+                        line=symbol.line,
+                        column=symbol.column,
+                        is_declaration=True,
+                    )
+                ]
+
+            conflict = False
+            for ref in refs:
+                key = (ref.start, ref.end)
+                if ref.end <= ref.start:
+                    continue
+                token = text_bytes[ref.start : ref.end].decode("utf-8", errors="ignore")
+                if token != old and token != old.lstrip("~"):
+                    conflict = True
+                    skips.append(
+                        f"Skipped semantic rename for '{old}': reference/token mismatch at {ref.line}:{ref.column} "
+                        f"(token='{token}')"
+                    )
+                    break
+                existing = replacements.get(key)
+                if existing is None:
+                    replacements[key] = target
+                elif existing != target:
+                    conflict = True
+                    break
+            if conflict:
+                skips.append(f"Skipped semantic rename for '{old}': overlapping replacement conflict")
+                continue
+
+            ref_count = non_decl_ref_count
+            decisions.append(
+                _SemanticRenameDecision(
+                    usr=symbol.usr,
+                    old_name=old,
+                    new_name=target,
+                    line=symbol.line,
+                    risk=risk,
+                    confidence=confidence,
+                    reference_count=ref_count,
+                    parser_consensus=parser_consensus,
+                    scope_purity=scope_purity,
+                )
+            )
+
+        if not replacements:
+            return args.text, [], decisions, skips
+
+        data = args.text.encode("utf-8")
+        for (start, end), value in sorted(replacements.items(), key=lambda item: item[0][0], reverse=True):
+            if end <= start:
+                continue
+            data = data[:start] + value.encode("utf-8") + data[end:]
+        updated = data.decode("utf-8")
+
+        edits: list[Edit] = []
+        if updated != args.text:
+            before_lines = args.text.splitlines(keepends=True)
+            after_lines = updated.splitlines(keepends=True)
+            for idx, (before, after) in enumerate(zip(before_lines, after_lines)):
+                if before != after:
+                    edits.append(
+                        Edit(
+                            policy=self.name,
+                            line=idx + 1,
+                            before=before.rstrip("\r\n"),
+                            after=after.rstrip("\r\n"),
+                        )
+                    )
+        return updated, edits, decisions, skips
+
+    def _decl_from_semantic(self, symbol: SemanticSymbol) -> _Decl | None:
+        kind = symbol.scope_kind
+        if kind not in {"param", "local", "member", "global", "function", "class", "struct", "namespace"}:
+            return None
+        return _Decl(
+            name=symbol.name,
+            kind=kind,
+            is_static=symbol.is_static,
+            is_const=symbol.is_const,
+            is_constexpr=symbol.is_constexpr,
+            is_consteval=symbol.is_consteval,
+            is_atomic=bool(getattr(symbol, "is_atomic", False)),
+            is_pointer=symbol.is_pointer,
+            smart_ptr=symbol.smart_ptr,
+            is_template_type=symbol.is_template_type,
+            is_std_function=symbol.is_std_function,
+            scope_name=symbol.scope_name,
+            line=symbol.line,
+        )
+
+    def _semantic_risk_and_confidence(
+        self,
+        refs: list[SemanticReference],
+        file_count: int,
+        project_ref_count: int,
+        parser_consensus: float,
+        reference_consensus: float,
+        declaration_consensus: float,
+        scope_purity: float,
+        is_local: bool,
+        ref_count_hint: int,
+    ) -> tuple[str, float]:
+        ref_uses = len([ref for ref in refs if not ref.is_declaration])
+        if ref_uses <= 0:
+            ref_uses = max(0, ref_count_hint)
+
+        risk = "low"
+        confidence = 0.96 if ref_uses > 0 else 0.80
+
+        if file_count > 1:
+            risk = "high"
+            confidence = min(confidence, 0.55)
+        elif project_ref_count > 100:
+            risk = "high"
+            confidence = min(confidence, 0.62)
+        elif project_ref_count > 20 or ref_uses == 0:
+            risk = "medium"
+            confidence = min(confidence, 0.80)
+
+        if is_local and scope_purity < 0.999:
+            risk = "high"
+            confidence = min(confidence, 0.45 * max(0.2, scope_purity))
+
+        parser_consensus_norm = self._clamp01(parser_consensus)
+        reference_consensus_norm = self._clamp01(reference_consensus)
+        declaration_consensus_norm = self._clamp01(declaration_consensus)
+        consensus_signal = (
+            (0.65 * parser_consensus_norm)
+            + (0.20 * reference_consensus_norm)
+            + (0.15 * declaration_consensus_norm)
+        )
+
+        if reference_consensus_norm < 0.50 and ref_uses > 0:
+            if self._risk_rank.get(risk, 0) < self._risk_rank.get("medium", 1):
+                risk = "medium"
+            confidence *= 0.80
+        if declaration_consensus_norm < 0.40:
+            if self._risk_rank.get(risk, 0) < self._risk_rank.get("medium", 1):
+                risk = "medium"
+            confidence *= 0.88
+
+        if consensus_signal < 0.50:
+            risk = "high"
+            confidence *= 0.45
+        elif consensus_signal < self._parser_consensus_min:
+            if self._risk_rank.get(risk, 0) < self._risk_rank.get("medium", 1):
+                risk = "medium"
+            confidence *= 0.75
+        else:
+            confidence *= 0.90 + (0.10 * consensus_signal)
+
+        confidence = max(0.0, min(1.0, confidence))
+        return risk, confidence
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    def _blended_parser_consensus(
+        self,
+        local_consensus: float,
+        reference_consensus: float,
+        declaration_consensus: float,
+        project_consensus: float,
+        project_ref_count: int,
+    ) -> float:
+        local = (
+            (0.60 * self._clamp01(local_consensus))
+            + (0.25 * self._clamp01(reference_consensus))
+            + (0.15 * self._clamp01(declaration_consensus))
+        )
+        project = self._clamp01(project_consensus)
+        if project <= 0.0:
+            return local
+        if project_ref_count <= 10:
+            project_weight = 0.15
+        elif project_ref_count <= 50:
+            project_weight = 0.25
+        else:
+            project_weight = 0.35
+        return self._clamp01((local * (1.0 - project_weight)) + (project * project_weight))
 
     def _name_variable(self, decl: _Decl) -> str:
         rules = self._rules
@@ -826,6 +1067,9 @@ class NamingConventionsPolicy(Policy):
             prefixes.append(rules["constexpr_prefix_upper"])
             if decl.is_template_type:
                 prefixes.append("T_")
+            atomic_upper = str(rules.get("atomic_prefix", "a_")).upper()
+            if decl.is_atomic and atomic_upper:
+                prefixes.append(atomic_upper)
             if decl.is_std_function:
                 prefixes.append("F_")
             if decl.smart_ptr == "shared":
@@ -836,23 +1080,27 @@ class NamingConventionsPolicy(Policy):
                 prefixes.append("WP_")
             elif decl.is_pointer:
                 prefixes.append("P_")
-            stripped = self._strip_prefixes(decl.name, prefixes)
+            stripped = self._strip_prefixes(decl.name, self._prefix_strip_candidates(prefixes))
             base = self._to_upper_snake(stripped or decl.name)
             return "".join(prefixes) + base
 
         prefixes = []
+        is_param = decl.kind == "param"
+
         if decl.kind == "global" and rules.get("global_prefix"):
             prefixes.append(rules["global_prefix"])
         if decl.kind == "member" and rules.get("member_prefix"):
             prefixes.append(rules["member_prefix"])
         if decl.kind == "local" and rules.get("local_prefix"):
             prefixes.append(rules["local_prefix"])
-        if decl.is_static and rules.get("static_prefix"):
+        if not is_param and decl.is_static and rules.get("static_prefix"):
             prefixes.append(rules["static_prefix"])
-        if decl.is_const and rules.get("const_prefix"):
+        if not is_param and decl.is_const and rules.get("const_prefix"):
             prefixes.append(rules["const_prefix"])
-        if decl.is_template_type:
+        if not is_param and decl.is_template_type:
             prefixes.append("t_")
+        if decl.is_atomic and rules.get("atomic_prefix"):
+            prefixes.append(str(rules["atomic_prefix"]))
         if decl.is_std_function:
             prefixes.append("f_")
         if decl.smart_ptr == "shared":
@@ -867,72 +1115,97 @@ class NamingConventionsPolicy(Policy):
         base_name = decl.name
         if decl.kind in {"member", "global"}:
             base_name = base_name.lstrip("_")
-        stripped = self._strip_prefixes(base_name, prefixes)
+        strip_prefixes = self._prefix_strip_candidates(prefixes)
+        if is_param:
+            strip_prefixes.extend(
+                self._prefix_strip_candidates(
+                    [
+                        str(rules.get("local_prefix") or ""),
+                        str(rules.get("static_prefix") or ""),
+                        str(rules.get("const_prefix") or ""),
+                        str(rules.get("atomic_prefix") or ""),
+                        "t_",
+                    ]
+                )
+            )
+        if rules.get("constexpr_prefix_upper"):
+            strip_prefixes.append(str(rules["constexpr_prefix_upper"]))
+        if rules.get("static_prefix_upper"):
+            strip_prefixes.append(str(rules["static_prefix_upper"]))
+        stripped = self._strip_prefixes(base_name, strip_prefixes)
         base = self._to_snake(stripped or decl.name)
         return "".join(prefixes) + base
 
-    def _collect_template_params(self, text: str) -> set[str]:
+    def _is_identifier_name(self, name: str) -> bool:
+        if not name:
+            return False
+        value = name[1:] if name.startswith("~") else name
+        if not value:
+            return False
+        head = value[0]
+        if not (head.isalpha() or head == "_"):
+            return False
+        for ch in value[1:]:
+            if not (ch.isalnum() or ch == "_"):
+                return False
+        return True
+
+    def _collect_template_params_from_tree(self, root: Any, data: bytes) -> set[str]:
         params: set[str] = set()
-        for match in self._template_decl_re.finditer(text):
-            body = match.group(1)
-            for chunk in self._split_template_params(body):
-                left = chunk.split("=", 1)[0].strip()
-                if not left:
-                    continue
-                tokens = re.findall(r"[A-Za-z_]\w*", left)
-                if not tokens:
-                    continue
-                if tokens[0] in {"typename", "class"} and len(tokens) > 1:
-                    params.add(tokens[1])
-                else:
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            node_type = getattr(node, "type", "")
+            if node_type in {"template_parameter", "template_type_parameter", "type_parameter_declaration"}:
+                tokens = self._identifier_tokens(
+                    data[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")
+                )
+                if tokens:
                     params.add(tokens[-1])
+            stack.extend(reversed(getattr(node, "children", [])))
         return params
 
-    @dataclass(frozen=True)
-    class ApplyRenamesArgs:
-        lines: list[str]
-        code_mask: list[bool]
-        rename_map: dict[str, str]
-
-    def _apply_renames(self, args: "NamingConventionsPolicy.ApplyRenamesArgs") -> tuple[str, list[Edit]]:
-        if not args.rename_map:
-            return "".join(args.lines), []
-
-        text = "".join(args.lines)
-        edits: list[Edit] = []
-
-        def replacer(match: re.Match) -> str:
-            name = match.group(0)
-            return rename_map.get(name, name)
-
-        pattern = self._word_re
-        result_chars = list(text)
-        offset = 0
-        for match in pattern.finditer(text):
-            start, end = match.span()
-            if not all(args.code_mask[start:end]):
+    def _collect_declarations_semantic(self, semantic: SemanticContext) -> list[_Decl]:
+        decls: list[_Decl] = []
+        seen: set[tuple[str, str, int, str | None]] = set()
+        for symbol in semantic.symbols:
+            decl = self._decl_from_semantic(symbol)
+            if decl is None:
                 continue
-            name = match.group(0)
-            new = args.rename_map.get(name)
-            if not new or new == name:
+            key = (decl.name, decl.kind, decl.line, decl.scope_name)
+            if key in seen:
                 continue
-            result_chars[start + offset : end + offset] = list(new)
-            offset += len(new) - (end - start)
+            seen.add(key)
+            decls.append(decl)
+        return decls
 
-        updated = "".join(result_chars)
-
-        if updated != text:
-            for idx, (before, after) in enumerate(zip(args.lines, updated.splitlines(keepends=True))):
-                if before != after:
-                    edits.append(
-                        Edit(
-                            policy=self.name,
-                            line=idx + 1,
-                            before=before.rstrip("\r\n"),
-                            after=after.rstrip("\r\n"),
-                        )
-                    )
-        return updated, edits
+    def _dedupe_decls(self, decls: list[_Decl]) -> list[_Decl]:
+        result: list[_Decl] = []
+        seen_index: dict[tuple[str, str, int, str | None], int] = {}
+        for decl in decls:
+            key = (decl.name, decl.kind, decl.line, decl.scope_name)
+            index = seen_index.get(key)
+            if index is not None:
+                existing = result[index]
+                result[index] = _Decl(
+                    name=existing.name,
+                    kind=existing.kind,
+                    is_static=existing.is_static or decl.is_static,
+                    is_const=existing.is_const or decl.is_const,
+                    is_constexpr=existing.is_constexpr or decl.is_constexpr,
+                    is_consteval=existing.is_consteval or decl.is_consteval,
+                    is_atomic=existing.is_atomic or decl.is_atomic,
+                    is_pointer=existing.is_pointer or decl.is_pointer,
+                    smart_ptr=existing.smart_ptr or decl.smart_ptr,
+                    is_template_type=existing.is_template_type or decl.is_template_type,
+                    is_std_function=existing.is_std_function or decl.is_std_function,
+                    scope_name=existing.scope_name or decl.scope_name,
+                    line=existing.line or decl.line,
+                )
+                continue
+            seen_index[key] = len(result)
+            result.append(decl)
+        return result
 
     def _code_mask(self, text: str) -> list[bool]:
         mask = [True] * len(text)
@@ -1100,64 +1373,120 @@ class NamingConventionsPolicy(Policy):
         return True
 
     def _extract_class_name(self, line: str) -> str | None:
-        match = re.search(r"\b(class|struct)\b([^:{;]*)", line)
-        if not match:
+        tokens = self._identifier_tokens(line)
+        if not tokens:
             return None
-        tail = match.group(2)
-        identifiers = re.findall(r"[A-Za-z_]\w*", tail)
-        if not identifiers:
+        marker_index = -1
+        for keyword in ("class", "struct"):
+            try:
+                marker_index = tokens.index(keyword)
+                break
+            except ValueError:
+                continue
+        if marker_index < 0:
             return None
         ignored = {"final", "sealed", "alignas", "constexpr", "consteval"}
-        for ident in identifiers:
+        for ident in tokens[marker_index + 1 :]:
             if ident in ignored:
                 continue
             if ident.isupper() and "_" in ident:
                 continue
             return ident
-        return identifiers[-1]
+        return None
 
-    def _update_template_depth(self, line: str, depth: int) -> int:
-        if "template" in line or depth > 0:
-            segment = line[line.find("template") :] if "template" in line else line
-            depth += segment.count("<") - segment.count(">")
-        return max(depth, 0)
-
-    def _in_template_params(self, line: str, prev_depth: int) -> bool:
-        if "template" in line:
-            return True
-        return prev_depth > 0
-
-    def _split_template_params(self, body: str) -> list[str]:
-        params: list[str] = []
-        current: list[str] = []
-        depth = 0
-        for ch in body:
-            if ch == "<":
-                depth += 1
-            elif ch == ">":
-                depth = max(0, depth - 1)
-            if ch == "," and depth == 0:
-                params.append("".join(current).strip())
-                current = []
+    def _scan_identifiers(self, text: str, include_tilde: bool = False) -> list[tuple[int, int, str]]:
+        spans: list[tuple[int, int, str]] = []
+        length = len(text)
+        index = 0
+        while index < length:
+            ch = text[index]
+            start = -1
+            if ch == "~" and include_tilde:
+                next_index = index + 1
+                if next_index < length and (text[next_index].isalpha() or text[next_index] == "_"):
+                    prev = text[index - 1] if index > 0 else ""
+                    if not (prev.isalnum() or prev == "_"):
+                        start = index
+                        index = next_index + 1
+                        while index < length and (text[index].isalnum() or text[index] == "_"):
+                            index += 1
+            elif ch.isalpha() or ch == "_":
+                prev = text[index - 1] if index > 0 else ""
+                if not (prev.isalnum() or prev == "_"):
+                    start = index
+                    index += 1
+                    while index < length and (text[index].isalnum() or text[index] == "_"):
+                        index += 1
+            if start >= 0:
+                spans.append((start, index, text[start:index]))
                 continue
-            current.append(ch)
-        tail = "".join(current).strip()
-        if tail:
-            params.append(tail)
-        return params
+            index += 1
+        return spans
+
+    def _identifier_tokens(self, text: str, include_tilde: bool = False) -> list[str]:
+        return [token for _, _, token in self._scan_identifiers(text, include_tilde=include_tilde)]
+
+    def _last_identifier_token(self, text: str) -> str | None:
+        tokens = self._identifier_tokens(text)
+        if not tokens:
+            return None
+        return tokens[-1]
+
+    def _is_atomic_type(self, value: str) -> bool:
+        if not value:
+            return False
+        for token in self._identifier_tokens(value):
+            lowered = token.lower()
+            if lowered == "_atomic":
+                return True
+            if lowered == "atomic" or lowered.startswith("atomic_"):
+                return True
+        return False
 
     def _to_snake(self, name: str) -> str:
         if name.isupper() and "_" in name:
             return name.lower()
-        s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
-        s2 = re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1)
-        return re.sub(r"__+", "_", s2).lower()
+        result: list[str] = []
+        for idx, ch in enumerate(name):
+            if ch == "_" or ch.isspace():
+                if result and result[-1] != "_":
+                    result.append("_")
+                continue
+            if ch.isupper():
+                prev = name[idx - 1] if idx > 0 else ""
+                nxt = name[idx + 1] if idx + 1 < len(name) else ""
+                needs_sep = idx > 0 and (
+                    prev.islower()
+                    or prev.isdigit()
+                    or (prev.isupper() and bool(nxt) and nxt.islower())
+                )
+                if needs_sep and result and result[-1] != "_":
+                    result.append("_")
+                result.append(ch.lower())
+                continue
+            result.append(ch.lower())
+        compact: list[str] = []
+        for ch in result:
+            if ch == "_" and compact and compact[-1] == "_":
+                continue
+            compact.append(ch)
+        return "".join(compact)
 
     def _to_upper_snake(self, name: str) -> str:
         return self._to_snake(name).upper()
 
     def _to_camel(self, name: str) -> str:
-        parts = re.split(r"[_\s]+", name)
+        parts: list[str] = []
+        current: list[str] = []
+        for ch in name:
+            if ch == "_" or ch.isspace():
+                if current:
+                    parts.append("".join(current))
+                    current = []
+                continue
+            current.append(ch)
+        if current:
+            parts.append("".join(current))
         return "".join(part[:1].upper() + part[1:] for part in parts if part)
 
     def _strip_prefixes(self, name: str, prefixes: list[str]) -> str:
@@ -1175,127 +1504,24 @@ class NamingConventionsPolicy(Policy):
                     break
         return cleaned
 
-    @dataclass(frozen=True)
-    class ParamListArgs:
-        text: str
-        start: int
-        end: int
+    def _normalized_identifier_key(self, name: str) -> str:
+        return "".join(ch for ch in str(name or "") if ch != "_" and not ch.isspace()).lower()
 
-    def _in_param_list(self, args: "NamingConventionsPolicy.ParamListArgs") -> bool:
-        line_start = args.text.rfind("\n", 0, args.start) + 1
-        line_end = args.text.find("\n", args.start)
-        if line_end == -1:
-            line_end = len(args.text)
-        line = args.text[line_start:line_end]
-        if "(" not in line or ")" not in line:
-            return False
-        signature = self._signature_re.match(line.strip())
-        if not signature:
-            return False
-        left = line.find("(")
-        right = line.find(")")
-        if left == -1 or right == -1 or right < left:
-            return False
-        idx = args.start - line_start
-        return left < idx < right
+    def _identifier_count_map(self, text: str, include_tilde: bool = False) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for _, _, token in self._scan_identifiers(text, include_tilde=include_tilde):
+            counts[token] = counts.get(token, 0) + 1
+        return counts
 
-    def _collect_param_scopes(self, text: str) -> list[tuple[int, int, set[str]]]:
-        scopes: list[tuple[int, int, set[str]]] = []
-        for match in self._param_scope_re.finditer(text):
-            params = match.group(2)
-            names = self._extract_param_names(params)
-            start = match.start()
-            brace = 0
-            i = match.end() - 1
-            while i < len(text):
-                ch = text[i]
-                if ch == "{":
-                    brace += 1
-                elif ch == "}":
-                    brace -= 1
-                    if brace == 0:
-                        scopes.append((start, i + 1, names))
-                        break
-                i += 1
-        return scopes
-
-    @dataclass(frozen=True)
-    class ParamDeclArgs:
-        params: str
-        template_params: set[str]
-        line_no: int
-
-    def _param_decls(self, args: "NamingConventionsPolicy.ParamDeclArgs") -> list[_Decl]:
-        decls: list[_Decl] = []
-        for part in args.params.split(","):
-            chunk = part.strip()
-            if not chunk:
+    def _prefix_strip_candidates(self, prefixes: list[str]) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for prefix in prefixes:
+            if not prefix:
                 continue
-            if "=" in chunk:
-                chunk = chunk.split("=", 1)[0].strip()
-            match = re.search(r"([A-Za-z_]\w*)\s*(?:\)|\]|$)", chunk)
-            if not match:
-                match = re.search(r"([A-Za-z_]\w*)\s*$", chunk)
-            if not match:
-                continue
-            name = match.group(1)
-            prefix = chunk[: match.start(1)]
-            is_constexpr = "constexpr" in prefix
-            is_consteval = "consteval" in prefix
-            is_const = "const" in prefix and not is_constexpr and not is_consteval
-            is_pointer = "*" in prefix
-            smart_ptr = None
-            if "shared_ptr" in prefix:
-                smart_ptr = "shared"
-            elif "unique_ptr" in prefix:
-                smart_ptr = "unique"
-            elif "weak_ptr" in prefix:
-                smart_ptr = "weak"
-            is_std_function = "std::function" in prefix
-            is_template_type = False
-            tokens = re.findall(r"[A-Za-z_]\w*", prefix)
-            if tokens and tokens[-1] in args.template_params:
-                is_template_type = True
-            decls.append(
-                _Decl(
-                    name=name,
-                    kind="local",
-                    is_static=False,
-                    is_const=is_const,
-                    is_constexpr=is_constexpr,
-                    is_consteval=is_consteval,
-                    is_pointer=is_pointer,
-                    smart_ptr=smart_ptr,
-                    is_template_type=is_template_type,
-                    is_std_function=is_std_function,
-                    line=args.line_no,
-                )
-            )
-        return decls
-
-    def _extract_param_names(self, params: str) -> set[str]:
-        names: set[str] = set()
-        for part in params.split(","):
-            chunk = part.strip()
-            if not chunk:
-                continue
-            if "=" in chunk:
-                chunk = chunk.split("=", 1)[0].strip()
-            match = re.search(r"([A-Za-z_]\w*)\s*(?:\)|\]|$)", chunk)
-            if not match:
-                match = re.search(r"([A-Za-z_]\w*)\s*$", chunk)
-            if match:
-                names.add(match.group(1))
-        return names
-
-    @dataclass(frozen=True)
-    class ParamScopeArgs:
-        pos: int
-        name: str
-        scopes: list[tuple[int, int, set[str]]]
-
-    def _in_param_scope(self, args: "NamingConventionsPolicy.ParamScopeArgs") -> bool:
-        for start, end, names in args.scopes:
-            if start <= args.pos <= end and args.name in names:
-                return True
-        return False
+            for candidate in (prefix, prefix.lower(), prefix.upper()):
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                candidates.append(candidate)
+        return candidates

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from typing import Any
 
-from ..core.clang_decls import ClangDeclCollector
-from ..core.edit import Edit
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.parsing import ClangDeclCollector
+from ..core.types import Edit
+from ..core.types import ParseContext
+from ..core.types import PolicyResult
+from ..core.types import Violation
+from ..core.utilities import warn_once
 from .policy_base import Policy
 
 
@@ -16,6 +15,13 @@ class FunctionVoidParamsPolicy(Policy):
     name = "function_void_params"
     description = "Require (void) for empty parameter lists and no space before parens"
     parse_mode = "clang"
+    requires_code_context = True
+
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._prefer_clang = bool(self._config.get("prefer_clang", True))
+        self._use_tree_sitter = bool(self._config.get("use_tree_sitter", True))
+        self.parse_mode = "clang" if self._prefer_clang else "tree_sitter"
 
     def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
@@ -28,9 +34,19 @@ class FunctionVoidParamsPolicy(Policy):
         replacements: list[tuple[int, int, str]] = []
         violations: list[Violation] = []
 
-        if context.clang_ast is not None:
+        code_context = context.code_context
+        if code_context is not None and getattr(code_context, "clang_functions", None):
+            clang_functions = list(code_context.clang_functions)
+        elif context.clang_ast is not None:
             collector = ClangDeclCollector(context.clang_ast, context.path)
-            for decl in collector.functions():
+            clang_functions = collector.functions()
+        else:
+            clang_functions = []
+
+        if clang_functions:
+            for decl in clang_functions:
+                if decl.name.startswith("operator"):
+                    continue
                 if decl.params_start is None or decl.params_end is None:
                     continue
                 params_text = text[decl.params_start:decl.params_end]
@@ -50,13 +66,17 @@ class FunctionVoidParamsPolicy(Policy):
                 if no_space:
                     space_start, space_end = self._space_before_paren(text, decl.params_start)
                     if space_start is not None:
-                        replacements.append((space_start, space_end, ""))
+                                replacements.append((space_start, space_end, ""))
             return self._apply_replacements(text, replacements, violations)
 
-        if context.tree_sitter_tree is not None:
+        if self._use_tree_sitter and context.tree_sitter_tree is not None:
             return self._apply_tree_sitter(context, require_void, no_space)
 
-        return self._apply_regex(text, require_void, no_space)
+        warn_once(
+            "function_void_params_parser_unavailable",
+            "function_void_params: parser context unavailable, skipping policy (enable clang and/or tree-sitter-languages)",
+        )
+        return PolicyResult(text=text, violations=[], edits=[])
 
     def _apply_tree_sitter(
         self,
@@ -76,6 +96,10 @@ class FunctionVoidParamsPolicy(Policy):
         while stack:
             node = stack.pop()
             if node.type == "function_declarator":
+                decl_head = data[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+                if "operator" in decl_head:
+                    stack.extend(reversed(node.children))
+                    continue
                 param_list = None
                 for child in node.children:
                     if child.type == "parameter_list":
@@ -102,44 +126,6 @@ class FunctionVoidParamsPolicy(Policy):
             stack.extend(reversed(node.children))
 
         return self._apply_replacements(text, replacements, violations)
-
-    def _apply_regex(self, text: str, require_void: bool, no_space: bool) -> PolicyResult:
-        violations: list[Violation] = []
-        edits: list[Edit] = []
-        lines = text.splitlines(keepends=True)
-        updated_lines = []
-        pattern = re.compile(r"\b([A-Za-z_]\w*(?:::\w+)*)\s*\(\s*\)")
-        for idx, line in enumerate(lines):
-            new_line = line
-            for match in list(pattern.finditer(line)):
-                name = match.group(1)
-                repl = f"{name}({'void' if require_void else ''})"
-                if repl.endswith("()") and not require_void:
-                    repl = f"{name}()"
-                if match.group(0) != repl:
-                    new_line = new_line.replace(match.group(0), repl)
-                    violations.append(
-                        Violation(
-                            policy=self.name,
-                            message=f"Empty parameter list for '{name}'",
-                            line=idx + 1,
-                            column=match.start() + 1,
-                        )
-                    )
-            if no_space:
-                new_line = re.sub(r"([A-Za-z_]\w*(?:::\w+)*)\s+\(", r"\1(", new_line)
-            if new_line != line:
-                edits.append(
-                    Edit(
-                        policy=self.name,
-                        line=idx + 1,
-                        before=line.rstrip("\r\n"),
-                        after=new_line.rstrip("\r\n"),
-                    )
-                )
-            updated_lines.append(new_line)
-        updated = "".join(updated_lines)
-        return PolicyResult(text=updated, violations=violations, edits=edits)
 
     def _is_empty_param_list(self, params_text: str) -> bool:
         inner = params_text.strip()

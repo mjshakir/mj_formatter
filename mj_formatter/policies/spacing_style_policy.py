@@ -1,20 +1,41 @@
 from __future__ import annotations
 
-from ..core.edit import Edit
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.types import Edit
+from ..core.types import ParseContext
+from ..core.types import PolicyResult
+from ..core.types import Violation
 from .policy_base import Policy
 
 
 class SpacingStylePolicy(Policy):
     name = "spacing_style"
     description = "Enforce spacing/indentation style"
-    parse_mode = "text"
+    parse_mode = "tree_sitter"
 
     def apply(self, context: ParseContext) -> PolicyResult:
+        use_editorconfig = bool(self._config.get("use_editorconfig", True))
         indent_style = str(self._config.get("indent_style", "spaces_4")).lower()
         tab_width = int(self._config.get("tab_width", 4))
+        if use_editorconfig:
+            ec_style = context.editorconfig.get("indent_style", "").strip().lower()
+            ec_size = context.editorconfig.get("indent_size")
+            ec_width = context.editorconfig.get("tab_width")
+            if ec_style == "tab":
+                indent_style = "tabs"
+            elif ec_style == "space":
+                try:
+                    size = int(ec_size) if ec_size else int(ec_width) if ec_width else 4
+                except ValueError:
+                    size = 4
+                indent_style = "spaces_2" if size <= 2 else "spaces_4"
+            for raw in (ec_width, ec_size):
+                if raw is None:
+                    continue
+                try:
+                    tab_width = max(1, int(raw))
+                    break
+                except ValueError:
+                    continue
         lines = context.text.splitlines(keepends=True)
         if not lines:
             return PolicyResult(text=context.text, violations=[], edits=[])

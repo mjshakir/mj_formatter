@@ -5,17 +5,17 @@ import logging
 import re
 from dataclasses import dataclass
 
-from ..core.edit import Edit
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.types import Edit
+from ..core.types import ParseContext
+from ..core.types import PolicyResult
+from ..core.types import Violation
 from .policy_base import Policy
 
 
 class LuaPolicy(Policy):
     name = "lua_policy"
     description = "Lua-defined policy"
-    parse_mode = "text"
+    parse_mode = "tree_sitter"
 
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)

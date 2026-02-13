@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Any
 
-from ..core.clang_decls import ClangDeclCollector
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.parsing import ClangDeclCollector
+from ..core.types import ParseContext
+from ..core.types import PolicyResult
+from ..core.types import Violation
+from ..core.utilities import warn_once
 from .policy_base import Policy
 
 
@@ -15,8 +15,15 @@ class SnakeCasePolicy(Policy):
     name = "snake_case"
     description = "Enforce snake_case for variables/functions"
     parse_mode = "clang"
+    requires_code_context = True
 
     _snake_re = re.compile(r"^_?[a-z][a-z0-9_]*$")
+
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._prefer_clang = bool(self._config.get("prefer_clang", True))
+        self._use_tree_sitter = bool(self._config.get("use_tree_sitter", True))
+        self.parse_mode = "clang" if self._prefer_clang else "tree_sitter"
 
     def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
@@ -30,10 +37,21 @@ class SnakeCasePolicy(Policy):
 
         violations: list[Violation] = []
 
-        if context.clang_ast is not None:
+        code_context = context.code_context
+        if code_context is not None and getattr(code_context, "clang_functions", None) is not None:
+            clang_functions = list(getattr(code_context, "clang_functions", ()))
+            clang_variables = list(getattr(code_context, "clang_variables", ()))
+        elif context.clang_ast is not None:
             collector = ClangDeclCollector(context.clang_ast, context.path)
+            clang_functions = collector.functions()
+            clang_variables = collector.variables()
+        else:
+            clang_functions = []
+            clang_variables = []
+
+        if clang_functions or clang_variables:
             if include_funcs:
-                for decl in collector.functions():
+                for decl in clang_functions:
                     if exclude_types and decl.name[:1].isupper():
                         continue
                     if not self._is_snake_case(decl.name):
@@ -46,7 +64,7 @@ class SnakeCasePolicy(Policy):
                             )
                         )
             if include_vars:
-                for decl in collector.variables():
+                for decl in clang_variables:
                     if exclude_types and decl.name[:1].isupper():
                         continue
                     if not self._is_snake_case(decl.name):
@@ -60,8 +78,14 @@ class SnakeCasePolicy(Policy):
                         )
             return PolicyResult(text=text, violations=violations, edits=[])
 
-        # Fallback: basic scan via tree-sitter or regex on identifiers
-        names = self._collect_identifiers_fallback(context, include_funcs, include_vars)
+        if not self._use_tree_sitter or context.tree_sitter_tree is None:
+            warn_once(
+                "snake_case_parser_unavailable",
+                "snake_case: parser context unavailable, skipping policy (enable clang and/or tree-sitter-languages)",
+            )
+            return PolicyResult(text=text, violations=[], edits=[])
+
+        names = self._collect_identifiers_tree(context, include_funcs, include_vars)
         for name, line in names:
             if exclude_types and name[:1].isupper():
                 continue
@@ -82,26 +106,6 @@ class SnakeCasePolicy(Policy):
         if name.isupper() and "_" in name:
             return True
         return bool(self._snake_re.match(name))
-
-    @dataclass(frozen=True)
-    class _Ident:
-        name: str
-        line: int
-
-    def _collect_identifiers_fallback(
-        self,
-        context: ParseContext,
-        include_funcs: bool,
-        include_vars: bool,
-    ) -> list[tuple[str, int]]:
-        if context.tree_sitter_tree is not None:
-            return self._collect_identifiers_tree(context, include_funcs, include_vars)
-        # regex fallback
-        names: list[tuple[str, int]] = []
-        for idx, line in enumerate(context.text.splitlines(), 1):
-            for match in re.finditer(r"\b[A-Za-z_]\w*\b", line):
-                names.append((match.group(0), idx))
-        return names
 
     def _collect_identifiers_tree(
         self,

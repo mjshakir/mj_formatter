@@ -5,3 +5,5 @@ type = "python"
 
 # options: spaces_4 | spaces_2 | tabs
 indent_style = "spaces_4"
+tab_width = 4
+use_editorconfig = true

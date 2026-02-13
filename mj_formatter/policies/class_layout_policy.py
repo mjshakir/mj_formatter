@@ -1,381 +1,446 @@
 from __future__ import annotations
 
-import re
 import os
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
+from collections.abc import Sequence
+from bisect import bisect_left
+from typing import Any
 
-from ..core.edit import Edit
-from ..core.parse_context import ParseContext
-from ..core.policy_result import PolicyResult
-from ..core.violation import Violation
+from ..core.types import CodeContext, SemanticContext, SemanticSymbol
+from ..core.types import Edit
+from ..core.types import ParseContext
+from ..core.parsing import ParserManager
+from ..core.types import PolicyResult
+from ..core.types import Violation
+from ..core.utilities import warn_once
 from .policy_base import Policy
+
+
+@dataclass(frozen=True)
+class _SourceBlock:
+    start: int
+    end: int
+    text: str
+    full_name: str
+    short_name: str
+    class_name: str | None
+
+
+@dataclass(frozen=True)
+class _PreambleItem:
+    kind: str
+    start: int
+    end: int
+    text: str
 
 
 class ClassLayoutPolicy(Policy):
     name = "class_layout"
-    description = "Enforce class access section ordering and method order matching headers"
-    parse_mode = "text"
-
-    _header_exts = (".hpp", ".h", ".hh", ".hxx")
-    _source_exts = (".cpp", ".cc", ".cxx")
-    _def_patterns = [
-        re.compile(
-            r"^(?!\s*(?:for|if|while|switch)\b)\s*(?:[\w:<>,\s*&]+)\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)\s*\([^)]*\)\s*(const)?\s*\{",
-            re.MULTILINE,
-        ),
-        re.compile(
-            r"^\s*([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*::~?[A-Za-z_]\w*)\s*\([^)]*\)\s*(const)?\s*\{",
-            re.MULTILINE,
-        ),
-    ]
+    description = "Enforce cpp method implementation order from header declarations"
+    parse_mode = "tree_sitter"
+    requires_code_context = True
 
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)
         self._header_cache: dict[str, tuple[int, int, list[tuple[str, str]], dict[str, str]]] = {}
+        self._parser_manager = ParserManager()
 
     def apply(self, context: ParseContext) -> PolicyResult:
-        path = Path(context.path)
-        if path.suffix.lower() in self._header_exts:
-            return PolicyResult(text=context.text, violations=[], edits=[])
-        if path.suffix.lower() in self._source_exts:
-            return self._apply_source(context)
-        return PolicyResult(text=context.text, violations=[], edits=[])
+        source_exts = tuple(self._config.get("source_extensions", [".cpp", ".cc", ".cxx"]) or [])
+        header_exts = tuple(self._config.get("header_extensions", [".hpp", ".h", ".hh", ".hxx"]) or [])
 
-    def _apply_source(self, context: ParseContext) -> PolicyResult:
-        header = self._find_header(context.path)
-        if not header:
+        path = Path(context.path)
+        if path.suffix.lower() not in source_exts:
+            return PolicyResult(text=context.text, violations=[], edits=[])
+
+        if context.code_context is None:
+            warn_once("class_layout_no_context", "class_layout: code context unavailable, skipping policy")
+            return PolicyResult(text=context.text, violations=[], edits=[])
+
+        header = self._find_header(context.path, header_exts)
+        if header is None:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
         order, class_kinds = self._get_header_order(header)
-        if not order:
+        if not order or not class_kinds:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
-        text = context.text
-        text, macro_changed = self._ensure_macro_header(text)
-        text, global_changed = self._ensure_global_header(text)
-        new_text, changed = self._reorder_definitions(
-            ClassLayoutPolicy.ReorderArgs(text=text, order=order, class_kinds=class_kinds)
-        )
-        changed = changed or macro_changed or global_changed
+        updated, changed = self._reorder_source_blocks(context.text, context.code_context, order, class_kinds)
         if not changed:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
+        edits = [
+            Edit(
+                policy=self.name,
+                line=1,
+                before="",
+                after="",
+            )
+        ]
         violations = [
             Violation(
                 policy=self.name,
-                message="Reorder definitions to match header",
+                message="Reordered implementations to match header declaration order",
                 line=1,
                 column=1,
             )
         ]
-        edits = [Edit(policy=self.name, line=1, before="", after="")]
-        return PolicyResult(text=new_text, violations=violations, edits=edits)
+        return PolicyResult(text=updated, violations=violations, edits=edits)
 
-    def _find_header(self, source_path: str) -> Path | None:
+    def _find_header(self, source_path: str, header_exts: Sequence[str]) -> Path | None:
         src = Path(source_path)
         root = Path(self._config.get("root", ".")).resolve()
+        include_dirs = tuple(self._config.get("header_search_roots", ["include"]) or ["include"])
         stem = src.stem
-        candidates = []
-        for ext in self._header_exts:
+        candidates: list[Path] = []
+        for ext in header_exts:
             candidates.append(src.with_suffix(ext))
-        for ext in self._header_exts:
-            candidates.append(root / "include" / f"{stem}{ext}")
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
+        for rel in include_dirs:
+            base = (root / str(rel)).resolve()
+            for ext in header_exts:
+                candidates.append(base / f"{stem}{ext}")
+        for item in candidates:
+            if item.exists():
+                return item
         return None
 
     def _get_header_order(self, header: Path) -> tuple[list[tuple[str, str]], dict[str, str]]:
-        key = str(header)
+        key = str(header.resolve())
         try:
             stat = os.stat(header)
-        except FileNotFoundError:
+        except OSError:
             return [], {}
         cached = self._header_cache.get(key)
         if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
             return cached[2], cached[3]
 
-        header_text = header.read_text(encoding="utf-8")
-        order, class_kinds = self._extract_method_order(header_text)
+        text = header.read_text(encoding="utf-8")
+        tree, _, warning = self._parser_manager.parse_tree_sitter(text, str(header))
+        if tree is None:
+            if warning:
+                warn_once("class_layout_header_parse", f"class_layout: header parse skipped: {warning}")
+            return [], {}
+        order, class_kinds = self._extract_member_order_tree(text, tree)
         self._header_cache[key] = (stat.st_mtime_ns, stat.st_size, order, class_kinds)
         return order, class_kinds
 
-    def _extract_method_order(self, header_text: str) -> tuple[list[tuple[str, str]], dict[str, str]]:
-        order: list[tuple[str, str]] = []
+    def _extract_member_order_tree(self, text: str, tree: Any) -> tuple[list[tuple[str, str]], dict[str, str]]:
+        data = text.encode("utf-8", errors="ignore")
+        root = getattr(tree, "root_node", None)
+        if root is None:
+            return [], {}
+
         class_kinds: dict[str, str] = {}
-        for match in re.finditer(r"\b(class|struct)\s+([A-Za-z_]\w*)", header_text):
-            class_kinds[match.group(2)] = match.group(1)
-        classes = set(class_kinds.keys())
-        if not classes:
-            return order, class_kinds
-        for cls in classes:
-            current_access = "public"
-            for line in header_text.splitlines():
-                access_match = re.match(r"^\s*(public|protected|private)\s*:\s*$", line)
-                if access_match:
-                    current_access = access_match.group(1)
+        order: list[tuple[str, str]] = []
+
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            node_type = getattr(node, "type", "")
+            if node_type in {"class_specifier", "struct_specifier"}:
+                class_name = self._node_text(self._first_descendant(node, {"type_identifier"}), data)
+                if not class_name:
+                    stack.extend(reversed(getattr(node, "children", [])))
                     continue
-                ctor_match = re.match(rf"^\s*(?:explicit\s+)?(~?{cls})\s*\(", line)
-                if ctor_match:
-                    name = ctor_match.group(1)
-                    order.append((f"{cls}::{name}", current_access))
-                    order.append((name, current_access))
+                class_kind = "class" if node_type == "class_specifier" else "struct"
+                class_kinds[class_name] = class_kind
+                default_access = "private" if class_kind == "class" else "public"
+                access = default_access
+                body = self._first_child(node, {"field_declaration_list"})
+                if body is None:
+                    stack.extend(reversed(getattr(node, "children", [])))
                     continue
-                method_match = re.match(
-                    rf"^\s*(?:virtual\s+)?(?:[\w:<>,\s*&]+)\s+({cls}::)?([A-Za-z_]\w*)\s*\(",
-                    line,
-                )
-                if method_match:
-                    name = method_match.group(2)
-                    if not name:
+                for child in getattr(body, "children", []):
+                    child_type = getattr(child, "type", "")
+                    if child_type == "access_specifier":
+                        token = self._node_text(child, data).replace(":", "").strip().lower()
+                        if token in {"public", "protected", "private"}:
+                            access = token
                         continue
-                    order.append((f"{cls}::{name}", current_access))
-                    order.append((name, current_access))
+                    method_name = self._member_function_name(child, data)
+                    if not method_name:
+                        continue
+                    full_name = f"{class_name}::{method_name}"
+                    order.append((full_name, access))
+                    order.append((method_name, access))
+                continue
+            stack.extend(reversed(getattr(node, "children", [])))
+
         return order, class_kinds
 
-    @dataclass(frozen=True)
-    class ReorderArgs:
-        text: str
-        order: list[tuple[str, str]]
-        class_kinds: dict[str, str]
+    def _member_function_name(self, node: Any, data: bytes) -> str | None:
+        destructor = self._first_descendant(node, {"destructor_name"})
+        if destructor is not None:
+            name = self._node_text(destructor, data)
+            if name:
+                return name
+        func_decl = self._first_descendant(node, {"function_declarator"})
+        if func_decl is None:
+            return None
+        name_node = self._rightmost_name_node(func_decl)
+        if name_node is None:
+            return None
+        return self._node_text(name_node, data) or None
 
-    def _reorder_definitions(self, args: "ClassLayoutPolicy.ReorderArgs") -> tuple[str, bool]:
-        blocks = self._find_definition_blocks(args.text)
-        if not blocks:
-            return args.text, False
+    def _reorder_source_blocks(
+        self,
+        text: str,
+        code_context: CodeContext,
+        order: list[tuple[str, str]],
+        class_kinds: dict[str, str],
+    ) -> tuple[str, bool]:
+        blocks = self._collect_source_blocks(text, code_context)
+        ordered_names = {name for name, _ in order}
+        candidates = [
+            item
+            for item in blocks
+            if item.class_name in class_kinds or item.short_name in ordered_names or item.full_name in ordered_names
+        ]
+        if len(candidates) < 2:
+            return text, False
 
-        grouped: dict[str, list[tuple[int, int, str]]] = {}
-        for start, end, name in blocks:
-            grouped.setdefault(name, []).append((start, end, args.text[start:end]))
+        by_name: dict[str, list[_SourceBlock]] = {}
+        for block in candidates:
+            by_name.setdefault(block.full_name, []).append(block)
 
-        ordered_blocks: list[str] = []
-        used = set()
-        current_access = None
-        added_ctor_header = False
-        pending_access: str | None = None
-        for name, access in args.order:
-            target = name
-            if target not in grouped:
-                for key in grouped:
-                    if key.endswith(f"::{name}"):
-                        target = key
+        first_candidate = min(item.start for item in candidates)
+        preamble_items = self._collect_preamble_items(text, first_candidate)
+
+        used: set[tuple[int, int]] = set()
+        current_access: str | None = None
+        ctor_header_emitted = False
+        emitted_parts: list[str] = self._emit_preamble(preamble_items)
+
+        for target_name, access in order:
+            matched = self._take_block(target_name, by_name, used)
+            if matched is None:
+                continue
+            is_ctor = self._is_ctor_or_dtor(matched, class_kinds)
+            merged_with_header = False
+            if is_ctor and not ctor_header_emitted:
+                emitted_parts.append(self._constructor_header(matched, class_kinds) + "\n" + matched.text.rstrip("\n"))
+                ctor_header_emitted = True
+                merged_with_header = True
+            if not is_ctor and access != current_access:
+                emitted_parts.append(self._access_header(access) + "\n" + matched.text.rstrip("\n"))
+                current_access = access
+                merged_with_header = True
+            if not merged_with_header:
+                emitted_parts.append(matched.text.rstrip("\n"))
+
+        # Preserve unmapped class member definitions at end in source order.
+        for block in sorted(candidates, key=lambda item: item.start):
+            key = (block.start, block.end)
+            if key in used:
+                continue
+            emitted_parts.append(block.text.rstrip("\n"))
+
+        if not emitted_parts:
+            return text, False
+
+        first = min([item.start for item in candidates] + [item.start for item in preamble_items]) if preamble_items else first_candidate
+        last = max(item.end for item in candidates)
+        replacement = "\n\n".join(part for part in emitted_parts if part).rstrip("\n")
+        tail = text[last:]
+        if not tail.startswith("\n"):
+            replacement += "\n"
+        original = text[first:last]
+        if original == replacement:
+            return text, False
+        return text[:first] + replacement + text[last:], True
+
+    def _collect_preamble_items(self, text: str, limit: int) -> list[_PreambleItem]:
+        if limit <= 0:
+            return []
+        out: list[_PreambleItem] = []
+        pos = 0
+        for line in text[:limit].splitlines(keepends=True):
+            next_pos = pos + len(line)
+            stripped = line.strip()
+            if stripped.startswith("#define"):
+                out.append(_PreambleItem(kind="macro", start=pos, end=next_pos, text=line.rstrip("\r\n")))
+            elif (
+                stripped
+                and not stripped.startswith("#")
+                and not stripped.startswith("//")
+                and not stripped.startswith("/*")
+                and stripped.endswith(";")
+                and "(" not in stripped
+                and ")" not in stripped
+                and "{" not in stripped
+                and "}" not in stripped
+            ):
+                out.append(_PreambleItem(kind="global", start=pos, end=next_pos, text=line.rstrip("\r\n")))
+            pos = next_pos
+        return out
+
+    def _emit_preamble(self, items: list[_PreambleItem]) -> list[str]:
+        if not items:
+            return []
+        macros = [item.text for item in items if item.kind == "macro" and item.text.strip()]
+        globals_ = [item.text for item in items if item.kind == "global" and item.text.strip()]
+        out: list[str] = []
+        if macros:
+            out.append(f"{self._section_header('user defined macros')}\n\n" + "\n".join(macros))
+        if globals_:
+            out.append(f"{self._section_header('Global Veriables')}\n" + "\n".join(globals_))
+        return out
+
+    def _section_header(self, title: str) -> str:
+        sep = "//" + "-" * 62
+        return f"{sep}\n// {title}\n{sep}"
+
+    def _collect_source_blocks(self, text: str, code_context: CodeContext) -> list[_SourceBlock]:
+        function_symbols: list[SemanticSymbol] = list(getattr(code_context, "semantic_function_symbols", ()) or ())
+        if not function_symbols:
+            semantic = code_context.semantic_context
+            if isinstance(semantic, SemanticContext):
+                function_kinds = {"function_decl", "cxx_method", "constructor", "destructor", "function_template"}
+                for symbol in semantic.symbols:
+                    if symbol.kind in function_kinds and symbol.scope_kind == "function":
+                        function_symbols.append(symbol)
+        function_symbols.sort(key=lambda item: int(item.start))
+        function_starts = [int(item.start) for item in function_symbols]
+
+        out: list[_SourceBlock] = []
+        for block in code_context.hybrid_blocks:
+            if block.kind != "function":
+                continue
+            start = int(block.start)
+            end = int(block.end)
+            if end <= start or end > len(text):
+                continue
+            full_name = ""
+            short_name = ""
+            class_name: str | None = None
+            if function_starts:
+                idx = bisect_left(function_starts, start)
+                if idx > 0:
+                    idx -= 1
+                while idx < len(function_symbols):
+                    symbol = function_symbols[idx]
+                    symbol_start = int(symbol.start)
+                    if symbol_start > end:
                         break
-            if target in grouped and target not in used:
-                is_ctor = self._is_ctor_or_dtor(target, args.class_kinds)
-                if is_ctor and not added_ctor_header:
-                    ordered_blocks.append(self._constructor_header(target, args.class_kinds))
-                    added_ctor_header = True
-                if is_ctor:
-                    pending_access = access
+                    if start <= symbol_start <= end:
+                        class_name = symbol.scope_name
+                        short_name = symbol.name
+                        full_name = f"{symbol.scope_name}::{symbol.name}" if symbol.scope_name else symbol.name
+                        break
+                    idx += 1
+            if not full_name:
+                label = block.short_label.split("(", 1)[0].strip()
+                if "::" in label:
+                    parts = [item for item in label.split("::") if item]
+                    if len(parts) >= 2:
+                        short_name = parts[-1]
+                        class_name = parts[-2]
+                        full_name = f"{class_name}::{short_name}"
+                    else:
+                        short_name = label
+                        full_name = label
+                        class_name = None
                 else:
-                    if pending_access is not None and pending_access != current_access:
-                        ordered_blocks.append(self._access_header(pending_access))
-                        current_access = pending_access
-                    pending_access = None
-                    if access != current_access:
-                        ordered_blocks.append(self._access_header(access))
-                        current_access = access
-                for _, _, block in grouped[target]:
-                    ordered_blocks.append(block)
-                used.add(target)
+                    short_name = label
+                    full_name = label
+                    class_name = None
+            out.append(
+                _SourceBlock(
+                    start=start,
+                    end=end,
+                    text=text[start:end],
+                    full_name=full_name,
+                    short_name=short_name,
+                    class_name=class_name,
+                )
+            )
+        out.sort(key=lambda item: item.start)
+        return out
 
-        if not ordered_blocks:
-            return args.text, False
-
-        first = min(start for start, _, _ in blocks)
-        first = self._expand_start_over_access_header(args.text, first)
-        last = max(end for _, end, _ in blocks)
-        original = args.text[first:last]
-        reordered = self._join_blocks(ordered_blocks)
-        if reordered.lstrip().startswith("//"):
-            before = args.text[:first]
-            if not before.endswith("\n\n"):
-                reordered = "\n" + reordered
-
-        if original == reordered:
-            return args.text, False
-
-        tail = args.text[last:]
-        if reordered.endswith("\n") and tail.startswith("\n"):
-            tail = tail[1:]
-        return args.text[:first] + reordered + tail, True
-
-    def _expand_start_over_access_header(self, text: str, first: int) -> int:
-        lines = text.splitlines(keepends=True)
-        offsets = []
-        total = 0
-        for line in lines:
-            offsets.append(total)
-            total += len(line)
-        line_index = 0
-        for idx, start in enumerate(offsets):
-            if start <= first < start + len(lines[idx]):
-                line_index = idx
-                break
-        header_re = re.compile(r"^//-+\s*$")
-        title_re = re.compile(r"^//\s+(Public|Protected|Private)\s+functions\s*$")
-        ctor_re = re.compile(r"^//\s+(Class|Struct)\s+Constructors\s*$")
-        i = line_index - 1
-        while i >= 0 and lines[i].strip() == "":
-            i -= 1
-        if i - 2 >= 0:
-            if header_re.match(lines[i - 2]) and title_re.match(lines[i - 1]) and header_re.match(lines[i]):
-                return offsets[i - 2]
-            if header_re.match(lines[i - 2]) and ctor_re.match(lines[i - 1]) and header_re.match(lines[i]):
-                return offsets[i - 2]
-        return first
-
-    def _find_definition_blocks(self, text: str) -> list[tuple[int, int, str]]:
-        blocks: list[tuple[int, int, str]] = []
-        patterns = self._def_patterns
-        seen_starts: set[int] = set()
-        for pattern in patterns:
-            for match in pattern.finditer(text):
-                start = match.start()
-                if start in seen_starts:
+    def _take_block(
+        self,
+        target_name: str,
+        by_name: dict[str, list[_SourceBlock]],
+        used: set[tuple[int, int]],
+    ) -> _SourceBlock | None:
+        candidates = by_name.get(target_name, [])
+        for item in candidates:
+            key = (item.start, item.end)
+            if key in used:
+                continue
+            used.add(key)
+            return item
+        if "::" not in target_name:
+            suffix = f"::{target_name}"
+            for name, entries in by_name.items():
+                if not name.endswith(suffix):
                     continue
-                seen_starts.add(start)
-                name = match.group(1)
-                brace = 0
-                i = match.end() - 1
-                while i < len(text):
-                    ch = text[i]
-                    if ch == "{":
-                        brace += 1
-                    elif ch == "}":
-                        brace -= 1
-                        if brace == 0:
-                            end = i + 1
-                            # Preserve any trailing inline comment after the closing brace.
-                            while end < len(text) and text[end] not in "\r\n":
-                                end += 1
-                            blocks.append((start, end, name))
-                            break
-                    i += 1
-        return blocks
+                for item in entries:
+                    key = (item.start, item.end)
+                    if key in used:
+                        continue
+                    used.add(key)
+                    return item
+        return None
 
-    def _is_ctor_or_dtor(self, name: str, class_kinds: dict[str, str]) -> bool:
-        for cls in class_kinds:
-            if name.endswith(f"::{cls}") or name.endswith(f"::~{cls}"):
-                return True
-        return False
+    def _is_ctor_or_dtor(self, block: _SourceBlock, class_kinds: dict[str, str]) -> bool:
+        if not block.class_name:
+            return False
+        cls = block.class_name
+        if cls not in class_kinds:
+            return False
+        return block.short_name == cls or block.short_name == f"~{cls}"
 
-    def _constructor_header(self, name: str, class_kinds: dict[str, str]) -> str:
-        kind = "class"
-        for cls, cls_kind in class_kinds.items():
-            if name.endswith(f"::{cls}") or name.endswith(f"::~{cls}"):
-                kind = cls_kind
-                break
+    def _constructor_header(self, block: _SourceBlock, class_kinds: dict[str, str]) -> str:
+        kind = class_kinds.get(block.class_name or "", "class")
         title = "Struct Constructors" if kind == "struct" else "Class Constructors"
-        separator = "//" + "-" * 62
-        return f"{separator}\n// {title}\n{separator}\n"
+        sep = "//" + "-" * 62
+        return f"{sep}\n// {title}\n{sep}"
 
     def _access_header(self, access: str) -> str:
         title = {
             "public": "Public functions",
             "protected": "Protected functions",
             "private": "Private functions",
-        }.get(access, "Functions")
-        separator = "//" + "-" * 62
-        return f"{separator}\n// {title}\n{separator}\n"
+        }.get(access.lower(), "Functions")
+        sep = "//" + "-" * 62
+        return f"{sep}\n// {title}\n{sep}"
 
-    def _ensure_macro_header(self, text: str) -> tuple[str, bool]:
-        lines = text.splitlines(keepends=True)
-        for idx, line in enumerate(lines):
-            if line.lstrip().startswith("#define"):
-                header = [
-                    "//" + "-" * 62 + "\n",
-                    "// user defined macros\n",
-                    "//" + "-" * 62 + "\n",
-                ]
-                if idx >= 3 and [l.rstrip("\r\n") for l in lines[idx - 3 : idx]] == [
-                    h.rstrip("\r\n") for h in header
-                ]:
-                    return text, False
-                lines[idx:idx] = header
-                return "".join(lines), True
-        return text, False
+    def _first_child(self, node: Any, types: set[str]) -> Any | None:
+        for child in getattr(node, "children", []):
+            if getattr(child, "type", "") in types:
+                return child
+        return None
 
-    def _ensure_global_header(self, text: str) -> tuple[str, bool]:
-        lines = text.splitlines(keepends=True)
-        brace_depth = 0
-        namespace_depths: list[int] = []
-        for idx, line in enumerate(lines):
-            if re.search(r"\bnamespace\b", line) and "{" in line:
-                namespace_depths.append(brace_depth + 1)
-            for ch in line:
-                if ch == "{":
-                    brace_depth += 1
-                elif ch == "}":
-                    brace_depth = max(0, brace_depth - 1)
-                    if namespace_depths and brace_depth < namespace_depths[-1]:
-                        namespace_depths.pop()
-            in_namespace = bool(namespace_depths)
-            if brace_depth != 0 and not in_namespace:
-                continue
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or stripped.startswith("//"):
-                continue
-            if "namespace" in stripped or stripped.startswith("using "):
-                continue
-            if "(" in stripped:
-                continue
-            if ";" not in stripped and "=" not in stripped:
-                continue
-            header = [
-                "//" + "-" * 62 + "\n",
-                "// Global Veriables\n",
-                "//" + "-" * 62 + "\n",
-            ]
-            if self._has_recent_header(
-                ClassLayoutPolicy.RecentHeaderArgs(lines=lines, idx=idx, header=header)
-            ):
-                return text, False
-            lines[idx:idx] = header
-            return "".join(lines), True
-        return text, False
+    def _first_descendant(self, node: Any, types: set[str]) -> Any | None:
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current is not node and getattr(current, "type", "") in types:
+                return current
+            stack.extend(reversed(getattr(current, "children", [])))
+        return None
 
-    @dataclass(frozen=True)
-    class RecentHeaderArgs:
-        lines: list[str]
-        idx: int
-        header: list[str]
+    def _rightmost_name_node(self, node: Any) -> Any | None:
+        best = None
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            ctype = getattr(current, "type", "")
+            if ctype in {"identifier", "field_identifier", "type_identifier"}:
+                if best is None or int(current.start_byte) > int(best.start_byte):
+                    best = current
+            if ctype in {"parameter_list", "template_parameter_list"}:
+                continue
+            stack.extend(reversed(getattr(current, "children", [])))
+        return best
 
-    def _has_recent_header(self, args: "ClassLayoutPolicy.RecentHeaderArgs") -> bool:
-        header_norm = [h.rstrip() for h in args.header]
-        window = []
-        for i in range(args.idx - 1, -1, -1):
-            line = args.lines[i].rstrip()
-            if line.strip() == "":
-                continue
-            window.append(line)
-            if len(window) >= 3:
-                break
-        window = list(reversed(window))
-        return window == header_norm
-
-    def _join_blocks(self, blocks: list[str]) -> str:
-        output: list[str] = []
-        def is_header_block(text: str) -> bool:
-            if not text.lstrip().startswith("//"):
-                return False
-            lowered = text.lower()
-            return "functions" in lowered or "constructors" in lowered
-
-        for block in blocks:
-            block = block.strip("\n") + "\n"
-            if not output:
-                output.append(block)
-                continue
-            prev = output[-1]
-            if is_header_block(prev):
-                output.append(block)
-                continue
-            if is_header_block(block):
-                output[-1] = prev.rstrip("\n") + "\n\n"
-                output.append(block)
-                continue
-            output[-1] = prev.rstrip("\n") + "\n\n"
-            output.append(block)
-        return "".join(output)
+    def _node_text(self, node: Any | None, data: bytes) -> str:
+        if node is None:
+            return ""
+        start = int(getattr(node, "start_byte", 0))
+        end = int(getattr(node, "end_byte", 0))
+        if end <= start:
+            return ""
+        return data[start:end].decode("utf-8", errors="ignore").strip()
