@@ -1,6 +1,8 @@
 [policy]
 name = "include_order"
 enabled = true
+type = "python"
+touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whitespace_only
 
 # Order for header files
 order_header = ["standard", "third_party", "project", "local"]
@@ -10,10 +12,10 @@ order_source = ["main", "standard", "third_party", "project", "local"]
 # Group titles
 [policy.group_titles]
 main = "Main header"
-standard = "Standard headers"
+standard = "Standard Cpp Libraries"
 third_party = "Third-party headers"
 project = "Project headers"
-local = "Local headers"
+local = "User Defined Headers"
 
 # Optional third-party label overrides
 [policy.third_party_labels]

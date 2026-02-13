@@ -1,3 +1,4 @@
 [policy]
 name = "operator_overload_spacing"
 enabled = true
+type = "python"

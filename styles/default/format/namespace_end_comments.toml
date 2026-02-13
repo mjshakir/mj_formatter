@@ -1,9 +1,16 @@
 [policy]
 name = "namespace_end_comments"
 enabled = false
+type = "python"
 
-# apply to these block types
-blocks = ["namespace", "if", "class", "struct", "while", "function"]
+# optional filter by canonical block kind; empty means "all discovered from parser context"
+blocks = []
 
 # if a block exceeds this many lines, replace name with (...)
 max_named_lines = 40
+
+# if label text itself is too long, use shortened form like if(...)
+max_label_length = 96
+
+# replace incorrect existing end comments
+replace_existing = true

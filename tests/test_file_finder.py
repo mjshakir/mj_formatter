@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from mj_formatter.core.file_finder import FileFinder
-from mj_formatter.core.structs import AppConfig
+from mj_formatter.core.files import FileFinder
+from mj_formatter.core.types import AppConfig
 
 
 def _make_config(root: str) -> AppConfig:
@@ -20,6 +20,12 @@ def _make_config(root: str) -> AppConfig:
         cache_path="cache.bin",
         log_level="ERROR",
         log_file=None,
+        profile_enabled=False,
+        policy_cache_path="policy_cache.bin",
+        sort_results=True,
+        clang_args=(),
+        clang_compdb_path=None,
+        clang_args_mode="merge",
         policies_default="none",
         policies_enabled=frozenset(),
         policies_disabled=frozenset(),

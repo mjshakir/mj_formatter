@@ -23,14 +23,46 @@ backup_dir = "scripts/mj_formatter/backups"
 
 # reporting
 report_path = "scripts/mj_formatter/reports/format_report.jsonl"
+run_journal_dir = "scripts/mj_formatter/runs"
 
 # cache
 cache_enabled = true
 cache_path = "scripts/mj_formatter/.cache/cache.bin"
+check_result_cache_enabled = true
+check_result_cache_path = "scripts/mj_formatter/.cache/check_results"
+check_result_cache_l1_size = 2048
+policy_cache_path = "styles/default/cache/policy_cache.bin"
+sort_results = true
 
 # logging
 log_level = "INFO"
 log_file = "scripts/mj_formatter/logs/mj_formatter.log"
+async_logging = true
+log_queue_size = 10000
+shard_merge_workers = 2
+clang_args = []
+clang_compdb = ""
+clang_args_mode = "merge"
+parser_strategy = "hybrid" # policy | hybrid | tree_only | clang_only
+clang_library_paths = []
+parse_pool_workers = 2 # process-global parse thread pool size
+worker_batch_size = 2 # files per worker-task batch
+worker_batch_prefetch = true # prefetch next file read while current file formats
+worker_batch_smart = true # group files by size to balance worker batch cost
+worker_batch_autotune_enabled = false
+worker_batch_autotune_path = "scripts/mj_formatter/.cache/worker_batch_autotune.json"
+worker_batch_autotune_candidates = [1, 2, 4, 8]
+worker_batch_autotune_probe_interval = 12
+worker_batch_autotune_min_files = 16
+post_edit_check_enabled = true
+post_edit_retry_enabled = true
+post_edit_retry_max_attempts = 6
+post_edit_retry_confidence_step = 0.05
+post_edit_retry_confidence_max = 1.00
+retry_snapshot_cache_size = 128
+confidence_blocking_enabled = true
+confidence_blocking_min = 0.70
+confidence_blocking_policies = ["naming_conventions", "snake_case"]
 
 [policies]
 # default can be "all" or "none"
@@ -44,3 +76,53 @@ order = []
 style = "default"
 # optional explicit policy files (relative to config.toml)
 files = []
+
+[profiling]
+root = "../HazardSystem"
+output_dir = "scripts/mj_formatter/profile_matrix"
+python_bin = "venv/bin/python"
+check = true
+profile = true
+cache = false
+
+[[profiling.matrix]]
+name = "hybrid_p1_post_on"
+parser_strategy = "hybrid"
+parse_pool_workers = 1
+post_edit_check_enabled = true
+
+[[profiling.matrix]]
+name = "hybrid_p2_post_on"
+parser_strategy = "hybrid"
+parse_pool_workers = 2
+post_edit_check_enabled = true
+
+[[profiling.matrix]]
+name = "hybrid_p4_post_on"
+parser_strategy = "hybrid"
+parse_pool_workers = 4
+post_edit_check_enabled = true
+
+[[profiling.matrix]]
+name = "hybrid_p2_post_off"
+parser_strategy = "hybrid"
+parse_pool_workers = 2
+post_edit_check_enabled = false
+
+[[profiling.matrix]]
+name = "policy_p2_post_on"
+parser_strategy = "policy"
+parse_pool_workers = 2
+post_edit_check_enabled = true
+
+[[profiling.matrix]]
+name = "tree_only_p2_post_on"
+parser_strategy = "tree_only"
+parse_pool_workers = 2
+post_edit_check_enabled = true
+
+[[profiling.matrix]]
+name = "clang_only_p2_post_on"
+parser_strategy = "clang_only"
+parse_pool_workers = 2
+post_edit_check_enabled = true

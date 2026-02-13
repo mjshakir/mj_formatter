@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..core.policy_result import PolicyResult
+from ..core.types import PolicyResult
 
 
 class Policy(ABC):
     name = ""
     description = ""
     default_enabled = True
-    parse_mode = "text"  # text | tree_sitter | clang
+    parse_mode = "tree_sitter"  # tree_sitter | clang
 
     def __init__(self, config: dict[str, object]) -> None:
         self._config = config

@@ -1,6 +1,7 @@
 [policy]
 name = "class_layout"
-enabled = false
+enabled = true
+type = "python"
 order = ["public", "protected", "private"]
 # allow constexpr-first blocks before access sections
 allow_constexpr_first = true

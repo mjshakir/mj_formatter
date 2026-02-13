@@ -1,4 +1,13 @@
 [policy]
 name = "line_wrap"
 enabled = false
+type = "python"
 max_length = 100
+use_editorconfig = true
+wrap_style = "smart" # smart | bin_pack | one_per_line
+allow_inline_prefix_args = true
+align_to_open_paren = true
+continuation_indent = 4
+wrap_calls = true
+wrap_function_declarations = false
+skip_declaration_expressions = true

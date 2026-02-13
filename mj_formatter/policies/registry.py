@@ -7,7 +7,7 @@ import pkgutil
 from pathlib import Path
 
 from .policy_base import Policy
-from ..core.structs import RegistryValidation
+from ..core.types import RegistryValidation
 
 
 class PolicyRegistry:

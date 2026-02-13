@@ -1,6 +1,8 @@
 [policy]
 name = "snake_case"
 enabled = false
+type = "python"
+touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
 
 # apply to: variables | functions | both
 apply_to = "both"

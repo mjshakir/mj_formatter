@@ -1,4 +1,5 @@
 [policy]
 name = "brace_style"
 enabled = false
+type = "python"
 style = "kr" # kr | allman | stroustrup

@@ -1,3 +1,7 @@
 [policy]
 name = "trim_trailing_whitespace"
 enabled = true
+type = "lua"
+script = "styles/default/lua/trim_trailing_whitespace.lua"
+function = "apply"
+sandbox = true
