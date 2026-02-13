@@ -108,14 +108,14 @@ namespace HazardSystem {
             //--------------------------------------------------------------
         private:
             //--------------------------------------------------------------
-            Mode m_mode;
-            size_t m_leaf_bits, m_planes, m_levels, m_words_per_plane;
+            Mode _m_mode;
+            size_t _m_leaf_bits, _m_planes, _m_levels, _m_words_per_plane;
             //--------------------------
             std::array<std::atomic<uint64_t>, S_C_MAX_PLANES> m_single;
-            std::array<size_t, S_C_MAX_LEVELS> m_level_words, m_level_offsets;
+            std::array<size_t, S_C_MAX_LEVELS> _m_level_words, _m_level_offsets;
             std::unique_ptr<std::atomic<uint64_t>[]> m_tree_words;
         //--------------------------------------------------------------
-    }; // class BitmapTree
+    }; // end BitmapTree(...)
     //--------------------------------------------------------------
-} // namespace HazardSystem
+} // end namespace HazardSystem
 //--------------------------------------------------------------

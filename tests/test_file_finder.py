@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from mj_formatter.core.file_finder import FileFinder
-from mj_formatter.core.structs import AppConfig
+from mj_formatter.core.files import FileFinder
+from mj_formatter.core.types import AppConfig
 
 
 def _make_config(root: str) -> AppConfig:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mj_formatter.core.backup_manifest import BackupManifest, BackupManifestConfig
-from mj_formatter.core.file_result import FileResult
+from mj_formatter.core.files import BackupManifest, BackupManifestConfig
+from mj_formatter.core.types import FileResult
 
 
 def test_backup_manifest_written(tmp_path: Path) -> None:

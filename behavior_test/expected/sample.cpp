@@ -22,30 +22,30 @@ int g_global_value = 0;
 //--------------------------------------------------------------
 // Class Constructors
 //--------------------------------------------------------------
-MyNs::MyClass::MyClass(void) {} // function
+MyNs::MyClass::MyClass(void) {} // end MyNs::MyClass::MyClass(void)
 
-MyNs::MyClass::~MyClass(void) {} // function
+MyNs::MyClass::~MyClass(void) {} // end MyNs::MyClass::~MyClass(void)
 
 //--------------------------------------------------------------
 // Public functions
 //--------------------------------------------------------------
-void MyNs::do_thing(int* _p_ptr) {
-    static_cast<void>(_p_ptr);
-    int _local_var = 1;
-    int _other_var = 2;
+void MyNs::do_thing(int* p_ptr) {
+    static_cast<void>(p_ptr);
+    int localVar = 1;
+    int otherVar = 2;
 
-    loop_thing(_local_var);
+    loop_thing(localVar);
 
-    int* _p_raw_ptr             = nullptr;
-    const int _c_value          = 3;
-    static const int _s_c_total = 4;
-} // function
+    int* rawPtr            = nullptr;
+    const int _c_value     = 3;
+    static const int total = 4;
+} // end void MyNs::do_thing(int* p_ptr)
 
 //--------------------------------------------------------------
 // Protected functions
 //--------------------------------------------------------------
 void MyNs::loop_thing(int& _c_value) const{
-    for (int _i=0; _i<3; ++_i) {
-        _c_value+=_i;
+    for (int i=0; i<3; ++i) {
+        _c_value+=i;
     }
-} // function
+} // end void MyNs::loop_thing(int& _c_value) const

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from mj_formatter.core.policy_factory import PolicyFactory
-from mj_formatter.core.structs import AppConfig
+from mj_formatter.core.policy import PolicyFactory
+from mj_formatter.core.types import AppConfig
 from mj_formatter.policies.align_assignments_policy import AlignAssignmentsPolicy
 
 

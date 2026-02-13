@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mj_formatter.core.undo_manager import UndoManager
-from mj_formatter.core.structs import FileIOConfig
+from mj_formatter.core.files import UndoManager
+from mj_formatter.core.types import FileIOConfig
 
 
 def test_undo_manager_uses_manifest(tmp_path: Path) -> None:
