@@ -112,6 +112,38 @@ python -m mj_formatter.main --list-policies --config config/config.toml
 
 ## Run
 
+### Quick Run Checklist
+
+1. Validate policy registry:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --validate-registry
+```
+
+2. Show active policies:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --list-policies
+```
+
+3. Dry run (check mode, no writes):
+
+```bash
+python -m mj_formatter.main --config config/config.toml --root . --check --verbose
+```
+
+4. Apply changes:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --root . --verbose
+```
+
+5. Undo from backup if needed:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --undo
+```
+
 If editable install added the CLI entrypoint:
 
 ```bash
@@ -136,6 +168,17 @@ Run on `HazardSystem`:
 python -m mj_formatter.main --config config/config.toml --root ../HazardSystem
 ```
 
+Run on `HazardSystem` with safety + diagnostics:
+
+```bash
+python -m mj_formatter.main \
+  --config config/config.toml \
+  --root ../HazardSystem \
+  --check \
+  --verbose \
+  --profile
+```
+
 ## CLI Options
 
 | Option | Description |
@@ -151,6 +194,10 @@ python -m mj_formatter.main --config config/config.toml --root ../HazardSystem
 | `--check` | Check only; no writes |
 | `--verbose` | Print per-file violations/warnings |
 | `--profile` | Aggregate per-policy timing (ms) in summary |
+| `--parser-strategy {policy,hybrid,tree_only,clang_only}` | Override parser strategy for the run |
+| `--parse-pool-workers N` | Per-process parse thread workers |
+| `--post-edit-check / --no-post-edit-check` | Enable/disable post-edit validation |
+| `--batch-autotune / --no-batch-autotune` | Enable/disable worker batch autotuning |
 | `--report PATH` | JSONL report output |
 | `--log-level LEVEL` | Log level |
 | `--log-file PATH` | Log file output |
@@ -273,7 +320,37 @@ python -m mj_formatter.main --config config/config.toml --undo-no-delete
 
 ## Tests
 
+Install test dependencies:
+
 ```bash
 pip install -r requirements-dev.txt
+```
+
+Run all tests:
+
+```bash
 python -m pytest -q
+```
+
+Run behavior test only:
+
+```bash
+python -m pytest -q tests/test_behavior_end_to_end.py::test_behavior_end_to_end
+```
+
+Run parser/context critical tests:
+
+```bash
+python -m pytest -q \
+  tests/test_naming_semantic.py \
+  tests/test_edit_guard_and_parse_control.py \
+  tests/test_post_edit_checker.py \
+  tests/test_worker_runner_batching.py
+```
+
+Run formatter against a real target and then restore:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --root ../HazardSystem --verbose
+python -m mj_formatter.main --config config/config.toml --undo
 ```
