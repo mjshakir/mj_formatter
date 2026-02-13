@@ -16,6 +16,7 @@ logs/
 *.luac
 styles/**/cache/*
 !styles/**/cache/.gitkeep
+behavior_test/**/project_index_cache.bin
 
 # Reports & backups
 reports/
@@ -24,6 +25,8 @@ scripts/mj_formatter/.cache/
 scripts/mj_formatter/reports/
 scripts/mj_formatter/backups/
 scripts/mj_formatter/logs/
+scripts/mj_formatter/profile_matrix/
+scripts/mj_formatter/runs/
 *.bak
 
 # Local config overrides
@@ -31,3 +34,7 @@ scripts/mj_formatter/logs/
 /conda/
 # ignore build files
 mj_formatter.egg-info/
+
+# Testing
+/include/
+/src/

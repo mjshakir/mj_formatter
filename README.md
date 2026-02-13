@@ -1,192 +1,279 @@
-# MJ Formatter (Prototype)
+# MJ Formatter
 
-Standalone, policy‑driven formatter prototype for C++ sources. It is **not** part of the HazardSystem project; it just lives here for local testing.
+Policy-driven C/C++ formatter with hybrid parsing support (clang + tree-sitter + Lua policies), backups, cache, and profiling.
 
-## Install
+## Platform Setup (Python + Pip)
 
-Editable install (adds `mj_formatter` CLI):
+This section installs Python from the command line on each OS, then installs `mj_formatter` and runs it.
+
+### Ubuntu (CLI)
+
+1. Install Python, `venv`, and pip:
 
 ```bash
-python -m venv .venv
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+```
+
+2. Verify Python + pip:
+
+```bash
+python3 --version
+python3 -m pip --version
+```
+
+### macOS (Homebrew)
+
+1. Install Python with Homebrew:
+
+```bash
+brew update
+brew install python@3.12
+```
+
+2. Verify Python + pip:
+
+```bash
+python3 --version
+python3 -m pip --version
+```
+
+### Windows (vcpkg / "vpkg", PowerShell)
+
+1. Install vcpkg (if not already installed):
+
+```powershell
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+```
+
+2. Install Python from vcpkg:
+
+```powershell
+.\vcpkg install python3:x64-windows
+```
+
+3. Find the installed Python executable:
+
+```powershell
+Get-ChildItem .\installed\x64-windows\tools\python3 -Recurse -Filter python.exe
+```
+
+Use the returned `python.exe` path in the project setup commands below.
+
+## Project Setup (All Platforms)
+
+1. From the repo root, create and activate virtual environment:
+
+Linux/macOS:
+
+```bash
+python3 -m venv .venv
 source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+<path-to-python.exe> -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+2. Upgrade packaging tools:
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+```
+
+3. Install formatter:
+
+```bash
 pip install -e .
 ```
 
-Optional tree-sitter grammars:
+4. Optional extras:
 
 ```bash
-pip install -e .[tree-sitter]
+pip install -e .[lua]
 ```
 
-If you prefer requirements files:
+5. Or install from requirements directly:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Optional tree‑sitter grammars (only if your platform supports it):
+6. Verify install:
 
 ```bash
-pip install -r requirements-tree-sitter.txt
+python -m mj_formatter.main --list-policies --config config/config.toml
 ```
 
 ## Run
 
-Dry run (no writes):
+If editable install added the CLI entrypoint:
 
 ```bash
 mj_formatter --config config/config.toml --root . --check
 ```
 
-Apply formatting:
+Module form (always works from repo root):
 
 ```bash
-mj_formatter --config config/config.toml --root .
+python -m mj_formatter.main --config config/config.toml --root . --check
+```
+
+Apply changes:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --root .
+```
+
+Run on `HazardSystem`:
+
+```bash
+python -m mj_formatter.main --config config/config.toml --root ../HazardSystem
 ```
 
 ## CLI Options
 
-| Option | Description | Notes |
-| --- | --- | --- |
-| `--config PATH` | Config TOML path | Defaults to `config/config.toml` if present |
-| `--style NAME` | Style pack under `styles/` | Overrides `[policies].style` |
-| `--root PATH` | Root directory for discovery | Defaults to `.` |
-| `--include GLOB` | Include glob (repeatable) | Example: `--include "src/**/*.cpp"` |
-| `--exclude GLOB` | Exclude glob (repeatable) | Excludes are applied early during discovery |
-| `--enable LIST` | Enable policies (CSV) | Example: `--enable a,b,c` |
-| `--disable LIST` | Disable policies (CSV) | Example: `--disable a,b,c` |
-| `--jobs N` | Worker processes | `0` = auto (CPU affinity aware) |
-| `--check` | Check only, no writes | Exit code `1` if violations |
-| `--report PATH` | JSONL report path | Also writes `.summary.json` |
-| `--log-level LEVEL` | Logging level | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `--log-file PATH` | Log file path | Console logs are always enabled |
-| `--backup/--no-backup` | Toggle backups | Uses config defaults if not set |
-| `--cache/--no-cache` | Toggle cache | Uses config defaults if not set |
-| `--list-styles` | List styles and exit | |
-| `--list-policies` | List policies and exit | Shows enabled/disabled status |
-| `--validate-registry` | Validate policy registry | |
-| `--undo` | Restore backups and delete them | |
-| `--undo-no-delete` | Restore backups and keep them | |
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config TOML path |
+| `--style NAME` | Style folder under `styles/` |
+| `--root PATH` | Project root for file discovery |
+| `--include GLOB` | Include glob (repeatable) |
+| `--exclude GLOB` | Exclude glob (repeatable) |
+| `--enable LIST` | Enable policies (CSV or repeated) |
+| `--disable LIST` | Disable policies (CSV or repeated) |
+| `--jobs N` | Worker processes (`0` = auto) |
+| `--check` | Check only; no writes |
+| `--verbose` | Print per-file violations/warnings |
+| `--profile` | Aggregate per-policy timing (ms) in summary |
+| `--report PATH` | JSONL report output |
+| `--log-level LEVEL` | Log level |
+| `--log-file PATH` | Log file output |
+| `--backup` / `--no-backup` | Enable/disable backups |
+| `--cache` / `--no-cache` | Enable/disable cache |
+| `--list-styles` | List styles and exit |
+| `--list-policies` | List policies and status table |
+| `--validate-registry` | Validate policy registry |
+| `--undo` | Restore latest backup and delete backup files |
+| `--undo-no-delete` | Restore latest backup and keep backup files |
 
-## Styles
+## Style Packs
 
-Project configuration:
+Style configuration lives under:
+
+```text
+styles/<style_name>/
+  enable/enable.toml
+  format/*.toml
 ```
+
+Per-policy safety contract (optional in each `format/*.toml`):
+
+- `touch_contract = "any"`
+- `touch_contract = "code_only"`
+- `touch_contract = "preprocessor_only"`
+- `touch_contract = "whitespace_only"`
+
+Project-level runtime config:
+
+```text
 config/config.toml
 ```
 
-Style pack layout:
-```
-styles/<style_name>/
-  format/*.toml          # one policy per file
-  enable/enable.toml     # enable/disable list
-```
+## Parsing and Policy Backends
 
-Policies not listed in `enable.toml` are **disabled by default** and produce a warning with an enable example.
+- `parse_mode = "text"`: text-based policies.
+- `parse_mode = "tree_sitter"`: syntax-tree policies.
+- `parse_mode = "clang"`: semantic/clang-backed policies.
+- `type = "lua"`: Lua policy scripts.
 
-## Policy Types (Plan B)
+Default parser strategy is hybrid and uses policy needs to decide parse work.
+For parser-required policies (`tree_sitter` / `clang`), backend fallback-to-text is disabled; if the backend is unavailable the policy is skipped with a warning.
 
-Policies are configured in TOML and instantiated by type:
-- `type = "align_columns"` (declarative)
-- `type = "trim_trailing_whitespace"` (declarative)
-- `type = "regex_replace"` (declarative)
-- `type = "python"` (uses built-in Python policies)
-- `type = "lua"` (optional Lua policy; requires `pip install -e .[lua]`)
+Relevant runtime controls in `config/config.toml`:
 
-Example:
-```toml
-[policy]
-name = "align_assignments"
-enabled = true
-type = "align_columns"
-operator = "="
-ignore_in = ["for", "if", "while", "switch"]
-```
+- `post_edit_check_enabled = true`: re-parse before/after and block unsafe output.
+- `post_edit_retry_enabled = true`: retry failed post-edit checks from original text.
+- `post_edit_retry_max_attempts = 6`
+- `post_edit_retry_confidence_step = 0.05`
+- `post_edit_retry_confidence_max = 1.00`
+- `confidence_blocking_enabled = true`
+- `confidence_blocking_min = 0.70`
+- `confidence_blocking_policies = ["naming_conventions", "snake_case"]`
+- `run_journal_dir = "scripts/mj_formatter/runs"`: per-run state journal (`RUNNING`/`COMPLETED`/`FAILED`).
 
-Lua helpers available via `mj`:
-- `mj.regex_replace(text, pattern, repl, flags)`
-- `mj.split_lines(text)`
-- `mj.join_lines(lines)`
-- `mj.log(level, message)`
+Durability/fail-safe notes:
 
-## Performance Notes
+- cache/report/metrics/manifest writes are atomic (`temp -> fsync -> replace`)
+- parser workers use thread-local parser instances for safer multi-threaded parse execution
+- async metrics/log queues track and warn on dropped events under backpressure
 
-- File discovery uses a single `os.walk` and prunes excluded directories early for large repos.
-- Parallelism is process-based (not threads). On Linux it prefers `fork` for faster startup; elsewhere it uses `spawn`.
-- `--jobs 0` picks the available CPU count (honors CPU affinity in containers/cgroups).
+## Core Package Layout
 
-## Policy Control
+`core/` has been split by concern:
 
-You can enable/disable policies in multiple ways:
+- `core/config/`: config and `.editorconfig` resolution
+- `core/processing/`: formatter engine and per-file processor
+- `core/parsing/`: clang/tree-sitter parse utilities
+- `core/policy/`: policy selection/cache/conflict detection
+- `core/files/`: I/O, cache file, backup, undo, report writing
+- `core/reporting/`: metrics process/client and table output
+- `core/runtime/`: process orchestration and run lifecycle
+- `core/engine/context/`: context engine (code context builder, edit guard, post-edit checker)
+- `core/types/`, `core/utilities/`, `core/logging/`: shared support modules
 
-- `enable/enable.toml`
-  - `[enable].enabled` / `[enable].disabled`
-- `config.toml`
-  - `[policies].enabled` / `[policies].disabled`
-- CLI
-  - `--enable policy_a,policy_b`
-  - `--disable policy_c`
-- Environment
-  - `MJ_FORMATTER_ENABLE=policy_a,policy_b`
-  - `MJ_FORMATTER_DISABLE=policy_c`
+## Performance and Profiling
 
-## Utilities
+Profile run:
 
-List styles:
 ```bash
-mj_formatter --list-styles
+python -m mj_formatter.main --config config/config.toml --root ../HazardSystem --check --no-cache --profile
 ```
 
-List policies (table with status):
+Profile matrix run (reads `[profiling]` and `[[profiling.matrix]]` from `config/config.toml`):
+
 ```bash
-mj_formatter --list-policies --style default
+python scripts/profile_matrix.py --config config/config.toml
 ```
 
-Validate registry:
-```bash
-mj_formatter --validate-registry
-```
+Artifacts:
+
+- CSV: `scripts/mj_formatter/profile_matrix/profile_matrix.csv`
+- Markdown: `scripts/mj_formatter/profile_matrix/profile_matrix.md`
+- Raw `.log`/`.json` artifacts are kept temporary and cleaned after each run.
+
+Summary includes:
+
+- `elapsed`, `throughput`, cache hits
+- top policy counts
+- top policy times (`top policy times (ms): ...`)
+
+Recent optimization included:
+
+- naming-conventions semantic rename now precomputes identifier occurrence counts once per file instead of rescanning text per symbol.
+
+## Cache, Reports, and Backups
+
+- Policy cache path: `styles/cache` (configurable)
+- Report JSONL: `scripts/mj_formatter/reports/format_report.jsonl`
+- Summary JSON: `*.summary.json`
+- Backups: suffix or mirror-directory mode (configurable)
 
 ## Undo
 
-Restore from latest backups (deletes backups on success):
-
 ```bash
-mj_formatter --undo --config config/config.toml
+python -m mj_formatter.main --config config/config.toml --undo
+python -m mj_formatter.main --config config/config.toml --undo-no-delete
 ```
 
-Restore without deleting backups:
-
-```bash
-mj_formatter --undo-no-delete --config config/config.toml
-```
-
-## Reports & Backups
-
-- JSONL report: `scripts/mj_formatter/reports/format_report.jsonl`
-- Summary report: `scripts/mj_formatter/reports/format_report.summary.json`
-- Backups (configurable): `scripts/mj_formatter/backups/` or `*.bak`
-
-## Hybrid Parsing
-
-Policies can declare `parse_mode`:
-- `text` (default): fast, line‑based.
-- `tree_sitter`: uses tree‑sitter for structure.
-- `clang`: reserved for future semantic parsing.
-
-## Tests and Benchmarks
+## Tests
 
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest -q
 ```
-
-Benchmark (via pytest‑benchmark):
-
-```bash
-python -m pytest -q tests/bench_formatter_engine.py
-```
-
-## Env
-
-Copy `scripts/mj_formatter/.env.example` to `.env` if you want to keep local overrides for `MJ_FORMATTER_ENABLE` / `MJ_FORMATTER_DISABLE`.
