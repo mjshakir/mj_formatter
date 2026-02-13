@@ -1,0 +1,61 @@
+[formatter]
+root = "."
+include = ["include/**/*.hpp", "include/**/*.h", "src/**/*.cpp", "src/**/*.hpp", "src/**/*.h"]
+exclude = [
+  "build/**",
+  "build-*/**",
+  ".git/**",
+  "scripts/**",
+  "**/*.bak",
+]
+
+# 0 means auto (CPU count)
+jobs = 0
+
+# if true, only reports issues; does not write changes
+check = false
+
+# backup controls
+backup = true
+backup_mode = "suffix" # "suffix" or "mirror"
+backup_suffix = ".bak"
+backup_dir = "scripts/mj_formatter/backups"
+
+# reporting
+report_path = "scripts/mj_formatter/reports/policy_p2_post_on.jsonl"
+
+# cache
+cache_enabled = true
+cache_path = "scripts/mj_formatter/.cache/cache.bin"
+policy_cache_path = "styles/default/cache/policy_cache.bin"
+sort_results = true
+
+# logging
+log_level = "INFO"
+log_file = "scripts/mj_formatter/logs/mj_formatter.log"
+async_logging = true
+log_queue_size = 10000
+shard_merge_workers = 2
+clang_args = []
+clang_compdb = ""
+clang_args_mode = "merge"
+parser_strategy = "policy"
+clang_library_paths = []
+parse_pool_workers = 2
+post_edit_check_enabled = true
+confidence_blocking_enabled = true
+confidence_blocking_min = 0.70
+confidence_blocking_policies = ["naming_conventions", "snake_case"]
+
+[policies]
+# default can be "all" or "none"
+default = "all"
+# explicit overrides
+enabled = []
+disabled = []
+# optional order; if empty, registry order is used
+order = []
+# style pack folder under styles/<style>/
+style = "default"
+# optional explicit policy files (relative to config.toml)
+files = []

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from mj_formatter.core.formatter_engine import FormatterEngine
-from mj_formatter.core.structs import AppConfig
+from mj_formatter.core.processing import FormatterEngine
+from mj_formatter.core.types import AppConfig
 
 
 def _make_config() -> AppConfig:
