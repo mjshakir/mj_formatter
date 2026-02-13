@@ -318,15 +318,34 @@ class NamespaceEndCommentsPolicy(Policy):
         return label
 
     def _function_short_label(self, label: str, fallback: str) -> str:
-        match = re.search(r"([~A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*\(", label)
-        if not match:
+        open_idx = self._top_level_paren_index(label)
+        if open_idx < 0:
             return fallback
-        name = str(match.group(1) or "")
+
+        prefix = label[:open_idx].strip()
+        if not prefix:
+            return fallback
+        name = prefix.split()[-1]
+        if not name:
+            return fallback
         if "::" in name:
             name = name.split("::")[-1]
         if not name:
             return fallback
         return f"{name}(...)"
+
+    def _top_level_paren_index(self, text: str) -> int:
+        depth = 0
+        for idx, ch in enumerate(text):
+            if ch == "<":
+                depth += 1
+                continue
+            if ch == ">":
+                depth = max(0, depth - 1)
+                continue
+            if ch == "(" and depth == 0:
+                return idx
+        return -1
 
     def _normalize_control_label(self, kind: str, label: str) -> str:
         control = {"if", "while", "for", "switch", "catch"}

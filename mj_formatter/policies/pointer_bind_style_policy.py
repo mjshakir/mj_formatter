@@ -65,7 +65,12 @@ class PointerBindStylePolicy(Policy):
                 continue
             prev = filtered[-1]
             if current[0] < prev[1]:
-                if (current[1] - current[0]) <= (prev[1] - prev[0]):
+                prev_score = prev[2].count("*") + prev[2].count("&")
+                current_score = current[2].count("*") + current[2].count("&")
+                if current_score > prev_score:
+                    filtered[-1] = current
+                    continue
+                if current_score == prev_score and (current[1] - current[0]) > (prev[1] - prev[0]):
                     filtered[-1] = current
                 continue
             filtered.append(current)
@@ -158,6 +163,8 @@ class PointerBindStylePolicy(Policy):
             start -= 1
 
         raw = data[start:name_start].decode("utf-8", errors="ignore")
+        if not self._is_safe_pointer_spacing_segment(raw):
+            return None
         ptr_tokens = "".join(ch for ch in raw if ch in {"*", "&"})
         if not ptr_tokens:
             return None
@@ -174,6 +181,17 @@ class PointerBindStylePolicy(Policy):
         line = int(getattr(node, "start_point", (0, 0))[0]) + 1
         col = int(getattr(node, "start_point", (0, 0))[1]) + 1
         return start, name_start, replacement, line, col
+
+    def _is_safe_pointer_spacing_segment(self, raw: str) -> bool:
+        # Keep pointer_bind_style non-destructive:
+        # only normalize pure whitespace + pointer/reference token runs.
+        if not raw:
+            return False
+        for ch in raw:
+            if ch in {" ", "\t", "*", "&"}:
+                continue
+            return False
+        return any(ch in {"*", "&"} for ch in raw)
 
     def _has_declaration_ancestor(self, node: Any) -> bool:
         current = getattr(node, "parent", None)

@@ -6,6 +6,7 @@ enabled = [
   "section_title_normalizer",
   "include_order",
   "align_assignments",
+  "compact_declarations",
   "pragma_once_spacing",
   "operator_overload_spacing",
   "brace_style",

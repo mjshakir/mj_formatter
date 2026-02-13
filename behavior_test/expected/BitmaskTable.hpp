@@ -407,7 +407,7 @@ namespace HazardSystem {
                 }// end while (m_size.load(std::memory_order_relaxed) < capacity)
                 return std::nullopt;
                 //--------------------------
-            } // end or(...)
+            } // end acquire_data(...)
             //--------------------------
             std::optional<iterator> acquire_data_iterator(void) {
                 //--------------------------
@@ -763,7 +763,7 @@ namespace HazardSystem {
                     //--------------------------
                     hint = part_opt.value() + 1;
                 }// end for
-            } // end or(...)
+            } // end for_each_active_fast(...)
             //--------------------------
             template<uint16_t M = N, typename Fn>
             std::enable_if_t<(M > 0) and (M <= 64), bool> find_data(Fn&& fn) const {
@@ -945,7 +945,7 @@ namespace HazardSystem {
                     }// end if (m_bitmask[probe].load(std::memory_order_acquire) != ~0ULL)
                 }// end for (size_t offset = 0; offset < mask_count_size; ++offset)
                 return std::nullopt;
-            } // end or(...)
+            } // end scan_available(...)
             //--------------------------
             template<uint16_t M = N>
             std::enable_if_t<(M == 0) or (M > 64), bool>
@@ -962,7 +962,7 @@ namespace HazardSystem {
                 }// end if (m_bitmask[part].load(std::memory_order_acquire) != ~0ULL)
                 //--------------------------
                 return true;
-            } // end or(...)
+            } // end refresh_hint(...)
             //--------------------------
             template<uint16_t M = N>
             std::enable_if_t<(M == 0) or (M > 64), bool>
@@ -971,7 +971,7 @@ namespace HazardSystem {
                     return true;
                 }// end if (desired != ~0ULL)
                 return refresh_hint(part, _c_available_plane);
-            } // end or(...)
+            } // end update_on_full(...)
             //--------------------------
             template<uint16_t M = N>
             std::enable_if_t<(M == 0) or (M > 64), bool>
@@ -986,7 +986,7 @@ namespace HazardSystem {
                 }// end if (!tree_enabled)
                 //--------------------------
                 return tree_ptr()->set(static_cast<size_t>(part), _c_available_plane);
-            } // end or(...)
+            } // end available_not_full(...)
             //--------------------------
             template<uint16_t M = N>
             std::enable_if_t<(M == 0) or (M > 64), bool> mark_non_empty(IndexType part) noexcept {

@@ -33,3 +33,36 @@ def test_pointer_bind_style_supports_bind_to_name() -> None:
     result = policy.apply(ParseContext(text=text, path="sample.cpp", tree_sitter_tree=tree))
 
     assert result.text == "int *value = nullptr;\n"
+
+
+def test_pointer_bind_style_keeps_const_qualifier_segments_unchanged() -> None:
+    text = "int * const value = nullptr;\n"
+    manager = ParserManager()
+    tree, _, warning = manager.parse_tree_sitter(text, "sample.cpp")
+    if tree is None:
+        pytest.skip(f"tree-sitter unavailable: {warning}")
+
+    policy = PointerBindStylePolicy({"style": "bind_to_type"})
+    result = policy.apply(ParseContext(text=text, path="sample.cpp", tree_sitter_tree=tree))
+
+    # The policy should avoid rewriting complex pointer segments that include qualifiers.
+    assert result.text == text
+
+
+def test_pointer_bind_style_formats_function_signature_pointers_and_refs() -> None:
+    text = (
+        "bool compare_exchange_weak_data(T *&expected, T *desired, "
+        "const std::memory_order &order);\n"
+    )
+    manager = ParserManager()
+    tree, _, warning = manager.parse_tree_sitter(text, "sample.cpp")
+    if tree is None:
+        pytest.skip(f"tree-sitter unavailable: {warning}")
+
+    policy = PointerBindStylePolicy({"style": "bind_to_type"})
+    result = policy.apply(ParseContext(text=text, path="sample.cpp", tree_sitter_tree=tree))
+
+    assert (
+        result.text
+        == "bool compare_exchange_weak_data(T*& expected, T* desired, const std::memory_order& order);\n"
+    )

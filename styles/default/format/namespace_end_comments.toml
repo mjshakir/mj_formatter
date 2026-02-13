@@ -10,7 +10,7 @@ blocks = []
 max_named_lines = 40
 
 # if label text itself is too long, use shortened form like if(...)
-max_label_length = 96
+max_label_length = 48
 
 # replace incorrect existing end comments
 replace_existing = true
