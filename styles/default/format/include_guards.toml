@@ -6,3 +6,4 @@ touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whi
 
 # options: pragma_once | include_guard | both
 mode = "pragma_once"
+header_extensions = [".h", ".hpp", ".hh", ".hxx"]

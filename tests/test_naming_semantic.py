@@ -9,6 +9,36 @@ from mj_formatter.core.parsing import ParserManager
 from mj_formatter.policies.naming_conventions_policy import NamingConventionsPolicy, _Decl
 
 
+def _naming_policy_config(overrides: dict[str, object] | None = None) -> dict[str, object]:
+    config: dict[str, object] = {
+        "standard": "mj",
+        "standards": {
+            "mj": {
+                "local_prefix": "_",
+                "member_prefix": "m_",
+                "global_prefix": "g_",
+                "static_prefix": "s_",
+                "const_prefix": "c_",
+                "atomic_prefix": "a_",
+                "pointer_prefix": "p_",
+                "shared_ptr_prefix": "sp_",
+                "unique_ptr_prefix": "up_",
+                "weak_ptr_prefix": "wp_",
+                "constexpr_prefix_upper": "C_",
+                "static_prefix_upper": "S_",
+                "function_case": "snake",
+                "type_case": "camel",
+                "namespace_case": "camel",
+                "macro_case": "upper_snake",
+                "constexpr_case": "upper_snake",
+            }
+        },
+    }
+    if overrides:
+        config.update(overrides)
+    return config
+
+
 def _nth_span(text: str, needle: str, occurrence: int) -> tuple[int, int]:
     start = -1
     pos = 0
@@ -57,14 +87,16 @@ def test_naming_semantic_renames_declaration_and_references() -> None:
         code_context=build_code_context(path=path, text=text, clang_ast=tu, tree_sitter_tree=None),
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
             "use_semantic_rename": True,
             "min_confidence": 0.5,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -142,14 +174,16 @@ def test_naming_semantic_risk_gate_skips_cross_file_symbols() -> None:
         code_context=code_context,
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
             "use_semantic_rename": True,
             "min_confidence": 0.1,
             "max_risk": "low",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -233,7 +267,8 @@ def test_naming_semantic_strict_parser_consensus_skips_low_consensus() -> None:
         code_context=code_context,
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
@@ -242,7 +277,8 @@ def test_naming_semantic_strict_parser_consensus_skips_low_consensus() -> None:
             "parser_consensus_min": 0.80,
             "min_confidence": 0.1,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -326,7 +362,8 @@ def test_naming_semantic_local_scope_purity_gate() -> None:
         code_context=code_context,
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
@@ -334,7 +371,8 @@ def test_naming_semantic_local_scope_purity_gate() -> None:
             "strict_local_scope": True,
             "min_confidence": 0.1,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -418,7 +456,8 @@ def test_naming_semantic_consensus_mode_off_allows_low_consensus() -> None:
         code_context=code_context,
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
@@ -427,7 +466,8 @@ def test_naming_semantic_consensus_mode_off_allows_low_consensus() -> None:
             "parser_consensus_min": 0.99,
             "min_confidence": 0.1,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -437,16 +477,23 @@ def test_naming_semantic_consensus_mode_off_allows_low_consensus() -> None:
 
 def test_naming_standards_can_be_overridden_from_config() -> None:
     policy = NamingConventionsPolicy(
-        {
-            "standard": "custom",
-            "standards": {
-                "custom": {
-                    "local_prefix": "loc_",
-                    "member_prefix": "mem_",
-                    "global_prefix": "glob_",
-                }
-            },
-        }
+        _naming_policy_config(
+            {
+                "standard": "custom",
+                "standards": {
+                    "mj": {
+                        "local_prefix": "_",
+                        "member_prefix": "m_",
+                        "global_prefix": "g_",
+                    },
+                    "custom": {
+                        "local_prefix": "loc_",
+                        "member_prefix": "mem_",
+                        "global_prefix": "glob_",
+                    },
+                },
+            }
+        )
     )
     local = policy._name_variable(
         _Decl(
@@ -472,7 +519,7 @@ def test_naming_standards_can_be_overridden_from_config() -> None:
 
 
 def test_parameter_naming_omits_local_prefix_but_keeps_pointer_and_function_prefixes() -> None:
-    policy = NamingConventionsPolicy({"standard": "mj"})
+    policy = NamingConventionsPolicy(_naming_policy_config())
     plain_param = policy._name_variable(
         _Decl(
             name="_value",
@@ -500,7 +547,7 @@ def test_parameter_naming_omits_local_prefix_but_keeps_pointer_and_function_pref
 
 
 def test_atomic_prefix_is_applied_for_param_member_and_local() -> None:
-    policy = NamingConventionsPolicy({"standard": "mj"})
+    policy = NamingConventionsPolicy(_naming_policy_config())
     param_name = policy._name_variable(
         _Decl(
             name="value",
@@ -529,7 +576,7 @@ def test_atomic_prefix_is_applied_for_param_member_and_local() -> None:
 
 
 def test_constructor_name_normalization_uses_scope_name() -> None:
-    policy = NamingConventionsPolicy({"standard": "mj"})
+    policy = NamingConventionsPolicy(_naming_policy_config())
     target = policy._target_name(
         _Decl(
             name="atomic_unique_ptr",
@@ -600,14 +647,16 @@ def test_semantic_rename_skips_when_reference_map_is_incomplete() -> None:
         ),
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
             "use_semantic_rename": True,
             "min_confidence": 0.1,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -645,14 +694,16 @@ def test_naming_tree_fallback_skips_variable_renames_without_semantic_context() 
         code_context=None,
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": False,
             "use_tree_sitter": True,
             "use_semantic_rename": True,
             "min_confidence": 0.1,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)
@@ -715,14 +766,16 @@ def test_semantic_member_rename_requires_reference_evidence() -> None:
         ),
     )
     policy = NamingConventionsPolicy(
-        {
+        _naming_policy_config(
+            {
             "standard": "mj",
             "prefer_clang_semantic": True,
             "use_tree_sitter": False,
             "use_semantic_rename": True,
             "min_confidence": 0.1,
             "max_risk": "high",
-        }
+            }
+        )
     )
 
     result = policy.apply(context)

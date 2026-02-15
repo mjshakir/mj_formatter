@@ -7,6 +7,10 @@ from mj_formatter.core.types import ParseContext
 from mj_formatter.policies.include_guard_policy import IncludeGuardPolicy
 
 
+def _policy_config(mode: str) -> dict[str, object]:
+    return {"mode": mode, "header_extensions": [".h", ".hpp", ".hh", ".hxx"]}
+
+
 def _parse_tree(text: str, path: str):
     manager = ParserManager()
     tree, _, warning = manager.parse_tree_sitter(text, path)
@@ -18,7 +22,7 @@ def _parse_tree(text: str, path: str):
 def test_include_guard_respects_existing_pragma_once() -> None:
     text = "#pragma once\n\nint value = 0;\n"
     tree = _parse_tree(text, "sample.hpp")
-    policy = IncludeGuardPolicy({"mode": "pragma_once"})
+    policy = IncludeGuardPolicy(_policy_config("pragma_once"))
     result = policy.apply(ParseContext(text=text, path="sample.hpp", tree_sitter_tree=tree))
     assert result.text == text
     assert not result.edits
@@ -27,7 +31,7 @@ def test_include_guard_respects_existing_pragma_once() -> None:
 def test_include_guard_adds_pragma_once_when_missing() -> None:
     text = "int value = 0;\n"
     tree = _parse_tree(text, "sample.hpp")
-    policy = IncludeGuardPolicy({"mode": "pragma_once"})
+    policy = IncludeGuardPolicy(_policy_config("pragma_once"))
     result = policy.apply(ParseContext(text=text, path="sample.hpp", tree_sitter_tree=tree))
     assert result.text.startswith("#pragma once\n")
     assert result.edits
@@ -41,7 +45,7 @@ def test_include_guard_detects_existing_ifndef_guard() -> None:
         "#endif\n"
     )
     tree = _parse_tree(text, "sample.hpp")
-    policy = IncludeGuardPolicy({"mode": "include_guard"})
+    policy = IncludeGuardPolicy(_policy_config("include_guard"))
     result = policy.apply(ParseContext(text=text, path="sample.hpp", tree_sitter_tree=tree))
     assert result.text == text
     assert not result.edits

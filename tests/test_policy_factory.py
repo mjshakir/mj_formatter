@@ -42,6 +42,12 @@ def test_policy_factory_creates_declarative_policy() -> None:
                 "type": "align_columns",
                 "enabled": True,
                 "operator": "=",
+                "ignore_in": ["for", "if", "while", "switch"],
+                "non_assignment_patterns": [
+                    "\\)\\s*=\\s*(?:delete|default)\\s*;",
+                    "\\)\\s*=\\s*0\\s*;",
+                    "^\\s*template\\s*<",
+                ],
             }
         }
     )

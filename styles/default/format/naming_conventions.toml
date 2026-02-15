@@ -6,8 +6,7 @@ touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_
 
 # standards: mj (default), google, llvm, qt
 standard = "mj"
-use_tree_sitter = true
-prefer_clang_semantic = true
+# naming_conventions is clang-semantic only
 use_semantic_rename = true
 clang_full_parse = false
 min_confidence = 0.75
@@ -15,42 +14,57 @@ max_risk = "medium"
 parser_consensus_mode = "advisory" # off | advisory | strict
 parser_consensus_min = 0.70
 strict_local_scope = true
+enforcement = "hard" # must | hard | soft | advisory
 
-control_keywords = ["if", "for", "while", "switch", "catch"]
-skip_name_keywords = [
-  "if",
-  "for",
-  "while",
-  "switch",
-  "catch",
-  "return",
-  "sizeof",
-  "alignof",
-  "operator",
-]
-reserved_identifiers = [
-  "this",
-  "nullptr",
-  "default",
-  "delete",
-  "new",
-  "override",
-  "final",
-  "std",
-  "atomic",
-]
-builtin_types = [
-  "void",
-  "bool",
-  "char",
-  "short",
-  "int",
-  "long",
-  "float",
-  "double",
-  "signed",
-  "unsigned",
-  "size_t",
-  "ssize_t",
-  "auto",
-]
+[policy.standards.mj]
+local_prefix = "_"
+member_prefix = "m_"
+global_prefix = "g_"
+static_prefix = "s_"
+const_prefix = "c_"
+atomic_prefix = "a_"
+pointer_prefix = "p_"
+shared_ptr_prefix = "sp_"
+unique_ptr_prefix = "up_"
+weak_ptr_prefix = "wp_"
+constexpr_prefix_upper = "C_"
+static_prefix_upper = "S_"
+function_case = "snake"
+type_case = "camel"
+namespace_case = "camel"
+macro_case = "upper_snake"
+constexpr_case = "upper_snake"
+
+[policy.confidence_profile]
+low_score_downgrade_threshold = 0.45
+high_score_upgrade_threshold = 0.90
+high_consensus_upgrade_threshold = 0.90
+low_consensus_downgrade_threshold = 0.60
+project_consensus_upgrade_threshold = 0.92
+project_score_upgrade_threshold = 0.82
+reason_low_consensus_threshold = 0.60
+risk_limit_hard = 0.15
+risk_limit_soft = 0.30
+risk_limit_advisory = 0.95
+risk_limit_floor = 0.05
+delta_risk_penalty_cap = 0.15
+retry_risk_penalty = 0.05
+line_confidence_default = 0.50
+line_index_weight = 0.65
+line_block_weight = 0.35
+line_neighbor_deltas = [1, 2]
+line_neighbor_decay = 0.15
+block_confidence_default = 0.70
+context_bonus_clang = 0.02
+context_refs_threshold_low = 32
+context_bonus_refs_low = 0.02
+context_refs_threshold_high = 128
+context_bonus_refs_high = 0.02
+context_scope_threshold_low = 0.85
+context_bonus_scope_low = 0.02
+context_scope_threshold_high = 0.95
+context_bonus_scope_high = 0.02
+context_hybrid_threshold = 0.85
+context_bonus_hybrid = 0.01
+context_coverage_threshold = 0.80
+context_bonus_coverage = 0.01

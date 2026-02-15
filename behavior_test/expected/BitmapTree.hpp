@@ -24,13 +24,13 @@ namespace HazardSystem {
     class HAZARDSYSTEM_API BitmapTree {
         //--------------------------------------------------------------
         private:
-            static constexpr size_t S_C_WORD_BITS   = static_cast<size_t>(std::numeric_limits<uint64_t>::digits);
-            static constexpr size_t S_C_LEVEL_SHIFT = 6UL; // log2(64)
+            static constexpr size_t C_WORD_BITS   = static_cast<size_t>(std::numeric_limits<uint64_t>::digits);
+            static constexpr size_t C_LEVEL_SHIFT = 6UL; // log2(64)
             //--------------------------
-            static_assert((1ULL << S_C_LEVEL_SHIFT) == S_C_WORD_BITS, "BitmapTree assumes 64-bit words");
+            static_assert((1ULL << C_LEVEL_SHIFT) == C_WORD_BITS, "BitmapTree assumes 64-bit words");
             //--------------------------
-            static constexpr size_t S_C_MAX_PLANES = 2UL;
-            static constexpr size_t S_C_MAX_LEVELS = (S_C_WORD_BITS + (S_C_LEVEL_SHIFT - 1)) / S_C_LEVEL_SHIFT;
+            static constexpr size_t C_MAX_PLANES = 2UL;
+            static constexpr size_t C_MAX_LEVELS = (C_WORD_BITS + (C_LEVEL_SHIFT - 1)) / C_LEVEL_SHIFT;
             //--------------------------
             enum class Mode : uint8_t {Empty = 1 << 0, SingleWord = 1 << 1, Tree = 1 << 2};
         //--------------------------------------------------------------
@@ -108,14 +108,14 @@ namespace HazardSystem {
             //--------------------------------------------------------------
         private:
             //--------------------------------------------------------------
-            Mode _m_mode;
-            size_t _m_leaf_bits, _m_planes, _m_levels, _m_words_per_plane;
+            Mode m_mode;
+            size_t m_leaf_bits, m_planes, m_levels, m_words_per_plane;
             //--------------------------
-            std::array<std::atomic<uint64_t>, S_C_MAX_PLANES> m_single;
-            std::array<size_t, S_C_MAX_LEVELS> _m_level_words, _m_level_offsets;
+            std::array<std::atomic<uint64_t>, C_MAX_PLANES> m_single;
+            std::array<size_t, C_MAX_LEVELS> m_level_words, m_level_offsets;
             std::unique_ptr<std::atomic<uint64_t>[]> m_tree_words;
         //--------------------------------------------------------------
-    }; // end BitmapTree(...)
+    }; // class BitmapTree
     //--------------------------------------------------------------
-} // end namespace HazardSystem
+} // namespace HazardSystem
 //--------------------------------------------------------------

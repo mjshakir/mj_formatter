@@ -2,6 +2,7 @@
 name = "spacing_style"
 enabled = false
 type = "python"
+touch_contract = "whitespace_only" # any | code_only | preprocessor_only | whitespace_only
 
 # options: spaces_4 | spaces_2 | tabs
 indent_style = "spaces_4"

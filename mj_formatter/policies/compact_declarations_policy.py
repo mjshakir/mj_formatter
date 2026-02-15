@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from ..core.types import Edit
 from ..core.types import ParseContext
 from ..core.types import PolicyResult
@@ -9,22 +7,14 @@ from ..core.types import Violation
 from ..core.utilities import warn_once
 from .policy_base import Policy
 
+_Candidate = tuple[int, int, int, str, str, str, str]
+
 
 class CompactDeclarationsPolicy(Policy):
     name = "compact_declarations"
     description = "Compact adjacent same-type declarations into a single declaration"
     parse_mode = "tree_sitter"
     requires_code_context = False
-
-    @dataclass(frozen=True)
-    class _Candidate:
-        start: int
-        end: int
-        line: int
-        node_type: str
-        indent: str
-        type_prefix: str
-        name: str
 
     def apply(self, context: ParseContext) -> PolicyResult:
         tree = context.tree_sitter_tree
@@ -157,24 +147,16 @@ class CompactDeclarationsPolicy(Policy):
         indent_len = len(raw) - len(raw.lstrip(" \t"))
         indent = raw[:indent_len]
         line = int(getattr(node, "start_point", (0, 0))[0]) + 1
-        return CompactDeclarationsPolicy._Candidate(
-            start=start,
-            end=end,
-            line=line,
-            node_type=node_type,
-            indent=indent,
-            type_prefix=type_prefix,
-            name=name,
-        )
+        return (start, end, line, node_type, indent, type_prefix, name)
 
     def _can_group(self, left: _Candidate, right: _Candidate, data: bytes) -> bool:
-        if left.node_type != right.node_type:
+        if left[3] != right[3]:
             return False
-        if left.indent != right.indent:
+        if left[4] != right[4]:
             return False
-        if left.type_prefix != right.type_prefix:
+        if left[5] != right[5]:
             return False
-        between = data[left.end:right.start].decode("utf-8", errors="ignore")
+        between = data[left[1]:right[0]].decode("utf-8", errors="ignore")
         return between.strip() == ""
 
     def _build_replacement(
@@ -182,14 +164,14 @@ class CompactDeclarationsPolicy(Policy):
         group: list[_Candidate],
         data: bytes,
     ) -> tuple[int, int, str, int] | None:
-        names = [item.name for item in group]
-        replacement = f"{group[0].indent}{group[0].type_prefix} {', '.join(names)};"
-        start = group[0].start
-        end = group[-1].end
+        names = [item[6] for item in group]
+        replacement = f"{group[0][4]}{group[0][5]} {', '.join(names)};"
+        start = group[0][0]
+        end = group[-1][1]
         current = data[start:end].decode("utf-8", errors="ignore")
         if current == replacement:
             return None
-        return start, end, replacement, group[0].line
+        return start, end, replacement, group[0][2]
 
     def _line_edits(self, before: str, after: str) -> list[Edit]:
         edits: list[Edit] = []

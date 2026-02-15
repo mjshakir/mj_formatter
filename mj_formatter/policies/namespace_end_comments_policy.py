@@ -17,19 +17,22 @@ class NamespaceEndCommentsPolicy(Policy):
     parse_mode = "tree_sitter"
     requires_code_context = True
 
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._blocks = self._required_list("blocks")
+        self._control_block_kinds = {
+            str(item).strip().lower() for item in self._required_list("control_block_kinds") if str(item).strip()
+        }
+        self._max_named_lines = self._required_int("max_named_lines")
+        self._max_label_length = self._required_int("max_label_length")
+        self._replace_existing = self._required_bool("replace_existing")
+
     def apply(self, context: ParseContext) -> PolicyResult:
         blocks = self._resolve_blocks(context)
         if not blocks:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
-        configured_blocks = {
-            str(item).strip().lower()
-            for item in (self._config.get("blocks", []) or [])
-            if str(item).strip()
-        }
-        max_named_lines = int(self._config.get("max_named_lines", 40))
-        max_label_length = int(self._config.get("max_label_length", 96))
-        replace_existing = bool(self._config.get("replace_existing", True))
+        configured_blocks = {str(item).strip().lower() for item in self._blocks if str(item).strip()}
 
         text = context.text
         lines = text.splitlines(keepends=True)
@@ -50,7 +53,7 @@ class NamespaceEndCommentsPolicy(Policy):
                 continue
 
             span_lines = max(0, int(block.close_line) - int(block.open_line))
-            label = self._select_label(block, span_lines, max_named_lines, max_label_length)
+            label = self._select_label(block, span_lines, self._max_named_lines, self._max_label_length)
             expected = f"// end {label}"
 
             line_start, line_end = line_ranges[line_idx]
@@ -58,7 +61,7 @@ class NamespaceEndCommentsPolicy(Policy):
             if comment_idx >= 0:
                 existing = line_text[comment_idx:].strip()
                 if existing == expected:
-                    if comment_idx > 0 and line_text[comment_idx - 1] != " " and replace_existing:
+                    if comment_idx > 0 and line_text[comment_idx - 1] != " " and self._replace_existing:
                         replacements.append((line_start + comment_idx, line_end, f" {expected}"))
                         violations.append(
                             Violation(
@@ -69,7 +72,7 @@ class NamespaceEndCommentsPolicy(Policy):
                             )
                         )
                     continue
-                if not replace_existing:
+                if not self._replace_existing:
                     continue
                 replace_start_idx = comment_idx
                 while replace_start_idx > 0 and line_text[replace_start_idx - 1] == " ":
@@ -348,8 +351,7 @@ class NamespaceEndCommentsPolicy(Policy):
         return -1
 
     def _normalize_control_label(self, kind: str, label: str) -> str:
-        control = {"if", "while", "for", "switch", "catch"}
-        if kind not in control:
+        if kind not in self._control_block_kinds:
             return label
         return re.sub(rf"^{kind}\(", f"{kind} (", label)
 
@@ -366,3 +368,27 @@ class NamespaceEndCommentsPolicy(Policy):
 
     def _normalize_space(self, text: str) -> str:
         return " ".join(str(text or "").strip().split())
+
+    def _required_list(self, key: str) -> list[object]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"namespace_end_comments: missing required list config key '{key}'")
+        return list(value)
+
+    def _required_int(self, key: str) -> int:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"namespace_end_comments: missing required config key '{key}'")
+        try:
+            parsed = int(value)
+        except Exception as exc:
+            raise ValueError(f"namespace_end_comments: invalid int for '{key}': {value!r}") from exc
+        if parsed < 0:
+            raise ValueError(f"namespace_end_comments: '{key}' must be >= 0")
+        return parsed
+
+    def _required_bool(self, key: str) -> bool:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"namespace_end_comments: missing required config key '{key}'")
+        return bool(value)

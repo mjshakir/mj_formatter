@@ -19,17 +19,20 @@ class FunctionVoidParamsPolicy(Policy):
 
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)
-        self._prefer_clang = bool(self._config.get("prefer_clang", True))
-        self._use_tree_sitter = bool(self._config.get("use_tree_sitter", True))
+        self._prefer_clang = self._required_bool("prefer_clang")
+        self._use_tree_sitter = self._required_bool("use_tree_sitter")
+        self._require_void = self._required_bool("require_void")
+        self._no_space_before_paren = self._required_bool("no_space_before_paren")
+        if not self._prefer_clang and not self._use_tree_sitter:
+            raise ValueError(
+                "function_void_params: invalid config (both prefer_clang and use_tree_sitter are false)"
+            )
         self.parse_mode = "clang" if self._prefer_clang else "tree_sitter"
 
     def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
         if not text:
             return PolicyResult(text=text, violations=[], edits=[])
-
-        require_void = bool(self._config.get("require_void", True))
-        no_space = bool(self._config.get("no_space_before_paren", True))
 
         replacements: list[tuple[int, int, str]] = []
         violations: list[Violation] = []
@@ -52,7 +55,7 @@ class FunctionVoidParamsPolicy(Policy):
                 params_text = text[decl.params_start:decl.params_end]
                 if not self._is_empty_param_list(params_text):
                     continue
-                new_params = "(void)" if require_void else "()"
+                new_params = "(void)" if self._require_void else "()"
                 if params_text != new_params:
                     replacements.append((decl.params_start, decl.params_end, new_params))
                     violations.append(
@@ -63,14 +66,18 @@ class FunctionVoidParamsPolicy(Policy):
                             column=decl.column,
                         )
                     )
-                if no_space:
+                if self._no_space_before_paren:
                     space_start, space_end = self._space_before_paren(text, decl.params_start)
                     if space_start is not None:
-                                replacements.append((space_start, space_end, ""))
+                        replacements.append((space_start, space_end, ""))
             return self._apply_replacements(text, replacements, violations)
 
         if self._use_tree_sitter and context.tree_sitter_tree is not None:
-            return self._apply_tree_sitter(context, require_void, no_space)
+            return self._apply_tree_sitter(
+                context,
+                self._require_void,
+                self._no_space_before_paren,
+            )
 
         warn_once(
             "function_void_params_parser_unavailable",
@@ -168,3 +175,9 @@ class FunctionVoidParamsPolicy(Policy):
                         )
                     )
         return PolicyResult(text=updated, violations=violations, edits=edits)
+
+    def _required_bool(self, key: str) -> bool:
+        value = self._config.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"function_void_params: missing required boolean config key '{key}'")
+        return value

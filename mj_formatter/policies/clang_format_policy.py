@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import subprocess
 import shutil
 
@@ -17,36 +16,28 @@ class ClangFormatPolicy(Policy):
     description = "Run clang-format on source text"
     parse_mode = "clang"
 
-    @dataclass(frozen=True)
-    class RunArgs:
-        command: str
-        style: str
-        assume_filename: str
-        extra_args: tuple[str, ...]
-        timeout_seconds: float
-        text: str
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._command = self._required_str("command")
+        self._style = self._required_str("style")
+        self._timeout_seconds = self._required_float("timeout_seconds")
+        self._extra_args = self._required_str_tuple("extra_args")
 
     def apply(self, context: ParseContext) -> PolicyResult:
-        command = str(self._config.get("command", "clang-format")).strip() or "clang-format"
-        resolved_command = self._resolve_command(command)
+        resolved_command = self._resolve_command(self._command)
         if not resolved_command:
             warn_once(
                 "clang_format_missing",
-                "clang_format: binary not found; install clang-format or disable policy",
+                f"clang_format: configured command not found: {self._command}",
             )
             return PolicyResult(text=context.text, violations=[], edits=[])
-        style = str(self._config.get("style", "file")).strip() or "file"
-        timeout_seconds = float(self._config.get("timeout_seconds", 10.0))
-        extra_args = tuple(str(item) for item in (self._config.get("extra_args", []) or []))
         result = self._run(
-            ClangFormatPolicy.RunArgs(
-                command=resolved_command,
-                style=style,
-                assume_filename=context.path,
-                extra_args=extra_args,
-                timeout_seconds=max(0.1, timeout_seconds),
-                text=context.text,
-            )
+            command=resolved_command,
+            style=self._style,
+            assume_filename=context.path,
+            extra_args=self._extra_args,
+            timeout_seconds=max(0.1, self._timeout_seconds),
+            text=context.text,
         )
         if result is None:
             return PolicyResult(text=context.text, violations=[], edits=[])
@@ -65,17 +56,26 @@ class ClangFormatPolicy(Policy):
         ]
         return PolicyResult(text=updated, violations=violations, edits=edits)
 
-    def _run(self, args: "ClangFormatPolicy.RunArgs") -> str | None:
-        cmd: list[str] = [args.command, f"-style={args.style}", f"-assume-filename={args.assume_filename}"]
-        cmd.extend(args.extra_args)
+    def _run(
+        self,
+        *,
+        command: str,
+        style: str,
+        assume_filename: str,
+        extra_args: tuple[str, ...],
+        timeout_seconds: float,
+        text: str,
+    ) -> str | None:
+        cmd: list[str] = [command, f"-style={style}", f"-assume-filename={assume_filename}"]
+        cmd.extend(extra_args)
         try:
             completed = subprocess.run(
                 cmd,
-                input=args.text,
+                input=text,
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=args.timeout_seconds,
+                timeout=timeout_seconds,
             )
         except FileNotFoundError:
             warn_once(
@@ -100,27 +100,7 @@ class ClangFormatPolicy(Policy):
         return completed.stdout
 
     def _resolve_command(self, configured: str) -> str | None:
-        direct = shutil.which(configured)
-        if direct:
-            return direct
-        candidates = [
-            "clang-format",
-            "clang-format-19",
-            "clang-format-18",
-            "clang-format-17",
-            "clang-format-16",
-            "clang-format-15",
-            "clang-format-14",
-        ]
-        seen = set()
-        for item in [configured, *candidates]:
-            if not item or item in seen:
-                continue
-            seen.add(item)
-            resolved = shutil.which(item)
-            if resolved:
-                return resolved
-        return None
+        return shutil.which(configured)
 
     def _line_edits(self, before: str, after: str) -> list[Edit]:
         edits: list[Edit] = []
@@ -155,3 +135,30 @@ class ClangFormatPolicy(Policy):
                 )
             )
         return edits
+
+    def _required_str(self, key: str) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"clang_format: missing required config key '{key}'")
+        text = str(value).strip()
+        if not text:
+            raise ValueError(f"clang_format: empty required config key '{key}'")
+        return text
+
+    def _required_float(self, key: str) -> float:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"clang_format: missing required config key '{key}'")
+        try:
+            parsed = float(value)
+        except Exception as exc:
+            raise ValueError(f"clang_format: invalid float for '{key}': {value!r}") from exc
+        if parsed <= 0.0:
+            raise ValueError(f"clang_format: '{key}' must be > 0")
+        return parsed
+
+    def _required_str_tuple(self, key: str) -> tuple[str, ...]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"clang_format: missing required list config key '{key}'")
+        return tuple(str(item) for item in value)

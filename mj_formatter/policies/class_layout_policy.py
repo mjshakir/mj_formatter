@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Sequence
 from bisect import bisect_left
@@ -13,26 +12,9 @@ from ..core.types import ParseContext
 from ..core.parsing import ParserManager
 from ..core.types import PolicyResult
 from ..core.types import Violation
+from ..core.types import _PreambleItem, _SourceBlock
 from ..core.utilities import warn_once
 from .policy_base import Policy
-
-
-@dataclass(frozen=True)
-class _SourceBlock:
-    start: int
-    end: int
-    text: str
-    full_name: str
-    short_name: str
-    class_name: str | None
-
-
-@dataclass(frozen=True)
-class _PreambleItem:
-    kind: str
-    start: int
-    end: int
-    text: str
 
 
 class ClassLayoutPolicy(Policy):
@@ -43,22 +25,22 @@ class ClassLayoutPolicy(Policy):
 
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)
+        self._source_extensions = self._required_str_tuple("source_extensions")
+        self._header_extensions = self._required_str_tuple("header_extensions")
+        self._header_search_roots = self._required_str_tuple("header_search_roots")
         self._header_cache: dict[str, tuple[int, int, list[tuple[str, str]], dict[str, str]]] = {}
         self._parser_manager = ParserManager()
 
     def apply(self, context: ParseContext) -> PolicyResult:
-        source_exts = tuple(self._config.get("source_extensions", [".cpp", ".cc", ".cxx"]) or [])
-        header_exts = tuple(self._config.get("header_extensions", [".hpp", ".h", ".hh", ".hxx"]) or [])
-
         path = Path(context.path)
-        if path.suffix.lower() not in source_exts:
+        if path.suffix.lower() not in self._source_extensions:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
         if context.code_context is None:
             warn_once("class_layout_no_context", "class_layout: code context unavailable, skipping policy")
             return PolicyResult(text=context.text, violations=[], edits=[])
 
-        header = self._find_header(context.path, header_exts)
+        header = self._find_header(context.path, self._header_extensions)
         if header is None:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
@@ -91,7 +73,7 @@ class ClassLayoutPolicy(Policy):
     def _find_header(self, source_path: str, header_exts: Sequence[str]) -> Path | None:
         src = Path(source_path)
         root = Path(self._config.get("root", ".")).resolve()
-        include_dirs = tuple(self._config.get("header_search_roots", ["include"]) or ["include"])
+        include_dirs = self._header_search_roots
         stem = src.stem
         candidates: list[Path] = []
         for ext in header_exts:
@@ -104,6 +86,15 @@ class ClassLayoutPolicy(Policy):
             if item.exists():
                 return item
         return None
+
+    def _required_str_tuple(self, key: str) -> tuple[str, ...]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"class_layout: missing required list config key '{key}'")
+        items = tuple(str(item).strip() for item in value if str(item).strip())
+        if not items:
+            raise ValueError(f"class_layout: config key '{key}' cannot be empty")
+        return items
 
     def _get_header_order(self, header: Path) -> tuple[list[tuple[str, str]], dict[str, str]]:
         key = str(header.resolve())

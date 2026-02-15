@@ -12,10 +12,16 @@ class SpacingStylePolicy(Policy):
     description = "Enforce spacing/indentation style"
     parse_mode = "tree_sitter"
 
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._use_editorconfig = self._required_bool("use_editorconfig")
+        self._indent_style = self._required_indent_style("indent_style")
+        self._tab_width = self._required_int("tab_width", minimum=1)
+
     def apply(self, context: ParseContext) -> PolicyResult:
-        use_editorconfig = bool(self._config.get("use_editorconfig", True))
-        indent_style = str(self._config.get("indent_style", "spaces_4")).lower()
-        tab_width = int(self._config.get("tab_width", 4))
+        use_editorconfig = self._use_editorconfig
+        indent_style = self._indent_style
+        tab_width = self._tab_width
         if use_editorconfig:
             ec_style = context.editorconfig.get("indent_style", "").strip().lower()
             ec_size = context.editorconfig.get("indent_size")
@@ -24,9 +30,9 @@ class SpacingStylePolicy(Policy):
                 indent_style = "tabs"
             elif ec_style == "space":
                 try:
-                    size = int(ec_size) if ec_size else int(ec_width) if ec_width else 4
+                    size = int(ec_size) if ec_size else int(ec_width) if ec_width else tab_width
                 except ValueError:
-                    size = 4
+                    size = tab_width
                 indent_style = "spaces_2" if size <= 2 else "spaces_4"
             for raw in (ec_width, ec_size):
                 if raw is None:
@@ -82,3 +88,33 @@ class SpacingStylePolicy(Policy):
             column=1,
         )
         return PolicyResult(text="".join(updated_lines), violations=[violation], edits=edits)
+
+    def _required_bool(self, key: str) -> bool:
+        value = self._config.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"spacing_style: missing required boolean config key '{key}'")
+        return value
+
+    def _required_int(self, key: str, *, minimum: int | None = None) -> int:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"spacing_style: missing required integer config key '{key}'")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"spacing_style: invalid integer config key '{key}'") from exc
+        if minimum is not None and parsed < minimum:
+            raise ValueError(f"spacing_style: config key '{key}' must be >= {minimum}")
+        return parsed
+
+    def _required_indent_style(self, key: str) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"spacing_style: missing required config key '{key}'")
+        style = str(value).strip().lower()
+        if style not in {"spaces_2", "spaces_4", "tabs"}:
+            raise ValueError(
+                "spacing_style: config key 'indent_style' must be one of "
+                "'spaces_2', 'spaces_4', or 'tabs'"
+            )
+        return style

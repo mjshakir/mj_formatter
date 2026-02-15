@@ -2,6 +2,10 @@
 
 Policy-driven C/C++ formatter with hybrid parsing support (clang + tree-sitter + Lua policies), backups, cache, and profiling.
 
+This project requires both parser backends:
+- `clang` / `libclang`
+- `tree-sitter` (`tree-sitter`, `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-languages`)
+
 ## Platform Setup (Python + Pip)
 
 This section installs Python from the command line on each OS, then installs `mj_formatter` and runs it.
@@ -194,7 +198,7 @@ python -m mj_formatter.main \
 | `--check` | Check only; no writes |
 | `--verbose` | Print per-file violations/warnings |
 | `--profile` | Aggregate per-policy timing (ms) in summary |
-| `--parser-strategy {policy,hybrid,tree_only,clang_only}` | Override parser strategy for the run |
+| `--parser-strategy hybrid` | Parser strategy (hybrid only; retained for CLI compatibility) |
 | `--parse-pool-workers N` | Per-process parse thread workers |
 | `--post-edit-check / --no-post-edit-check` | Enable/disable post-edit validation |
 | `--batch-autotune / --no-batch-autotune` | Enable/disable worker batch autotuning |
@@ -252,7 +256,22 @@ Relevant runtime controls in `config/config.toml`:
 - `confidence_blocking_enabled = true`
 - `confidence_blocking_min = 0.70`
 - `confidence_blocking_policies = ["naming_conventions", "snake_case"]`
+- Both parsers are mandatory at runtime. Startup fails if either tree-sitter or clang is unavailable.
+- `confidence_default_enforcement = "hard"`: default enforcement (`must`, `hard`, `soft`, `advisory`)
+- `confidence_strict_delta = 0.05`: threshold added for `hard`
+- `confidence_relaxed_delta = 0.10`: threshold subtracted for `advisory`
+- `confidence_context_bonus_cap = 0.08`: max context bonus added to hybrid confidence score
 - `run_journal_dir = "scripts/mj_formatter/runs"`: per-run state journal (`RUNNING`/`COMPLETED`/`FAILED`).
+
+`naming_conventions` now runs in clang-semantic mode only (no tree/text rename fallback).
+Parser runtime is hybrid-only: both clang and tree-sitter are required and context is built from both backends.
+
+Per-policy override in style TOML (`styles/<style>/format/*.toml`):
+
+- `enforcement = "must"`: always apply (post-edit safety still enforced)
+- `enforcement = "hard"`: strict by default, can relax by context
+- `enforcement = "soft"`: adaptable default behavior, can harden by context
+- `enforcement = "advisory"`: report-first; apply only in high-confidence contexts
 
 Durability/fail-safe notes:
 

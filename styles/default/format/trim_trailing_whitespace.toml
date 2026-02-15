@@ -2,6 +2,7 @@
 name = "trim_trailing_whitespace"
 enabled = true
 type = "lua"
+touch_contract = "whitespace_only" # any | code_only | preprocessor_only | whitespace_only
 script = "styles/default/lua/trim_trailing_whitespace.lua"
 function = "apply"
 sandbox = true

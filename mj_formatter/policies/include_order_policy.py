@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..core.types import Edit
 from ..core.types import ParseContext
@@ -18,6 +18,28 @@ class IncludeOrderPolicy(Policy):
     # Use clang for classification and tree-sitter for precise include region extraction.
     parse_mode = "clang"
     _use_tree_sitter = True
+    _REQUIRED_GROUPS: tuple[str, ...] = ("main", "standard", "third_party", "project", "local")
+
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._order_header = self._required_str_tuple("order_header")
+        self._order_source = self._required_str_tuple("order_source")
+        self._standard_headers = self._required_str_tuple("standard_headers")
+        self._standard_prefixes = self._required_str_tuple("standard_prefixes")
+        self._project_headers = self._required_str_tuple("project_headers")
+        self._project_prefixes = self._required_str_tuple("project_prefixes")
+        self._main_header_extensions = self._required_str_tuple("main_header_extensions")
+        self._standard_path_markers = self._required_str_tuple("standard_header_path_markers")
+        self._clang_include_prefix = self._required_str("clang_builtin_include_prefix")
+        self._include_segment = self._required_str("include_path_segment")
+        self._separator_length = self._required_int("separator_length")
+        self._third_party_label_map = self._required_mapping("third_party_labels")
+        group_titles_raw = self._required_mapping("group_titles")
+        missing = [group for group in self._REQUIRED_GROUPS if group not in group_titles_raw]
+        if missing:
+            missing_fmt = ", ".join(sorted(missing))
+            raise ValueError(f"include_order: missing group_titles keys: {missing_fmt}")
+        self._group_titles = {str(key): str(value) for key, value in group_titles_raw.items()}
 
     def apply(self, context: ParseContext) -> PolicyResult:
         lines = context.text.splitlines(keepends=True)
@@ -48,12 +70,10 @@ class IncludeOrderPolicy(Policy):
             source_path=context.path,
         )
         ordered_block = self._build_ordered_block(
-            IncludeOrderPolicy.BuildOrderedBlockArgs(
-                path=context.path,
-                includes=includes,
-                line_ending=line_ending,
-                clang_standard_lines=clang_standard_lines,
-            )
+            path=context.path,
+            includes=includes,
+            line_ending=line_ending,
+            clang_standard_lines=clang_standard_lines,
         )
         original_block = "".join(include_lines)
         new_block = "".join(ordered_block)
@@ -164,7 +184,7 @@ class IncludeOrderPolicy(Policy):
         snippet = data[int(node.start_byte) : int(node.end_byte)].decode("utf-8", errors="ignore")
         return self._extract_header_from_snippet(snippet)
 
-    def _extract_header_from_snippet(self, snippet: str) -> tuple[str, str] | None:
+    def _extract_header_from_snippet(self, snippet: str) -> tuple[str, Literal["<", '"']] | None:
         text = str(snippet or "")
         for index, char in enumerate(text):
             if char == '"':
@@ -218,15 +238,15 @@ class IncludeOrderPolicy(Policy):
             return True
         return False
 
-    @dataclass(frozen=True)
-    class BuildOrderedBlockArgs:
-        path: str
-        includes: list[dict[str, object]]
-        line_ending: str
-        clang_standard_lines: set[int]
-
-    def _build_ordered_block(self, args: "IncludeOrderPolicy.BuildOrderedBlockArgs") -> list[str]:
-        is_header = Path(args.path).suffix.lower() in {".h", ".hpp", ".hh", ".hxx"}
+    def _build_ordered_block(
+        self,
+        *,
+        path: str,
+        includes: list[dict[str, object]],
+        line_ending: str,
+        clang_standard_lines: set[int],
+    ) -> list[str]:
+        is_header = Path(path).suffix.lower() in {".h", ".hpp", ".hh", ".hxx"}
 
         groups: dict[str, list[dict[str, object]]] = {
             "main": [],
@@ -236,13 +256,13 @@ class IncludeOrderPolicy(Policy):
             "local": [],
         }
 
-        main_candidates = self._main_header_candidates(args.path)
-        standard_headers = set(self._config.get("standard_headers", []) or [])
-        standard_prefixes = tuple(self._config.get("standard_prefixes", []) or ())
-        project_headers = set(self._config.get("project_headers", []) or [])
-        project_prefixes = tuple(self._config.get("project_prefixes", []) or ())
+        main_candidates = self._main_header_candidates(path)
+        standard_headers = set(self._standard_headers)
+        standard_prefixes = self._standard_prefixes
+        project_headers = set(self._project_headers)
+        project_prefixes = self._project_prefixes
 
-        for item in args.includes:
+        for item in includes:
             header = str(item.get("header", ""))
             quote = str(item.get("quote", ""))
             line = int(item.get("line", 0) or 0)
@@ -253,13 +273,11 @@ class IncludeOrderPolicy(Policy):
 
             if quote == "<":
                 if self._is_standard_header(
-                    IncludeOrderPolicy.StandardHeaderArgs(
-                        header=header,
-                        line=line,
-                        standard_headers=standard_headers,
-                        standard_prefixes=standard_prefixes,
-                        clang_standard_lines=args.clang_standard_lines,
-                    )
+                    header=header,
+                    line=line,
+                    standard_headers=standard_headers,
+                    standard_prefixes=standard_prefixes,
+                    clang_standard_lines=clang_standard_lines,
                 ):
                     groups["standard"].append(item)
                 else:
@@ -267,56 +285,32 @@ class IncludeOrderPolicy(Policy):
                 continue
 
             if self._is_project_header(
-                IncludeOrderPolicy.ProjectHeaderArgs(
-                    header=header,
-                    project_headers=project_headers,
-                    project_prefixes=project_prefixes,
-                )
+                header=header,
+                project_headers=project_headers,
+                project_prefixes=project_prefixes,
             ):
                 groups["project"].append(item)
             else:
                 groups["local"].append(item)
 
-        if is_header:
-            order = self._config.get("order_header", ["standard", "third_party", "project", "local"])
-        else:
-            order = self._config.get("order_source", ["main", "standard", "third_party", "project", "local"])
-
-        titles = self._config.get(
-            "group_titles",
-            {
-                "main": "Main header",
-                "standard": "Standard Cpp Libraries",
-                "third_party": "Third-party headers",
-                "project": "Project headers",
-                "local": "User Defined Headers",
-            },
-        )
+        order = self._order_header if is_header else self._order_source
 
         output: list[str] = []
         for group_name in order:
             items = groups.get(group_name, [])
             if not items:
                 continue
-            output.extend(
-                self._group_heading(
-                    IncludeOrderPolicy.GroupHeadingArgs(
-                        group_name=group_name,
-                        titles=titles,
-                        groups=groups,
-                    )
-                )
-            )
+            output.extend(self._group_heading(group_name=group_name, groups=groups))
             if len(items) > 1:
                 items = sorted(items, key=lambda i: str(i.get("header", "")).lower())
             for inc in items:
                 header = str(inc.get("header", ""))
                 quote = str(inc.get("quote", ""))
                 if quote == "<":
-                    output.append(f"#include <{header}>{args.line_ending}")
+                    output.append(f"#include <{header}>{line_ending}")
                 else:
-                    output.append(f"#include \"{header}\"{args.line_ending}")
-            output.append(args.line_ending)
+                    output.append(f"#include \"{header}\"{line_ending}")
+            output.append(line_ending)
 
         if output:
             output.pop()
@@ -355,6 +349,11 @@ class IncludeOrderPolicy(Policy):
         return standard_lines
 
     def _normalized_path(self, value: str) -> str:
+        return self._normalized_path_cached(value)
+
+    @staticmethod
+    @lru_cache(maxsize=4096)
+    def _normalized_path_cached(value: str) -> str:
         if not value:
             return ""
         try:
@@ -363,79 +362,120 @@ class IncludeOrderPolicy(Policy):
             return str(value)
 
     def _is_probably_standard_header_from_path(self, include_path: str) -> bool:
+        return self._is_probably_standard_header_from_path_cached(
+            include_path,
+            self._standard_path_markers,
+            self._clang_include_prefix,
+            self._include_segment,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=4096)
+    def _is_probably_standard_header_from_path_cached(
+        include_path: str,
+        standard_path_markers: tuple[str, ...],
+        clang_include_prefix: str,
+        include_segment: str,
+    ) -> bool:
         normalized = include_path.replace("\\", "/").lower()
-        if "/include/c++/" in normalized:
+        if any(marker.lower() in normalized for marker in standard_path_markers):
             return True
-        if "/c++/v1/" in normalized:
-            return True
-        if "/lib/clang/" in normalized and "/include/" in normalized:
-            return True
-        if "/include/bits/" in normalized:
-            return True
-        return False
+        if not clang_include_prefix or not include_segment:
+            return False
+        return clang_include_prefix.lower() in normalized and include_segment.lower() in normalized
 
-    @dataclass(frozen=True)
-    class StandardHeaderArgs:
-        header: str
-        line: int
-        standard_headers: set[str]
-        standard_prefixes: tuple[str, ...]
-        clang_standard_lines: set[int]
-
-    def _is_standard_header(self, args: "IncludeOrderPolicy.StandardHeaderArgs") -> bool:
-        header = args.header
-        if header in args.standard_headers:
+    def _is_standard_header(
+        self,
+        *,
+        header: str,
+        line: int,
+        standard_headers: set[str],
+        standard_prefixes: tuple[str, ...],
+        clang_standard_lines: set[int],
+    ) -> bool:
+        if header in standard_headers:
             return True
-        for prefix in args.standard_prefixes:
+        for prefix in standard_prefixes:
             if header.startswith(prefix):
                 return True
-        if args.line > 0 and args.line in args.clang_standard_lines:
+        if line > 0 and line in clang_standard_lines:
             return True
         return False
 
-    @dataclass(frozen=True)
-    class GroupHeadingArgs:
-        group_name: str
-        titles: dict[str, str]
-        groups: dict[str, list[dict[str, object]]]
+    def _group_heading(
+        self,
+        *,
+        group_name: str,
+        groups: dict[str, list[dict[str, object]]],
+    ) -> list[str]:
+        sep = "//" + "-" * max(0, int(self._separator_length) - 2)
 
-    def _group_heading(self, args: "IncludeOrderPolicy.GroupHeadingArgs") -> list[str]:
-        sep_len = int(self._config.get("separator_length", 64))
-        sep = "//" + "-" * max(0, sep_len - 2)
-
-        title = args.titles.get(args.group_name, args.group_name)
-        if args.group_name == "third_party":
-            labels = self._third_party_labels(args.groups[args.group_name])
+        title = self._group_titles.get(group_name, group_name)
+        if group_name == "third_party":
+            labels = self._third_party_labels(groups[group_name])
             if labels:
                 title = f"{title}: {', '.join(sorted(labels))}"
 
         return [f"{sep}\n", f"// {title}\n", f"{sep}\n"]
 
     def _third_party_labels(self, items: list[dict[str, object]]) -> set[str]:
-        mapping = self._config.get("third_party_labels", {})
+        mapping = self._third_party_label_map
         labels: set[str] = set()
         for item in items:
             header = str(item.get("header", ""))
             prefix = header.split("/", 1)[0]
-            label = mapping.get(prefix, prefix)
+            label = mapping.get(prefix, prefix) if isinstance(mapping, dict) else prefix
             labels.add(str(label))
         return labels
 
     def _main_header_candidates(self, path: str) -> set[str]:
         stem = Path(path).stem
-        exts = self._config.get("main_header_extensions", [".hpp", ".h", ".hh", ".hxx"])
-        return {f"{stem}{ext}" for ext in exts}
+        return {f"{stem}{ext}" for ext in self._main_header_extensions}
 
-    @dataclass(frozen=True)
-    class ProjectHeaderArgs:
-        header: str
-        project_headers: set[str]
-        project_prefixes: tuple[str, ...]
-
-    def _is_project_header(self, args: "IncludeOrderPolicy.ProjectHeaderArgs") -> bool:
-        if args.header in args.project_headers:
+    def _is_project_header(
+        self,
+        *,
+        header: str,
+        project_headers: set[str],
+        project_prefixes: tuple[str, ...],
+    ) -> bool:
+        if header in project_headers:
             return True
-        for prefix in args.project_prefixes:
-            if args.header.startswith(prefix):
+        for prefix in project_prefixes:
+            if header.startswith(prefix):
                 return True
         return False
+
+    def _required_str(self, key: str) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"include_order: missing required config key '{key}'")
+        text = str(value).strip()
+        if not text:
+            raise ValueError(f"include_order: empty required config key '{key}'")
+        return text
+
+    def _required_int(self, key: str) -> int:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"include_order: missing required config key '{key}'")
+        try:
+            parsed = int(value)
+        except Exception as exc:
+            raise ValueError(f"include_order: invalid integer for '{key}': {value!r}") from exc
+        if parsed <= 0:
+            raise ValueError(f"include_order: '{key}' must be > 0")
+        return parsed
+
+    def _required_mapping(self, key: str) -> dict[str, object]:
+        value = self._config.get(key)
+        if not isinstance(value, dict):
+            raise ValueError(f"include_order: missing required mapping config key '{key}'")
+        return dict(value)
+
+    def _required_str_tuple(self, key: str) -> tuple[str, ...]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"include_order: missing required list config key '{key}'")
+        items = tuple(str(item).strip() for item in value if str(item).strip())
+        return items

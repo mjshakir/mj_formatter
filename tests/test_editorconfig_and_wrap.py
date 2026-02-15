@@ -79,7 +79,11 @@ def test_line_wrap_parser_aware_call_wrapping() -> None:
             "allow_inline_prefix_args": True,
             "align_to_open_paren": True,
             "continuation_indent": 4,
+            "tab_width": 4,
             "use_editorconfig": True,
+            "wrap_calls": True,
+            "wrap_function_declarations": False,
+            "skip_declaration_expressions": True,
         }
     )
 

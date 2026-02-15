@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,21 +10,22 @@ from ..core.types import Violation
 from ..core.utilities import warn_once
 from .policy_base import Policy
 
+_Directive = tuple[str, int, str]
+
 
 class IncludeGuardPolicy(Policy):
     name = "include_guards"
     description = "Ensure include guards or #pragma once"
     parse_mode = "tree_sitter"
 
-    @dataclass(frozen=True)
-    class _Directive:
-        kind: str
-        line: int
-        text: str
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._mode = self._required_mode("mode")
+        self._header_extensions = self._required_extensions("header_extensions")
 
     def apply(self, context: ParseContext) -> PolicyResult:
         path = Path(context.path)
-        if path.suffix.lower() not in {".h", ".hpp", ".hh", ".hxx"}:
+        if path.suffix.lower() not in self._header_extensions:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
         root = getattr(getattr(context, "tree_sitter_tree", None), "root_node", None)
@@ -36,7 +36,7 @@ class IncludeGuardPolicy(Policy):
             )
             return PolicyResult(text=context.text, violations=[], edits=[])
 
-        mode = str(self._config.get("mode", "pragma_once")).lower()
+        mode = self._mode
         text = context.text
         lines = text.splitlines(keepends=True)
         if not lines:
@@ -105,9 +105,9 @@ class IncludeGuardPolicy(Policy):
             return PolicyResult(text=text, violations=[], edits=[])
         return PolicyResult(text=updated, violations=violations, edits=edits)
 
-    def _extract_directives(self, root: Any, text: str) -> list["_Directive"]:
+    def _extract_directives(self, root: Any, text: str) -> list[_Directive]:
         data = text.encode("utf-8", errors="ignore")
-        directives: list[IncludeGuardPolicy._Directive] = []
+        directives: list[_Directive] = []
         for child in getattr(root, "children", []):
             kind = str(getattr(child, "type", "") or "")
             if not kind.startswith("preproc_"):
@@ -117,20 +117,15 @@ class IncludeGuardPolicy(Policy):
             if end <= start:
                 continue
             snippet = data[start:end].decode("utf-8", errors="ignore")
-            directives.append(
-                IncludeGuardPolicy._Directive(
-                    kind=kind,
-                    line=int(getattr(child, "start_point", (0, 0))[0]) + 1,
-                    text=snippet,
-                )
-            )
-        directives.sort(key=lambda item: item.line)
+            directives.append((kind, int(getattr(child, "start_point", (0, 0))[0]) + 1, snippet))
+        directives.sort(key=lambda item: item[1])
         return directives
 
-    def _is_pragma_once(self, directive: "_Directive") -> bool:
-        if directive.kind != "preproc_pragma":
+    def _is_pragma_once(self, directive: _Directive) -> bool:
+        kind, _, text = directive
+        if kind != "preproc_pragma":
             return False
-        tokens = self._directive_tokens(directive.text)
+        tokens = self._directive_tokens(text)
         if len(tokens) < 2:
             return False
         return tokens[0].lower() == "pragma" and tokens[1].lower() == "once"
@@ -141,24 +136,26 @@ class IncludeGuardPolicy(Policy):
             return False
         return tokens[0].lower() == "pragma" and tokens[1].lower() == "once"
 
-    def _detect_guard(self, directives: list["_Directive"]) -> str | None:
+    def _detect_guard(self, directives: list[_Directive]) -> str | None:
         for directive in directives:
-            if directive.kind != "preproc_ifdef":
+            kind, _, text = directive
+            if kind != "preproc_ifdef":
                 continue
-            macro = self._guard_from_ifdef_block(directive.text)
+            macro = self._guard_from_ifdef_block(text)
             if macro:
                 return macro
 
         ifndef_macro = None
         ifndef_line = 0
         for directive in directives:
-            if directive.kind != "preproc_ifndef":
+            kind, line, text = directive
+            if kind != "preproc_ifndef":
                 continue
-            macro = self._macro_for_directive(directive.text, "ifndef")
+            macro = self._macro_for_directive(text, "ifndef")
             if macro is None:
                 continue
             ifndef_macro = macro
-            ifndef_line = directive.line
+            ifndef_line = line
             break
 
         if ifndef_macro is None:
@@ -167,14 +164,15 @@ class IncludeGuardPolicy(Policy):
         has_define = False
         has_endif = False
         for directive in directives:
-            if directive.line <= ifndef_line:
+            kind, line, text = directive
+            if line <= ifndef_line:
                 continue
-            if directive.kind == "preproc_def":
-                macro = self._macro_for_directive(directive.text, "define")
+            if kind == "preproc_def":
+                macro = self._macro_for_directive(text, "define")
                 if macro == ifndef_macro:
                     has_define = True
                     continue
-            if directive.kind == "preproc_endif":
+            if kind == "preproc_endif":
                 has_endif = True
 
         if has_define and has_endif:
@@ -273,3 +271,21 @@ class IncludeGuardPolicy(Policy):
         if stripped.startswith("//"):
             return True
         return False
+
+    def _required_mode(self, key: str) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"include_guards: missing required config key '{key}'")
+        mode = str(value).strip().lower()
+        if mode not in {"pragma_once", "include_guard", "both"}:
+            raise ValueError(f"include_guards: invalid mode '{mode}'")
+        return mode
+
+    def _required_extensions(self, key: str) -> set[str]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"include_guards: missing required list config key '{key}'")
+        items = {str(item).strip().lower() for item in value if str(item).strip()}
+        if not items:
+            raise ValueError(f"include_guards: config key '{key}' cannot be empty")
+        return items

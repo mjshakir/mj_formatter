@@ -30,7 +30,20 @@ def _make_config() -> AppConfig:
         policies_enabled=frozenset(),
         policies_disabled=frozenset(),
         policies_order=(),
-        policy_settings={"align_assignments": {"enabled": True}},
+        policy_settings={
+            "align_assignments": {
+                "enabled": True,
+                "type": "align_columns",
+                "touch_contract": "code_only",
+                "operator": "=",
+                "ignore_in": ["for", "if", "while", "switch"],
+                "non_assignment_patterns": [
+                    "\\)\\s*=\\s*(?:delete|default)\\s*;",
+                    "\\)\\s*=\\s*0\\s*;",
+                    "^\\s*template\\s*<",
+                ],
+            }
+        },
     )
 
 

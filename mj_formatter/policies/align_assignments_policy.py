@@ -5,7 +5,6 @@ from ..core.types import ParseContext
 from ..core.types import PolicyResult
 from ..core.types import Violation
 from .policy_base import Policy
-from dataclasses import dataclass
 import re
 
 
@@ -13,12 +12,12 @@ class AlignAssignmentsPolicy(Policy):
     name = "align_assignments"
     description = "Align consecutive assignments by '='"
     _operators = set("=<>!+-*/%&|^")
-    _default_ignore = ("for", "if", "while", "switch")
-    _non_assignment_patterns = (
-        re.compile(r"\)\s*=\s*(?:delete|default)\s*;"),
-        re.compile(r"\)\s*=\s*0\s*;"),
-        re.compile(r"^\s*template\s*<"),
-    )
+
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._operator = self._required_str("operator")
+        self._ignore_in = self._required_str_tuple("ignore_in")
+        self._non_assignment_patterns = self._compile_required_patterns("non_assignment_patterns")
 
     def apply(self, context: ParseContext) -> PolicyResult:
         if "=" not in context.text:
@@ -27,15 +26,7 @@ class AlignAssignmentsPolicy(Policy):
         if not lines:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
-        operator = str(self._config.get("operator", "="))
-        ignore_in = tuple(self._config.get("ignore_in", self._default_ignore) or self._default_ignore)
-        groups = self._find_groups(
-            AlignAssignmentsPolicy.FindGroupsArgs(
-                lines=lines,
-                operator=operator,
-                ignore_in=ignore_in,
-            )
-        )
+        groups = self._find_groups(lines=lines, operator=self._operator, ignore_in=self._ignore_in)
         if not groups:
             return PolicyResult(text=context.text, violations=[], edits=[])
 
@@ -47,9 +38,9 @@ class AlignAssignmentsPolicy(Policy):
             max_len = max(entry[2] for entry in group)
             for idx, line_body, left_len, assign_index in group:
                 prefix = line_body[:assign_index].rstrip()
-                suffix = line_body[assign_index + len(operator) :].lstrip()
+                suffix = line_body[assign_index + len(self._operator) :].lstrip()
                 padding = " " * (max_len - len(prefix))
-                rebuilt = f"{prefix}{padding} {operator} {suffix}"
+                rebuilt = f"{prefix}{padding} {self._operator} {suffix}"
                 if rebuilt != line_body:
                     changed = True
                     ending = lines[idx][len(line_body) :]
@@ -76,30 +67,30 @@ class AlignAssignmentsPolicy(Policy):
 
         return PolicyResult(text="".join(lines), violations=violations, edits=edits)
 
-    @dataclass(frozen=True)
-    class FindGroupsArgs:
-        lines: list[str]
-        operator: str
-        ignore_in: tuple[str, ...]
-
-    def _find_groups(self, args: "AlignAssignmentsPolicy.FindGroupsArgs") -> list[list[tuple[int, str, int, int]]]:
+    def _find_groups(
+        self,
+        *,
+        lines: list[str],
+        operator: str,
+        ignore_in: tuple[str, ...],
+    ) -> list[list[tuple[int, str, int, int]]]:
         groups: list[list[tuple[int, str, int, int]]] = []
         current: list[tuple[int, str, int, int]] = []
 
-        for idx, line in enumerate(args.lines):
+        for idx, line in enumerate(lines):
             line_body = line.rstrip("\r\n")
             if line_body.strip() == "":
                 if len(current) >= 2:
                     groups.append(current)
                 current = []
                 continue
-            if self._is_control_statement(line_body, args.ignore_in):
+            if self._is_control_statement(line_body, ignore_in):
                 if len(current) >= 2:
                     groups.append(current)
                 current = []
                 continue
 
-            assign_index = self._find_assignment(line_body, args.operator)
+            assign_index = self._find_assignment(line_body, operator)
             if assign_index is None:
                 if len(current) >= 2:
                     groups.append(current)
@@ -148,3 +139,35 @@ class AlignAssignmentsPolicy(Policy):
             if stripped.startswith(keyword + "("):
                 return True
         return False
+
+    def _required_str(self, key: str) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"align_assignments: missing required config key '{key}'")
+        text = str(value).strip()
+        if not text:
+            raise ValueError(f"align_assignments: empty required config key '{key}'")
+        return text
+
+    def _required_str_tuple(self, key: str) -> tuple[str, ...]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"align_assignments: missing required list config key '{key}'")
+        items = tuple(str(item).strip() for item in value if str(item).strip())
+        if not items:
+            raise ValueError(f"align_assignments: config key '{key}' cannot be empty")
+        return items
+
+    def _compile_required_patterns(self, key: str) -> tuple[re.Pattern[str], ...]:
+        value = self._config.get(key)
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"align_assignments: missing required list config key '{key}'")
+        patterns: list[re.Pattern[str]] = []
+        for item in value:
+            text = str(item).strip()
+            if not text:
+                continue
+            patterns.append(re.compile(text))
+        if not patterns:
+            raise ValueError(f"align_assignments: config key '{key}' cannot be empty")
+        return tuple(patterns)

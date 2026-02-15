@@ -2,9 +2,11 @@
 name = "namespace_end_comments"
 enabled = false
 type = "python"
+touch_contract = "whitespace_only" # any | code_only | preprocessor_only | whitespace_only
 
 # optional filter by canonical block kind; empty means "all discovered from parser context"
 blocks = []
+control_block_kinds = ["if", "while", "for", "switch", "catch"]
 
 # if a block exceeds this many lines, replace name with (...)
 max_named_lines = 40

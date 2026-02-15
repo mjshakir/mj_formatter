@@ -2,6 +2,7 @@
 name = "dash_comment_normalizer"
 enabled = true
 type = "lua"
+touch_contract = "whitespace_only" # any | code_only | preprocessor_only | whitespace_only
 script = "styles/default/lua/dash_comment_normalizer.lua"
 function = "apply"
 sandbox = true

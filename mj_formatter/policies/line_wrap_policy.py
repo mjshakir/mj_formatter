@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from ..core.types import Edit
@@ -10,18 +9,26 @@ from ..core.types import Violation
 from ..core.utilities import warn_once
 from .policy_base import Policy
 
+Candidate = tuple[int, int, int, str]
+
 
 class LineWrapPolicy(Policy):
     name = "line_wrap"
     description = "Wrap long lines with parser-aware argument/parameter formatting"
     parse_mode = "tree_sitter"
 
-    @dataclass(frozen=True)
-    class Candidate:
-        start: int
-        end: int
-        line_no: int
-        replacement: str
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._max_length = self._required_int("max_length", minimum=1)
+        self._use_editorconfig = self._required_bool("use_editorconfig")
+        self._wrap_style = self._required_enum("wrap_style", {"smart", "bin_pack", "one_per_line"})
+        self._allow_inline_prefix_args = self._required_bool("allow_inline_prefix_args")
+        self._continuation_indent = self._required_int("continuation_indent", minimum=1)
+        self._align_to_open_paren = self._required_bool("align_to_open_paren")
+        self._wrap_calls = self._required_bool("wrap_calls")
+        self._wrap_function_declarations = self._required_bool("wrap_function_declarations")
+        self._skip_declaration_expressions = self._required_bool("skip_declaration_expressions")
+        self._tab_width = self._required_int("tab_width", minimum=1)
 
     def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
@@ -32,20 +39,16 @@ class LineWrapPolicy(Policy):
         if max_len <= 0:
             return PolicyResult(text=text, violations=[], edits=[])
 
-        wrap_style = str(self._config.get("wrap_style", "smart")).strip().lower()
-        if wrap_style not in {"smart", "bin_pack", "one_per_line"}:
-            wrap_style = "smart"
-        keep_inline = bool(self._config.get("allow_inline_prefix_args", True))
-        continuation_indent = int(self._config.get("continuation_indent", 4))
-        continuation_indent = max(1, continuation_indent)
-        align_to_open = bool(self._config.get("align_to_open_paren", True))
-        use_editorconfig = bool(self._config.get("use_editorconfig", True))
-        wrap_calls = bool(self._config.get("wrap_calls", True))
-        wrap_function_declarations = bool(self._config.get("wrap_function_declarations", False))
-        skip_declaration_expressions = bool(self._config.get("skip_declaration_expressions", True))
+        wrap_style = self._wrap_style
+        keep_inline = self._allow_inline_prefix_args
+        continuation_indent = self._continuation_indent
+        align_to_open = self._align_to_open_paren
+        wrap_calls = self._wrap_calls
+        wrap_function_declarations = self._wrap_function_declarations
+        skip_declaration_expressions = self._skip_declaration_expressions
 
-        indent_width = int(self._config.get("tab_width", 4))
-        if use_editorconfig:
+        indent_width = self._tab_width
+        if self._use_editorconfig:
             indent_width = self._editorconfig_int(context, ("tab_width", "indent_size"), indent_width)
         indent_width = max(1, indent_width)
 
@@ -61,7 +64,7 @@ class LineWrapPolicy(Policy):
         if root is None:
             return self._violation_only(text, max_len)
 
-        candidates: list[LineWrapPolicy.Candidate] = []
+        candidates: list[Candidate] = []
         stack = [root]
         while stack:
             node = stack.pop()
@@ -91,8 +94,8 @@ class LineWrapPolicy(Policy):
             return self._violation_only(text, max_len)
 
         out = data
-        for item in sorted(selected, key=lambda x: x.start, reverse=True):
-            out = out[: item.start] + item.replacement.encode("utf-8") + out[item.end :]
+        for item in sorted(selected, key=lambda x: x[0], reverse=True):
+            out = out[: item[0]] + item[3].encode("utf-8") + out[item[1] :]
         updated = out.decode("utf-8")
         if updated == text:
             return self._violation_only(text, max_len)
@@ -111,7 +114,7 @@ class LineWrapPolicy(Policy):
                     )
                 )
 
-        touched = {item.line_no for item in selected}
+        touched = {item[2] for item in selected}
         violations = [
             Violation(
                 policy=self.name,
@@ -124,8 +127,8 @@ class LineWrapPolicy(Policy):
         return PolicyResult(text=updated, violations=violations, edits=edits)
 
     def _effective_max_length(self, context: ParseContext) -> int:
-        max_len = int(self._config.get("max_length", 100))
-        if not bool(self._config.get("use_editorconfig", True)):
+        max_len = self._max_length
+        if not self._use_editorconfig:
             return max_len
         raw = context.editorconfig.get("max_line_length")
         if raw is None:
@@ -138,6 +141,34 @@ class LineWrapPolicy(Policy):
         except ValueError:
             return max_len
         return max(1, parsed)
+
+    def _required_bool(self, key: str) -> bool:
+        value = self._config.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"line_wrap: missing required boolean config key '{key}'")
+        return value
+
+    def _required_int(self, key: str, *, minimum: int | None = None) -> int:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"line_wrap: missing required integer config key '{key}'")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"line_wrap: invalid integer config key '{key}'") from exc
+        if minimum is not None and parsed < minimum:
+            raise ValueError(f"line_wrap: config key '{key}' must be >= {minimum}")
+        return parsed
+
+    def _required_enum(self, key: str, values: set[str]) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"line_wrap: missing required config key '{key}'")
+        text = str(value).strip().lower()
+        if text not in values:
+            allowed = ", ".join(sorted(values))
+            raise ValueError(f"line_wrap: config key '{key}' must be one of [{allowed}]")
+        return text
 
     def _editorconfig_int(self, context: ParseContext, keys: tuple[str, ...], default: int) -> int:
         for key in keys:
@@ -246,7 +277,7 @@ class LineWrapPolicy(Policy):
         )
         if wrapped is None:
             return None
-        return LineWrapPolicy.Candidate(start=open_b, end=close_b, line_no=line_no, replacement=wrapped)
+        return (open_b, close_b, line_no, wrapped)
 
     def _line_span(self, data: bytes, offset: int) -> tuple[int, int, int]:
         start = data.rfind(b"\n", 0, offset) + 1
@@ -409,13 +440,13 @@ class LineWrapPolicy(Policy):
     def _dedupe_candidates(self, candidates: list[Candidate]) -> list[Candidate]:
         if not candidates:
             return []
-        chosen: list[LineWrapPolicy.Candidate] = []
+        chosen: list[Candidate] = []
         occupied: list[tuple[int, int]] = []
-        for item in sorted(candidates, key=lambda c: (c.start, -(c.end - c.start))):
-            if any(not (item.end <= lo or item.start >= hi) for lo, hi in occupied):
+        for item in sorted(candidates, key=lambda c: (c[0], -(c[1] - c[0]))):
+            if any(not (item[1] <= lo or item[0] >= hi) for lo, hi in occupied):
                 continue
             chosen.append(item)
-            occupied.append((item.start, item.end))
+            occupied.append((item[0], item[1]))
         return chosen
 
     def _violation_only(self, text: str, max_len: int) -> PolicyResult:

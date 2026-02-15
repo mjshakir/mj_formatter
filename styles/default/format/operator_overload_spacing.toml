@@ -2,3 +2,4 @@
 name = "operator_overload_spacing"
 enabled = true
 type = "python"
+touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only

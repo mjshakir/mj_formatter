@@ -21,8 +21,12 @@ class SnakeCasePolicy(Policy):
 
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)
-        self._prefer_clang = bool(self._config.get("prefer_clang", True))
-        self._use_tree_sitter = bool(self._config.get("use_tree_sitter", True))
+        self._prefer_clang = self._required_bool("prefer_clang")
+        self._use_tree_sitter = self._required_bool("use_tree_sitter")
+        self._apply_to = self._required_enum("apply_to", {"variables", "functions", "both"})
+        self._exclude_class_namespace = self._required_bool("exclude_class_namespace")
+        if not self._prefer_clang and not self._use_tree_sitter:
+            raise ValueError("snake_case: invalid config (both prefer_clang and use_tree_sitter are false)")
         self.parse_mode = "clang" if self._prefer_clang else "tree_sitter"
 
     def apply(self, context: ParseContext) -> PolicyResult:
@@ -30,10 +34,9 @@ class SnakeCasePolicy(Policy):
         if not text:
             return PolicyResult(text=text, violations=[], edits=[])
 
-        apply_to = str(self._config.get("apply_to", "both")).lower()
-        include_vars = apply_to in {"variables", "both"}
-        include_funcs = apply_to in {"functions", "both"}
-        exclude_types = bool(self._config.get("exclude_class_namespace", True))
+        include_vars = self._apply_to in {"variables", "both"}
+        include_funcs = self._apply_to in {"functions", "both"}
+        exclude_types = self._exclude_class_namespace
 
         violations: list[Violation] = []
 
@@ -143,3 +146,19 @@ class SnakeCasePolicy(Policy):
                 continue
             stack.extend(reversed(current.children))
         return None
+
+    def _required_bool(self, key: str) -> bool:
+        value = self._config.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"snake_case: missing required boolean config key '{key}'")
+        return value
+
+    def _required_enum(self, key: str, values: set[str]) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"snake_case: missing required config key '{key}'")
+        text = str(value).strip().lower()
+        if text not in values:
+            allowed = ", ".join(sorted(values))
+            raise ValueError(f"snake_case: config key '{key}' must be one of [{allowed}]")
+        return text

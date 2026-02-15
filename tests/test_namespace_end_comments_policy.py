@@ -34,6 +34,7 @@ def test_namespace_end_comments_adds_end_labels() -> None:
     policy = NamespaceEndCommentsPolicy(
         {
             "blocks": ["namespace", "if", "while", "function"],
+            "control_block_kinds": ["if", "while", "for", "switch", "catch"],
             "max_named_lines": 100,
             "max_label_length": 200,
             "replace_existing": True,
@@ -68,6 +69,7 @@ def test_namespace_end_comments_shortens_long_labels() -> None:
     policy = NamespaceEndCommentsPolicy(
         {
             "blocks": ["while", "function"],
+            "control_block_kinds": ["if", "while", "for", "switch", "catch"],
             "max_named_lines": 100,
             "max_label_length": 12,
             "replace_existing": True,
@@ -97,6 +99,7 @@ def test_namespace_end_comments_replaces_incorrect_existing_comment() -> None:
     policy = NamespaceEndCommentsPolicy(
         {
             "blocks": ["namespace"],
+            "control_block_kinds": ["if", "while", "for", "switch", "catch"],
             "max_named_lines": 100,
             "max_label_length": 200,
             "replace_existing": True,
@@ -127,6 +130,7 @@ def test_namespace_end_comments_class_label_uses_type_name_not_macro() -> None:
     policy = NamespaceEndCommentsPolicy(
         {
             "blocks": ["class"],
+            "control_block_kinds": ["if", "while", "for", "switch", "catch"],
             "max_named_lines": 100,
             "max_label_length": 200,
             "replace_existing": True,

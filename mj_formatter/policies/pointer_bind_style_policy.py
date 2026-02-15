@@ -16,11 +16,11 @@ class PointerBindStylePolicy(Policy):
     parse_mode = "tree_sitter"
     requires_code_context = True
 
-    def apply(self, context: ParseContext) -> PolicyResult:
-        style = str(self._config.get("style", "bind_to_type")).lower()
-        if style not in {"bind_to_type", "bind_to_name"}:
-            style = "bind_to_type"
+    def __init__(self, config: dict[str, object]) -> None:
+        super().__init__(config)
+        self._style = self._required_style("style")
 
+    def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
         tree = context.tree_sitter_tree
         if tree is None:
@@ -46,7 +46,7 @@ class PointerBindStylePolicy(Policy):
                 replacement = self._replacement_for_pointer_node(
                     node=node,
                     data=data,
-                    style=style,
+                    style=self._style,
                     pointer_ranges=pointer_ranges,
                 )
                 if replacement is not None:
@@ -233,3 +233,15 @@ class PointerBindStylePolicy(Policy):
             if left < end and start < right:
                 return True
         return False
+
+    def _required_style(self, key: str) -> str:
+        value = self._config.get(key)
+        if value is None:
+            raise ValueError(f"pointer_bind_style: missing required config key '{key}'")
+        style = str(value).strip().lower()
+        if style not in {"bind_to_type", "bind_to_name"}:
+            raise ValueError(
+                "pointer_bind_style: config key 'style' must be one of "
+                "'bind_to_type' or 'bind_to_name'"
+            )
+        return style

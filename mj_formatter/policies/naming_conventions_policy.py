@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
-from enum import Enum
+from functools import lru_cache
+from typing import Any, Final, Literal
 from collections.abc import Mapping
 
 from ..core.types import Edit
@@ -11,53 +10,16 @@ from ..core.types import PolicyResult
 from ..core.types import Violation
 from .policy_base import Policy
 from ..core.utilities import warn_once
-from ..core.types import SemanticContext, SemanticSymbol, SemanticReference
-
-
-@dataclass(frozen=True)
-class _Decl:
-    name: str
-    kind: str  # param | local | member | global | function | class | struct | namespace | macro
-    is_static: bool = False
-    is_const: bool = False
-    is_constexpr: bool = False
-    is_consteval: bool = False
-    is_atomic: bool = False
-    is_pointer: bool = False
-    smart_ptr: str | None = None  # shared | unique | weak
-    is_template_type: bool = False
-    is_std_function: bool = False
-    scope_name: str | None = None
-    line: int = 0
-
-
-@dataclass(frozen=True)
-class _SemanticRenameDecision:
-    usr: str
-    old_name: str
-    new_name: str
-    line: int
-    risk: str
-    confidence: float
-    reference_count: int
-    parser_consensus: float
-    scope_purity: float
-
-
-class ParserConsensusMode(str, Enum):
-    OFF = "off"
-    ADVISORY = "advisory"
-    STRICT = "strict"
-
-    @classmethod
-    def from_config(cls, value: object) -> "ParserConsensusMode":
-        if isinstance(value, ParserConsensusMode):
-            return value
-        raw = str(value or cls.ADVISORY.value).strip().lower()
-        for item in cls:
-            if item.value == raw:
-                return item
-        return cls.ADVISORY
+from ..core.types import (
+    ParserConsensusMode,
+    SemanticContext,
+    SemanticReference,
+    SemanticRenameArgs as _SemanticRenameArgs,
+    SemanticSymbol,
+    TreeDeclArgs as _TreeDeclArgs,
+    _Decl,
+    _SemanticRenameDecision,
+)
 
 
 class NamingConventionsPolicy(Policy):
@@ -65,14 +27,27 @@ class NamingConventionsPolicy(Policy):
     description = "Enforce naming conventions with prefixes"
     parse_mode = "clang"
     requires_code_context = True
+    _STD_FUNCTION_PREFIX: Final[str] = "f_"
+    _STD_FUNCTION_PREFIX_UPPER: Final[str] = "F_"
+    _TEMPLATE_PREFIX: Final[str] = "t_"
+    _TEMPLATE_PREFIX_UPPER: Final[str] = "T_"
+    _SMART_PTR_PREFIX_UPPER: Final[dict[str, str]] = {
+        "shared": "SP_",
+        "unique": "UP_",
+        "weak": "WP_",
+    }
+    TreeDeclArgs = _TreeDeclArgs
+    SemanticRenameArgs = _SemanticRenameArgs
+
     def __init__(self, config: dict[str, object]) -> None:
         super().__init__(config)
         self._standard = str(self._config.get("standard", "mj")).lower()
         self._standards = self._build_standards()
-        self._rules = self._standards.get(self._standard, self._standards["mj"])
-        self._skip_name_keywords = self._config_set("skip_name_keywords") | self._config_set("control_keywords")
-        self._reserved_identifiers = self._config_set("reserved_identifiers")
-        self._builtin_types = self._config_set("builtin_types")
+        if self._standard not in self._standards:
+            raise ValueError(
+                f"naming_conventions: standard '{self._standard}' not found in configured 'standards'"
+            )
+        self._rules = self._standards[self._standard]
         self._use_semantic_rename = bool(self._config.get("use_semantic_rename", True))
         self._min_confidence = float(self._config.get("min_confidence", 0.75))
         self._max_risk = str(self._config.get("max_risk", "medium")).lower()
@@ -83,15 +58,7 @@ class NamingConventionsPolicy(Policy):
         )
         self._parser_consensus_min = float(self._config.get("parser_consensus_min", 0.70))
         self._strict_local_scope = bool(self._config.get("strict_local_scope", True))
-        self._prefer_clang_semantic = bool(self._config.get("prefer_clang_semantic", True))
-        self._use_tree_sitter = bool(self._config.get("use_tree_sitter", True))
-        if self._prefer_clang_semantic:
-            self.parse_mode = "clang"
-        elif self._use_tree_sitter:
-            self.parse_mode = "tree_sitter"
-        else:
-            # Keep clang as the primary backend when parser preference is disabled.
-            self.parse_mode = "clang"
+        self.parse_mode = "clang"
 
     def apply(self, context: ParseContext) -> PolicyResult:
         text = context.text
@@ -134,129 +101,74 @@ class NamingConventionsPolicy(Policy):
             )
             semantic_class_names = tuple(getattr(context.code_context, "semantic_class_names", ()) or ())
 
-        tree = context.tree_sitter_tree
-        use_tree = self._use_tree_sitter and tree is not None
-
-        decls: list[_Decl] = []
-        semantic_decls: list[_Decl] = []
-        tree_decls: list[_Decl] = []
-        if isinstance(semantic_context, SemanticContext):
-            semantic_decls = self._collect_declarations_semantic(semantic_context)
-        if use_tree:
-            tree_decls = self._collect_declarations_tree_sitter(
-                NamingConventionsPolicy.TreeDeclArgs(
-                    text=text,
-                    tree=tree,
-                )
+        if not isinstance(semantic_context, SemanticContext):
+            warn_once(
+                "naming_conventions_requires_clang",
+                "naming_conventions: clang semantic context unavailable, skipping policy",
             )
-        if self._prefer_clang_semantic and semantic_decls and tree_decls:
-            semantic_names = {decl.name for decl in semantic_decls}
-            tree_decls = [
-                decl
-                for decl in tree_decls
-                if decl.kind in {"macro", "namespace", "class", "struct"} or decl.name in semantic_names
-            ]
+            return PolicyResult(text=text, violations=[], edits=[])
 
-        if self._prefer_clang_semantic:
-            decls.extend(semantic_decls)
-            decls.extend(tree_decls)
-        else:
-            decls.extend(tree_decls)
-            decls.extend(semantic_decls)
-
+        decls = self._collect_declarations_semantic(semantic_context)
         if not decls:
-            if not use_tree and not isinstance(semantic_context, SemanticContext):
-                warn_once(
-                    "naming_conventions_parser_unavailable",
-                    "naming_conventions: parser context unavailable, skipping policy (enable clang and/or tree-sitter-languages)",
-                )
             return PolicyResult(text=text, violations=[], edits=[])
 
         decls = self._dedupe_decls(decls)
         decls = [decl for decl in decls if self._is_identifier_name(decl.name)]
         rename_map, conflicts = self._build_rename_map(decls)
-        has_semantic = isinstance(semantic_context, SemanticContext)
-        if not has_semantic and rename_map:
-            # Name-only rename maps are unsafe for variable symbols when semantic refs
-            # are unavailable (param/local/member collisions by identifier text).
-            variable_names = {decl.name for decl in decls if decl.kind in {"param", "local", "member", "global"}}
-            dropped = 0
-            for name in list(rename_map.keys()):
-                if name in variable_names:
-                    rename_map.pop(name, None)
-                    dropped += 1
-            if dropped > 0:
-                warn_once(
-                    "naming_conventions_textual_variable_rename_disabled",
-                    "naming_conventions: semantic context unavailable; skipped textual variable renames for safety",
-                )
-
-        if not rename_map and not conflicts and not (
-            self._use_semantic_rename and isinstance(semantic_context, SemanticContext)
-        ):
+        if not rename_map and not conflicts:
             return PolicyResult(text=text, violations=[], edits=[])
 
         semantic_decisions: list[_SemanticRenameDecision] = []
         semantic_skips: list[str] = []
-        used_semantic = self._use_semantic_rename and isinstance(semantic_context, SemanticContext)
-        if used_semantic:
-            updated, edits, semantic_decisions, semantic_skips = self._apply_semantic_renames(
-                NamingConventionsPolicy.SemanticRenameArgs(
-                    text=text,
-                    rename_map=rename_map,
-                    semantic=semantic_context,
-                    file_counts=semantic_file_counts,
-                    consensus_scores=semantic_consensus_scores,
-                    reference_consensus_scores=semantic_reference_consensus_scores,
-                    declaration_consensus_scores=semantic_declaration_consensus_scores,
-                    reference_counts=semantic_reference_counts,
-                    scope_purity=semantic_scope_purity,
-                    project_reference_counts=semantic_project_reference_counts,
-                    project_consensus_scores=semantic_project_consensus_scores,
-                    refs_by_usr=semantic_refs_by_usr,
-                    non_declaration_ref_counts=semantic_non_decl_ref_counts,
-                    class_names=semantic_class_names,
-                )
-            )
-        elif use_tree and context.tree_sitter_tree is not None:
-            updated, edits = self._apply_renames_tree_sitter(
-                text,
-                rename_map,
-                context.tree_sitter_tree,
-            )
-        else:
+        if not self._use_semantic_rename:
             warn_once(
-                "naming_conventions_no_tree_for_textual_rename",
-                "naming_conventions: semantic rename disabled and tree-sitter unavailable; skipping rename pass",
+                "naming_conventions_semantic_rename_required",
+                "naming_conventions: forcing semantic rename mode because policy is clang-only",
             )
-            updated, edits = text, []
+        updated, edits, semantic_decisions, semantic_skips = self._apply_semantic_renames(
+            NamingConventionsPolicy.SemanticRenameArgs(
+                text=text,
+                rename_map=rename_map,
+                semantic=semantic_context,
+                file_counts=semantic_file_counts,
+                consensus_scores=semantic_consensus_scores,
+                reference_consensus_scores=semantic_reference_consensus_scores,
+                declaration_consensus_scores=semantic_declaration_consensus_scores,
+                reference_counts=semantic_reference_counts,
+                scope_purity=semantic_scope_purity,
+                project_reference_counts=semantic_project_reference_counts,
+                project_consensus_scores=semantic_project_consensus_scores,
+                refs_by_usr=semantic_refs_by_usr,
+                non_declaration_ref_counts=semantic_non_decl_ref_counts,
+                class_names=semantic_class_names,
+                allow_sparse_reference_completion=context.tree_sitter_tree is not None,
+            )
+        )
 
         violations: list[Violation] = []
-        if used_semantic:
-            for decision in semantic_decisions:
+        for decision in semantic_decisions:
+            violations.append(
+                Violation(
+                    policy=self.name,
+                    message=(
+                        f"Semantic rename '{decision.old_name}' -> '{decision.new_name}' "
+                        f"[risk={decision.risk} confidence={decision.confidence:.2f} refs={decision.reference_count} "
+                        f"consensus={decision.parser_consensus:.2f} scope_purity={decision.scope_purity:.2f}]"
+                    ),
+                    line=decision.line,
+                    column=1,
+                )
+            )
+        for decl in decls:
+            if decl.name in rename_map:
                 violations.append(
                     Violation(
                         policy=self.name,
-                        message=(
-                            f"Semantic rename '{decision.old_name}' -> '{decision.new_name}' "
-                            f"[risk={decision.risk} confidence={decision.confidence:.2f} refs={decision.reference_count} "
-                            f"consensus={decision.parser_consensus:.2f} scope_purity={decision.scope_purity:.2f}]"
-                        ),
-                            line=decision.line,
-                            column=1,
-                        )
+                        message=f"Rename {decl.kind} '{decl.name}' -> '{rename_map[decl.name]}'",
+                        line=decl.line,
+                        column=1,
                     )
-        else:
-            for decl in decls:
-                if decl.name in rename_map:
-                    violations.append(
-                        Violation(
-                            policy=self.name,
-                            message=f"Rename {decl.kind} '{decl.name}' -> '{rename_map[decl.name]}'",
-                            line=decl.line,
-                            column=1,
-                        )
-                    )
+                )
 
         for message in semantic_skips:
             violations.append(
@@ -282,61 +194,27 @@ class NamingConventionsPolicy(Policy):
 
         return PolicyResult(text=updated, violations=violations, edits=edits)
 
-    def _config_set(self, key: str) -> set[str]:
-        value = self._config.get(key, None)
-        if value is None:
-            return set()
-        if isinstance(value, (list, tuple, set)):
-            result = {str(item).strip() for item in value if str(item).strip()}
-            return result
-        return set()
-
     def _build_standards(self) -> dict[str, dict[str, object]]:
         config_standards = self._config.get("standards")
+        if not isinstance(config_standards, Mapping):
+            raise ValueError(
+                "naming_conventions: missing required 'standards' mapping in policy config"
+            )
         standards: dict[str, dict[str, object]] = {}
-        if isinstance(config_standards, Mapping):
-            for raw_name, raw_rules in config_standards.items():
-                if not isinstance(raw_rules, Mapping):
-                    continue
-                name = str(raw_name).strip().lower()
-                if not name:
-                    continue
-                standards[name] = {str(key): value for key, value in raw_rules.items()}
+        for raw_name, raw_rules in config_standards.items():
+            if not isinstance(raw_rules, Mapping):
+                continue
+            name = str(raw_name).strip().lower()
+            if not name:
+                continue
+            standards[name] = {str(key): value for key, value in raw_rules.items()}
 
         if not standards:
-            standards["mj"] = self._fallback_standard()
-            return standards
+            raise ValueError("naming_conventions: 'standards' mapping is empty")
 
         if "mj" not in standards:
-            first = next(iter(standards.values()))
-            standards["mj"] = dict(first)
+            raise ValueError("naming_conventions: missing required standard 'mj' in 'standards'")
         return standards
-
-    def _fallback_standard(self) -> dict[str, object]:
-        return {
-            "local_prefix": "_",
-            "member_prefix": "m_",
-            "global_prefix": "g_",
-            "static_prefix": "s_",
-            "const_prefix": "c_",
-            "atomic_prefix": "a_",
-            "pointer_prefix": "p_",
-            "shared_ptr_prefix": "sp_",
-            "unique_ptr_prefix": "up_",
-            "weak_ptr_prefix": "wp_",
-            "constexpr_prefix_upper": "C_",
-            "static_prefix_upper": "S_",
-            "function_case": "snake",
-            "type_case": "camel",
-            "namespace_case": "camel",
-            "macro_case": "upper_snake",
-            "constexpr_case": "upper_snake",
-        }
-
-    @dataclass(frozen=True)
-    class TreeDeclArgs:
-        text: str
-        tree: Any
 
     def _collect_declarations_tree_sitter(self, args: "NamingConventionsPolicy.TreeDeclArgs") -> list[_Decl]:
         text = args.text
@@ -630,7 +508,7 @@ class NamingConventionsPolicy(Policy):
                     is_const = "const" in prefix and not is_constexpr and not is_consteval
                     is_atomic = self._is_atomic_type(prefix)
                     is_ptr = is_pointer_decl(name_node)
-                    smart_ptr = None
+                    smart_ptr: Literal["shared", "unique", "weak"] | None = None
                     if "shared_ptr" in prefix:
                         smart_ptr = "shared"
                     elif "unique_ptr" in prefix:
@@ -668,12 +546,6 @@ class NamingConventionsPolicy(Policy):
         class_names = {d.name for d in decls if d.kind in {"class", "struct"}}
 
         for decl in decls:
-            if decl.name in self._reserved_identifiers:
-                continue
-            if decl.name in self._skip_name_keywords:
-                continue
-            if decl.name in self._builtin_types:
-                continue
             target = self._target_name(decl, class_names)
             if not target or target == decl.name:
                 if decl.kind in {"function", "class", "struct", "namespace"}:
@@ -725,23 +597,6 @@ class NamingConventionsPolicy(Policy):
 
         return None
 
-    @dataclass(frozen=True)
-    class SemanticRenameArgs:
-        text: str
-        rename_map: dict[str, str]
-        semantic: SemanticContext
-        file_counts: dict[str, int]
-        consensus_scores: dict[str, float]
-        reference_consensus_scores: dict[str, float]
-        declaration_consensus_scores: dict[str, float]
-        reference_counts: dict[str, int]
-        scope_purity: dict[str, float]
-        project_reference_counts: dict[str, int]
-        project_consensus_scores: dict[str, float]
-        refs_by_usr: Mapping[str, tuple[SemanticReference, ...]]
-        non_declaration_ref_counts: Mapping[str, int]
-        class_names: tuple[str, ...]
-
     def _apply_semantic_renames(
         self,
         args: "NamingConventionsPolicy.SemanticRenameArgs",
@@ -750,6 +605,7 @@ class NamingConventionsPolicy(Policy):
         code_mask = self._code_mask(args.text)
         code_text = self._masked_text(args.text, code_mask)
         code_occurrence_map = self._identifier_count_map(code_text, include_tilde=True)
+        code_span_map = self._identifier_span_map(code_text, include_tilde=True)
         text_occurrence_map = self._identifier_count_map(args.text, include_tilde=True)
         text_bytes = args.text.encode("utf-8", errors="ignore")
         refs_by_usr: Mapping[str, tuple[SemanticReference, ...]] = args.refs_by_usr
@@ -783,8 +639,6 @@ class NamingConventionsPolicy(Policy):
             old = symbol.name
             if not self._is_identifier_name(old):
                 continue
-            if old in self._reserved_identifiers or old in self._skip_name_keywords or old in self._builtin_types:
-                continue
 
             target = None
             if symbol.scope_kind not in {"param", "local", "member", "global"}:
@@ -800,20 +654,46 @@ class NamingConventionsPolicy(Policy):
             refs = list(refs_by_usr.get(symbol.usr, ()))
             non_decl_ref_count = int(non_decl_ref_count_by_usr.get(symbol.usr, 0))
             code_occurrence_count = int(code_occurrence_map.get(old, 0))
-            if code_occurrence_count > len(refs):
+            is_compile_time_symbol = bool(symbol.is_constexpr or symbol.is_consteval)
+            file_count_hint = int(args.file_counts.get(symbol.usr, 1))
+            scope_purity_hint = float(args.scope_purity.get(symbol.usr, 1.0))
+            safe_text_completion = (
+                args.allow_sparse_reference_completion
+                and
+                symbol.scope_kind in {"member", "global"}
+                and file_count_hint <= 1
+                and scope_purity_hint >= 0.99
+            )
+            needs_token_completion = code_occurrence_count > len(refs) and (
+                (is_compile_time_symbol and symbol.scope_kind in {"member", "global"})
+                or safe_text_completion
+            )
+            if code_occurrence_count > len(refs) and not (
+                (is_compile_time_symbol and symbol.scope_kind in {"member", "global"})
+                or safe_text_completion
+            ):
                 skips.append(
                     f"Skipped semantic rename for '{old}': incomplete reference map "
                     f"(occurrences={code_occurrence_count}, refs={len(refs)})"
                 )
                 continue
             project_ref_count = int(args.project_reference_counts.get(symbol.usr, 0))
-            if symbol.scope_kind in {"member", "global"} and non_decl_ref_count <= 0 and project_ref_count <= 0:
+            if (
+                symbol.scope_kind in {"member", "global"}
+                and non_decl_ref_count <= 0
+                and project_ref_count <= 0
+                and not is_compile_time_symbol
+                and not safe_text_completion
+            ):
                 skips.append(
                     f"Skipped semantic rename for '{old}': no non-declaration reference evidence "
                     "(member/global symbols require references)"
                 )
                 continue
-            if non_decl_ref_count <= 0:
+            if non_decl_ref_count <= 0 and not (
+                is_compile_time_symbol and symbol.scope_kind in {"member", "global"}
+                or safe_text_completion
+            ):
                 occurrence_count = int(text_occurrence_map.get(old, 0))
                 if occurrence_count > 1:
                     skips.append(
@@ -849,7 +729,7 @@ class NamingConventionsPolicy(Policy):
                 continue
             risk, confidence = self._semantic_risk_and_confidence(
                 refs=refs,
-                file_count=int(args.file_counts.get(symbol.usr, 1)),
+                file_count=file_count_hint,
                 project_ref_count=project_ref_count,
                 parser_consensus=parser_consensus,
                 reference_consensus=reference_consensus,
@@ -858,7 +738,12 @@ class NamingConventionsPolicy(Policy):
                 is_local=symbol.scope_kind in {"param", "local"},
                 ref_count_hint=int(args.reference_counts.get(symbol.usr, 0)),
             )
-            if confidence < self._min_confidence:
+            compile_time_confidence_relax = (
+                is_compile_time_symbol
+                and symbol.scope_kind in {"member", "global"}
+                and self._risk_rank.get(risk, 2) <= self._risk_rank.get("medium", 1)
+            )
+            if confidence < self._min_confidence and not compile_time_confidence_relax:
                 skips.append(
                     f"Skipped semantic rename for '{old}': confidence {confidence:.2f} below {self._min_confidence:.2f}"
                 )
@@ -868,6 +753,26 @@ class NamingConventionsPolicy(Policy):
                     f"Skipped semantic rename for '{old}': risk {risk} exceeds max_risk {self._max_risk}"
                 )
                 continue
+
+            if needs_token_completion:
+                ref_spans = {(int(ref.start), int(ref.end)) for ref in refs}
+                for start, end in code_span_map.get(old, []):
+                    key = (int(start), int(end))
+                    if key in ref_spans:
+                        continue
+                    line, column = self._line_column_for_offset(args.text, start)
+                    refs.append(
+                        SemanticReference(
+                            usr=symbol.usr,
+                            start=start,
+                            end=end,
+                            line=line,
+                            column=column,
+                            is_declaration=False,
+                            scope_usr=symbol.scope_usr,
+                        )
+                    )
+                    ref_spans.add(key)
 
             if not refs:
                 refs = [
@@ -1062,22 +967,21 @@ class NamingConventionsPolicy(Policy):
 
         if decl.is_constexpr or decl.is_consteval:
             prefixes = []
-            if decl.is_static:
+            # Clang can report constexpr class members without explicit static storage;
+            # treat member constexpr names as static-style for stacked prefixes.
+            if decl.is_static or decl.kind == "member":
                 prefixes.append(rules["static_prefix_upper"])
             prefixes.append(rules["constexpr_prefix_upper"])
             if decl.is_template_type:
-                prefixes.append("T_")
+                prefixes.append(self._TEMPLATE_PREFIX_UPPER)
             atomic_upper = str(rules.get("atomic_prefix", "a_")).upper()
             if decl.is_atomic and atomic_upper:
                 prefixes.append(atomic_upper)
             if decl.is_std_function:
-                prefixes.append("F_")
-            if decl.smart_ptr == "shared":
-                prefixes.append("SP_")
-            elif decl.smart_ptr == "unique":
-                prefixes.append("UP_")
-            elif decl.smart_ptr == "weak":
-                prefixes.append("WP_")
+                prefixes.append(self._STD_FUNCTION_PREFIX_UPPER)
+            smart_ptr_upper_prefix = self._SMART_PTR_PREFIX_UPPER.get(str(decl.smart_ptr or ""))
+            if smart_ptr_upper_prefix:
+                prefixes.append(smart_ptr_upper_prefix)
             elif decl.is_pointer:
                 prefixes.append("P_")
             stripped = self._strip_prefixes(decl.name, self._prefix_strip_candidates(prefixes))
@@ -1098,11 +1002,11 @@ class NamingConventionsPolicy(Policy):
         if not is_param and decl.is_const and rules.get("const_prefix"):
             prefixes.append(rules["const_prefix"])
         if not is_param and decl.is_template_type:
-            prefixes.append("t_")
+            prefixes.append(self._TEMPLATE_PREFIX)
         if decl.is_atomic and rules.get("atomic_prefix"):
             prefixes.append(str(rules["atomic_prefix"]))
         if decl.is_std_function:
-            prefixes.append("f_")
+            prefixes.append(self._STD_FUNCTION_PREFIX)
         if decl.smart_ptr == "shared":
             prefixes.append(rules["shared_ptr_prefix"])
         elif decl.smart_ptr == "unique":
@@ -1124,7 +1028,7 @@ class NamingConventionsPolicy(Policy):
                         str(rules.get("static_prefix") or ""),
                         str(rules.get("const_prefix") or ""),
                         str(rules.get("atomic_prefix") or ""),
-                        "t_",
+                        self._TEMPLATE_PREFIX,
                     ]
                 )
             )
@@ -1444,6 +1348,11 @@ class NamingConventionsPolicy(Policy):
         return False
 
     def _to_snake(self, name: str) -> str:
+        return self._to_snake_cached(str(name or ""))
+
+    @staticmethod
+    @lru_cache(maxsize=8192)
+    def _to_snake_cached(name: str) -> str:
         if name.isupper() and "_" in name:
             return name.lower()
         result: list[str] = []
@@ -1473,9 +1382,19 @@ class NamingConventionsPolicy(Policy):
         return "".join(compact)
 
     def _to_upper_snake(self, name: str) -> str:
-        return self._to_snake(name).upper()
+        return self._to_upper_snake_cached(str(name or ""))
+
+    @staticmethod
+    @lru_cache(maxsize=8192)
+    def _to_upper_snake_cached(name: str) -> str:
+        return NamingConventionsPolicy._to_snake_cached(name).upper()
 
     def _to_camel(self, name: str) -> str:
+        return self._to_camel_cached(str(name or ""))
+
+    @staticmethod
+    @lru_cache(maxsize=8192)
+    def _to_camel_cached(name: str) -> str:
         parts: list[str] = []
         current: list[str] = []
         for ch in name:
@@ -1491,10 +1410,16 @@ class NamingConventionsPolicy(Policy):
 
     def _strip_prefixes(self, name: str, prefixes: list[str]) -> str:
         if not prefixes:
+            return str(name or "")
+        return self._strip_prefixes_cached(str(name or ""), tuple(item for item in prefixes if item))
+
+    @staticmethod
+    @lru_cache(maxsize=8192)
+    def _strip_prefixes_cached(name: str, prefixes: tuple[str, ...]) -> str:
+        if not prefixes:
             return name
         cleaned = name
         changed = True
-        prefixes = [p for p in prefixes if p]
         while changed and prefixes:
             changed = False
             for prefix in prefixes:
@@ -1505,7 +1430,12 @@ class NamingConventionsPolicy(Policy):
         return cleaned
 
     def _normalized_identifier_key(self, name: str) -> str:
-        return "".join(ch for ch in str(name or "") if ch != "_" and not ch.isspace()).lower()
+        return self._normalized_identifier_key_cached(str(name or ""))
+
+    @staticmethod
+    @lru_cache(maxsize=8192)
+    def _normalized_identifier_key_cached(name: str) -> str:
+        return "".join(ch for ch in name if ch != "_" and not ch.isspace()).lower()
 
     def _identifier_count_map(self, text: str, include_tilde: bool = False) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -1513,7 +1443,35 @@ class NamingConventionsPolicy(Policy):
             counts[token] = counts.get(token, 0) + 1
         return counts
 
+    def _identifier_span_map(self, text: str, include_tilde: bool = False) -> dict[str, list[tuple[int, int]]]:
+        spans: dict[str, list[tuple[int, int]]] = {}
+        for start, end, token in self._scan_identifiers(text, include_tilde=include_tilde):
+            spans.setdefault(token, []).append((start, end))
+        return spans
+
+    def _line_column_for_offset(self, text: str, offset: int) -> tuple[int, int]:
+        if offset <= 0:
+            return 1, 1
+        if offset >= len(text):
+            line = text.count("\n") + 1
+            last_nl = text.rfind("\n")
+            if last_nl < 0:
+                return line, len(text) + 1
+            return line, (len(text) - last_nl)
+        line = text.count("\n", 0, offset) + 1
+        last_nl = text.rfind("\n", 0, offset)
+        if last_nl < 0:
+            return line, offset + 1
+        return line, offset - last_nl
+
     def _prefix_strip_candidates(self, prefixes: list[str]) -> list[str]:
+        if not prefixes:
+            return []
+        return list(self._prefix_strip_candidates_cached(tuple(prefixes)))
+
+    @staticmethod
+    @lru_cache(maxsize=2048)
+    def _prefix_strip_candidates_cached(prefixes: tuple[str, ...]) -> tuple[str, ...]:
         candidates: list[str] = []
         seen: set[str] = set()
         for prefix in prefixes:
@@ -1524,4 +1482,4 @@ class NamingConventionsPolicy(Policy):
                     continue
                 seen.add(candidate)
                 candidates.append(candidate)
-        return candidates
+        return tuple(candidates)

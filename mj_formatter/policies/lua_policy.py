@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 import re
-from dataclasses import dataclass
 
 from ..core.types import Edit
 from ..core.types import ParseContext
@@ -87,13 +86,6 @@ class LuaPolicy(Policy):
         except Exception:
             return "".join(list(lines))  # type: ignore[arg-type]
 
-    @dataclass(frozen=True)
-    class RegexReplaceArgs:
-        text: str
-        pattern: str
-        repl: str
-        flags: str | None = None
-
     def _regex_replace_lua(self, *args) -> str:
         if len(args) == 1:
             arg = args[0]
@@ -103,30 +95,26 @@ class LuaPolicy(Policy):
                 repl = arg["repl"]
                 flags = arg.get("flags") if hasattr(arg, "get") else arg["flags"]
                 return self._regex_replace(
-                    LuaPolicy.RegexReplaceArgs(
-                        text=text,
-                        pattern=pattern,
-                        repl=repl,
-                        flags=flags,
-                    )
+                    text=text,
+                    pattern=pattern,
+                    repl=repl,
+                    flags=flags,
                 )
             except Exception:
                 pass
         if len(args) >= 3:
             return self._regex_replace(
-                LuaPolicy.RegexReplaceArgs(
-                    text=args[0],
-                    pattern=args[1],
-                    repl=args[2],
-                    flags=args[3] if len(args) > 3 else None,
-                )
+                text=args[0],
+                pattern=args[1],
+                repl=args[2],
+                flags=args[3] if len(args) > 3 else None,
             )
         return args[0] if args else ""
 
-    def _regex_replace(self, args: "LuaPolicy.RegexReplaceArgs") -> str:
+    def _regex_replace(self, *, text: str, pattern: str, repl: str, flags: str | None = None) -> str:
         flag_value = 0
-        if args.flags:
-            for part in args.flags.split("|"):
+        if flags:
+            for part in flags.split("|"):
                 part = part.strip().upper()
                 if part == "IGNORECASE":
                     flag_value |= re.IGNORECASE
@@ -134,7 +122,7 @@ class LuaPolicy(Policy):
                     flag_value |= re.MULTILINE
                 elif part == "DOTALL":
                     flag_value |= re.DOTALL
-        return re.sub(args.pattern, args.repl, args.text, flags=flag_value)
+        return re.sub(pattern, repl, text, flags=flag_value)
 
     def _log(self, level: str, message: str) -> None:
         logger = logging.getLogger("mj_formatter")
@@ -163,31 +151,11 @@ class LuaPolicy(Policy):
         if raw_violations:
             for item in raw_violations:
                 try:
-                    message = str(
-                        self._table_get(
-                            LuaPolicy.TableGetArgs(
-                                table=item,
-                                key="message",
-                                default="Lua policy violation",
-                            )
-                        )
-                    )
+                    message = str(self._table_get(table=item, key="message", default="Lua policy violation"))
                     line = int(
-                        self._table_get(
-                            LuaPolicy.TableGetArgs(
-                                table=item,
-                                key="line",
-                                default=1,
-                            )
-                        )
+                        self._table_get(table=item, key="line", default=1)
                     )
-                    column = self._table_get(
-                        LuaPolicy.TableGetArgs(
-                            table=item,
-                            key="column",
-                            default=None,
-                        )
-                    )
+                    column = self._table_get(table=item, key="column", default=None)
                     column = int(column) if column is not None else None
                 except Exception:
                     continue
@@ -213,17 +181,11 @@ class LuaPolicy(Policy):
                 edits.append(Edit(policy=self.name, line=idx + 1, before="", after=after_lines[idx]))
         return edits
 
-    @dataclass(frozen=True)
-    class TableGetArgs:
-        table: object
-        key: str
-        default: object
-
-    def _table_get(self, args: "LuaPolicy.TableGetArgs") -> object:
-        if isinstance(args.table, dict):
-            return args.table.get(args.key, args.default)
+    def _table_get(self, *, table: object, key: str, default: object) -> object:
+        if isinstance(table, dict):
+            return table.get(key, default)
         try:
-            value = args.table[args.key]  # type: ignore[index]
+            value = table[key]  # type: ignore[index]
         except Exception:
-            return args.default
-        return value if value is not None else args.default
+            return default
+        return value if value is not None else default
