@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def main() -> int:
-    print("Context types package is a library. Use `python -m mj_formatter`.")
+    print("Formatter engine package is a library. Use `python -m mj_formatter`.")
     return 0
 
 

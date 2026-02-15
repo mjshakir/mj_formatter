@@ -1,32 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
-from ...types import Edit, Violation
-
-
-class TouchContract(str, Enum):
-    ANY = "any"
-    CODE_ONLY = "code_only"
-    PREPROCESSOR_ONLY = "preprocessor_only"
-    WHITESPACE_ONLY = "whitespace_only"
-
-    @classmethod
-    def from_value(cls, raw: object) -> "TouchContract":
-        value = str(raw or cls.ANY.value).strip().lower()
-        for item in cls:
-            if item.value == value:
-                return item
-        return cls.ANY
-
-
-@dataclass(frozen=True)
-class _ProtectedLines:
-    comments: set[int]
-    strings: set[int]
-    preprocessor: set[int]
+from ...types import Edit, TouchContract, Violation
 
 
 class EditGuard:
@@ -51,14 +27,14 @@ class EditGuard:
                 return violations
 
         tree = getattr(parse_context, "tree_sitter_tree", None)
-        protected = self._collect_protected_lines(tree=tree)
+        comments, strings, preprocessor = self._collect_protected_lines(tree=tree)
 
         violations: list[Violation] = []
         if contract == TouchContract.CODE_ONLY:
             blocked = sorted(
                 line
                 for line in changed_lines
-                if line in protected.comments or line in protected.strings or line in protected.preprocessor
+                if line in comments or line in strings or line in preprocessor
             )
             if blocked:
                 violations.append(
@@ -73,7 +49,7 @@ class EditGuard:
                     )
                 )
         elif contract == TouchContract.PREPROCESSOR_ONLY:
-            blocked = sorted(line for line in changed_lines if line not in protected.preprocessor)
+            blocked = sorted(line for line in changed_lines if line not in preprocessor)
             if blocked:
                 violations.append(
                     Violation(
@@ -106,13 +82,13 @@ class EditGuard:
                 ]
         return []
 
-    def _collect_protected_lines(self, *, tree: Any | None) -> _ProtectedLines:
+    def _collect_protected_lines(self, *, tree: Any | None) -> tuple[set[int], set[int], set[int]]:
         if tree is None:
-            return _ProtectedLines(comments=set(), strings=set(), preprocessor=set())
+            return set(), set(), set()
 
         root = getattr(tree, "root_node", None)
         if root is None:
-            return _ProtectedLines(comments=set(), strings=set(), preprocessor=set())
+            return set(), set(), set()
 
         comments: set[int] = set()
         strings: set[int] = set()
@@ -145,7 +121,7 @@ class EditGuard:
 
             stack.extend(reversed(getattr(node, "children", [])))
 
-        return _ProtectedLines(comments=comments, strings=strings, preprocessor=preprocessor)
+        return comments, strings, preprocessor
 
     def _line_preview(self, lines: list[int], limit: int = 6) -> str:
         if len(lines) <= limit:

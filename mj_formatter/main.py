@@ -60,8 +60,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--profile", action="store_true", help="Profile policy timings")
     parser.add_argument(
         "--parser-strategy",
-        choices=["policy", "hybrid", "tree_only", "clang_only"],
-        help="Parser strategy override",
+        choices=["hybrid"],
+        help="Parser strategy override (hybrid only)",
     )
     parser.add_argument(
         "--parse-pool-workers",

@@ -5,7 +5,7 @@ import pickle
 from pathlib import Path
 from typing import Any
 
-from ..types.context import SemanticContext
+from ..types import SemanticContext
 from ..utilities import AtomicWriter
 
 

@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass(frozen=True)
-class PostEditCheckResult:
-    accepted: bool
-    messages: tuple[str, ...] = ()
+from ...types import PostEditCheckResult
 
 
 class PostEditChecker:

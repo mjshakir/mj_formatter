@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from .enums import ParserStrategy
+from .enums import ParserStrategy, PolicyDecisionOutcome, PolicyEnforcement
 
 
 @dataclass(frozen=True)
@@ -123,6 +123,13 @@ class PolicyResult:
     profile: MutableMapping[str, float] = field(default_factory=dict)
     parse_modes: MutableMapping[str, str] = field(default_factory=dict)
     warnings: MutableSequence[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ParseState:
+    ts_text: str = ""
+    clang_text: str = ""
+    clang_has_bodies: bool = False
 
 
 @dataclass
@@ -265,6 +272,28 @@ class AppConfig:
     confidence_blocking_enabled: bool = True
     confidence_blocking_min: float = 0.70
     confidence_blocking_policies: Set[str] = frozenset({"naming_conventions", "snake_case"})
+    confidence_default_enforcement: PolicyEnforcement = PolicyEnforcement.HARD
+    confidence_strict_delta: float = 0.05
+    confidence_relaxed_delta: float = 0.10
+    confidence_context_bonus_cap: float = 0.08
+
+
+@dataclass(frozen=True)
+class ConfidenceGateDecision:
+    outcome: PolicyDecisionOutcome = PolicyDecisionOutcome.APPLY
+    score: float = 0.0
+    threshold: float = 0.0
+    base_enforcement: PolicyEnforcement = PolicyEnforcement.HARD
+    effective_enforcement: PolicyEnforcement = PolicyEnforcement.HARD
+    reason_codes: tuple[str, ...] = ()
+    reason: str = ""
+    dropped_lines: frozenset[int] = frozenset()
+
+
+@dataclass(frozen=True)
+class PostEditCheckResult:
+    accepted: bool = False
+    messages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -325,6 +354,42 @@ class TreeDeclaration:
 
 
 @dataclass(frozen=True)
+class _Decl:
+    name: str = ""
+    kind: str = ""
+    is_static: bool = False
+    is_const: bool = False
+    is_constexpr: bool = False
+    is_consteval: bool = False
+    is_atomic: bool = False
+    is_pointer: bool = False
+    smart_ptr: Optional[str] = None
+    is_template_type: bool = False
+    is_std_function: bool = False
+    scope_name: Optional[str] = None
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class _SemanticRenameDecision:
+    usr: str = ""
+    old_name: str = ""
+    new_name: str = ""
+    line: int = 0
+    risk: str = ""
+    confidence: float = 0.0
+    reference_count: int = 0
+    parser_consensus: float = 0.0
+    scope_purity: float = 0.0
+
+
+@dataclass(frozen=True)
+class TreeDeclArgs:
+    text: str = ""
+    tree: Optional[Any] = None
+
+
+@dataclass(frozen=True)
 class CodeBlock:
     kind: str = ""
     label: str = ""
@@ -369,6 +434,49 @@ class CodeContext:
     semantic_project_reference_counts: Mapping[str, int] = field(default_factory=dict)
     semantic_project_consensus_scores: Mapping[str, float] = field(default_factory=dict)
     semantic_hybrid_confidence: float = 0.0
+    semantic_line_confidence: Mapping[int, float] = field(default_factory=dict)
+    semantic_consensus_summary: float = 0.0
+    semantic_reference_alignment: float = 0.0
+    semantic_declaration_alignment: float = 0.0
+    semantic_coverage_score: float = 0.0
+    hybrid_context_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class SemanticRenameArgs:
+    text: str = ""
+    rename_map: Mapping[str, str] = field(default_factory=dict)
+    semantic: SemanticContext = field(default_factory=SemanticContext)
+    file_counts: Mapping[str, int] = field(default_factory=dict)
+    consensus_scores: Mapping[str, float] = field(default_factory=dict)
+    reference_consensus_scores: Mapping[str, float] = field(default_factory=dict)
+    declaration_consensus_scores: Mapping[str, float] = field(default_factory=dict)
+    reference_counts: Mapping[str, int] = field(default_factory=dict)
+    scope_purity: Mapping[str, float] = field(default_factory=dict)
+    project_reference_counts: Mapping[str, int] = field(default_factory=dict)
+    project_consensus_scores: Mapping[str, float] = field(default_factory=dict)
+    refs_by_usr: Mapping[str, Sequence[SemanticReference]] = field(default_factory=dict)
+    non_declaration_ref_counts: Mapping[str, int] = field(default_factory=dict)
+    class_names: Sequence[str] = ()
+    allow_sparse_reference_completion: bool = False
+
+
+@dataclass(frozen=True)
+class _SourceBlock:
+    start: int = 0
+    end: int = 0
+    text: str = ""
+    full_name: str = ""
+    short_name: str = ""
+    class_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _PreambleItem:
+    kind: str = ""
+    start: int = 0
+    end: int = 0
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -387,6 +495,22 @@ class WorkerRunConfig:
     jobs: int = 0
     metrics: Optional[Any] = None
     log_queue: Optional[Any] = None
+
+
+@dataclass(frozen=True)
+class PipelineRunnerDeps:
+    config: Optional[Any] = None
+    policies: Sequence[Any] = ()
+    policy_settings: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    policy_cache_enabled: bool = False
+    policy_cache: Optional[Any] = None
+    policy_cache_settings: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    policy_cache_settings_hashes: Mapping[str, str] = field(default_factory=dict)
+    parse_coordinator: Optional[Any] = None
+    code_context_builder: Optional[Any] = None
+    project_index_cache: Optional[Any] = None
+    policy_runtime: Optional[Any] = None
+    editorconfig_resolver: Optional[Any] = None
 
 
 @dataclass(frozen=True)
@@ -437,6 +561,7 @@ __all__ = [
     "CodeContext",
     "CollectTargetsArgs",
     "ConflictDetectorConfig",
+    "ConfidenceGateDecision",
     "Edit",
     "EditorConfigData",
     "EditorConfigSection",
@@ -445,10 +570,15 @@ __all__ = [
     "MetricsConfig",
     "MetricsEvent",
     "ParseContext",
+    "ParseState",
+    "PipelineRunnerDeps",
+    "PostEditCheckResult",
+    "SemanticRenameArgs",
     "PolicyCacheEntry",
     "PolicyResult",
     "PolicySourceArgs",
     "RegistryValidation",
+    "TreeDeclArgs",
     "SemanticContext",
     "SemanticReference",
     "SemanticSymbol",
@@ -461,4 +591,8 @@ __all__ = [
     "VariantSpec",
     "Violation",
     "WorkerRunConfig",
+    "_Decl",
+    "_PreambleItem",
+    "_SemanticRenameDecision",
+    "_SourceBlock",
 ]

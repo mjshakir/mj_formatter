@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from logging.handlers import QueueHandler
 from multiprocessing.queues import Queue
 from pathlib import Path
 from typing import Any
 
 from .color_formatter import ColorFormatter
+from .dropping_queue_handler import DroppingQueueHandler
 
 
 class LogSetup:
@@ -31,7 +30,7 @@ class LogSetup:
             self._clear_handlers(logger)
         else:
             for handler in logger.handlers:
-                if isinstance(handler, QueueHandler):
+                if isinstance(handler, DroppingQueueHandler):
                     return logger
         logger.setLevel(self._level_from_string(level))
         logger.propagate = False
@@ -68,23 +67,3 @@ class LogSetup:
 
     def _level_from_string(self, level: str) -> int:
         return getattr(logging, level.upper(), logging.INFO)
-
-
-class DroppingQueueHandler(QueueHandler):
-    def __init__(self, queue: Queue[Any]) -> None:
-        super().__init__(queue)
-        self._dropped = 0
-
-    def enqueue(self, record: logging.LogRecord) -> None:
-        try:
-            self.queue.put_nowait(record)
-        except Exception:
-            self._dropped += 1
-            if self._dropped in {1, 10, 100, 1000} or self._dropped % 5000 == 0:
-                try:
-                    sys.stderr.write(
-                        f"mj_formatter warning: async log queue drops={self._dropped}\n"
-                    )
-                    sys.stderr.flush()
-                except Exception:
-                    pass

@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from .enums import ClangArgsMode, ParseBackend, ParserStrategy
-from .struct import (
+from .enums import (
+    ClangArgsMode,
+    ParseBackend,
+    ParserStrategy,
+    PolicyDecisionOutcome,
+    PolicyEnforcement,
+    TouchContract,
+    ParserConsensusMode,
+)
+from .structs import (
     AppConfig,
     BackupEntry,
     BackupManifestConfig,
@@ -11,6 +19,7 @@ from .struct import (
     CodeBlock,
     CodeContext,
     CollectTargetsArgs,
+    ConfidenceGateDecision,
     ConflictDetectorConfig,
     Edit,
     EditorConfigData,
@@ -20,10 +29,15 @@ from .struct import (
     MetricsConfig,
     MetricsEvent,
     ParseContext,
+    ParseState,
+    PipelineRunnerDeps,
+    PostEditCheckResult,
+    SemanticRenameArgs,
     PolicyCacheEntry,
     PolicyResult,
     PolicySourceArgs,
     RegistryValidation,
+    TreeDeclArgs,
     SemanticContext,
     SemanticReference,
     SemanticSymbol,
@@ -36,6 +50,10 @@ from .struct import (
     VariantSpec,
     Violation,
     WorkerRunConfig,
+    _Decl,
+    _PreambleItem,
+    _SemanticRenameDecision,
+    _SourceBlock,
 )
 
 __all__ = [
@@ -49,6 +67,7 @@ __all__ = [
     "CodeBlock",
     "CodeContext",
     "CollectTargetsArgs",
+    "ConfidenceGateDecision",
     "ConflictDetectorConfig",
     "Edit",
     "EditorConfigData",
@@ -59,7 +78,14 @@ __all__ = [
     "MetricsEvent",
     "ParseBackend",
     "ParseContext",
+    "ParseState",
+    "PipelineRunnerDeps",
+    "PostEditCheckResult",
+    "ParserConsensusMode",
+    "PolicyDecisionOutcome",
     "ParserStrategy",
+    "PolicyEnforcement",
+    "SemanticRenameArgs",
     "PolicyCacheEntry",
     "PolicyResult",
     "PolicySourceArgs",
@@ -70,10 +96,16 @@ __all__ = [
     "SummaryContext",
     "TableData",
     "TableStyle",
+    "TouchContract",
     "TreeContextData",
+    "TreeDeclArgs",
     "TreeDeclaration",
     "VariantResult",
     "VariantSpec",
     "Violation",
     "WorkerRunConfig",
+    "_Decl",
+    "_PreambleItem",
+    "_SemanticRenameDecision",
+    "_SourceBlock",
 ]

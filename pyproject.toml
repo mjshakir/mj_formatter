@@ -15,12 +15,12 @@ dependencies = [
   "tree-sitter>=0.21.3",
   "tree-sitter-c>=0.24.0",
   "tree-sitter-cpp>=0.23.0",
+  "tree-sitter-languages>=1.10.2",
   "clang>=16.0.0",
   "libclang>=16.0.0",
 ]
 
 [project.optional-dependencies]
-tree-sitter = ["tree-sitter-languages>=1.10.2"]
 lua = ["lupa>=2.0"]
 speedups = ["orjson>=3.9"]
 dev = ["pytest>=7.4", "pytest-benchmark>=4.0", "mypy>=1.11"]

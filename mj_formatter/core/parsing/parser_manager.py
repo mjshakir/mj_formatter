@@ -4,13 +4,18 @@ from pathlib import Path
 from typing import Any
 import warnings
 import os
+from ctypes.util import find_library
+from functools import lru_cache
 from collections.abc import Sequence
 from threading import Lock, local
+from typing import Final, Literal
 
 from ..types import ClangParseArgs
 
 
 class ParserManager:
+    _CPP_EXTENSIONS: Final[frozenset[str]] = frozenset({".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"})
+    _C_EXTENSIONS: Final[frozenset[str]] = frozenset({".c"})
     ClangParseArgs = ClangParseArgs
 
     def __init__(self, clang_library_paths: Sequence[str] = ()) -> None:
@@ -95,36 +100,6 @@ class ParserManager:
                     continue
                 candidates.append(candidate)
 
-        # Prefer project-local conda env if present
-        project_conda = Path.cwd() / "conda"
-        if project_conda.exists():
-            for env_path in project_conda.rglob("libclang*.so*"):
-                if "clang-cpp" in env_path.name:
-                    continue
-                candidates.append(env_path)
-
-        # Fallback to system paths (apt-installed)
-        system_paths = [
-            Path("/usr/lib/aarch64-linux-gnu"),
-            Path("/usr/lib/llvm-19/lib"),
-            Path("/usr/lib/llvm-18/lib"),
-            Path("/usr/lib/llvm-17/lib"),
-            Path("/usr/lib/llvm-16/lib"),
-            Path("/usr/lib/llvm-15/lib"),
-            Path("/usr/lib/x86_64-linux-gnu"),
-            Path("/usr/lib"),
-            Path("/usr/local/lib"),
-        ]
-        for base in system_paths:
-            for env_path in base.glob("libclang*.so*"):
-                if "clang-cpp" in env_path.name:
-                    continue
-                candidates.append(env_path)
-            for env_path in base.glob("libclang-*.so*"):
-                if "clang-cpp" in env_path.name:
-                    continue
-                candidates.append(env_path)
-
         # Environment override if set
         env_path = os.environ.get("LIBCLANG_PATH")
         if env_path:
@@ -144,7 +119,7 @@ class ParserManager:
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
-        return None
+        return find_library("clang")
 
     def parse_clang(self, args: "ParserManager.ClangParseArgs") -> tuple[Any | None, str | None]:
         if not self._clang_available:
@@ -259,8 +234,25 @@ class ParserManager:
 
     def _guess_language(self, path: str) -> str | None:
         ext = Path(path).suffix.lower()
-        if ext in {".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"}:
+        return self._guess_language_from_extension(ext)
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _guess_language_from_extension(ext: str) -> Literal["cpp", "c"] | None:
+        if ext in ParserManager._CPP_EXTENSIONS:
             return "cpp"
-        if ext in {".c"}:
+        if ext in ParserManager._C_EXTENSIONS:
             return "c"
         return None
+
+    def has_tree_sitter(self) -> bool:
+        return bool(self._ts_available)
+
+    def has_clang(self) -> bool:
+        return bool(self._clang_available)
+
+    def tree_sitter_error(self) -> str | None:
+        return self._ts_error
+
+    def clang_error(self) -> str | None:
+        return self._clang_error

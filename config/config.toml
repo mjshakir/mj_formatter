@@ -43,7 +43,7 @@ shard_merge_workers = 2
 clang_args = []
 clang_compdb = ""
 clang_args_mode = "merge"
-parser_strategy = "hybrid" # policy | hybrid | tree_only | clang_only
+parser_strategy = "hybrid" # hybrid only
 clang_library_paths = []
 parse_pool_workers = 2 # process-global parse thread pool size
 worker_batch_size = 2 # files per worker-task batch
@@ -63,6 +63,10 @@ retry_snapshot_cache_size = 128
 confidence_blocking_enabled = true
 confidence_blocking_min = 0.70
 confidence_blocking_policies = ["naming_conventions", "snake_case"]
+confidence_default_enforcement = "hard" # must | hard | soft | advisory
+confidence_strict_delta = 0.05
+confidence_relaxed_delta = 0.10
+confidence_context_bonus_cap = 0.08
 
 [policies]
 # default can be "all" or "none"
@@ -108,21 +112,3 @@ name = "hybrid_p2_post_off"
 parser_strategy = "hybrid"
 parse_pool_workers = 2
 post_edit_check_enabled = false
-
-[[profiling.matrix]]
-name = "policy_p2_post_on"
-parser_strategy = "policy"
-parse_pool_workers = 2
-post_edit_check_enabled = true
-
-[[profiling.matrix]]
-name = "tree_only_p2_post_on"
-parser_strategy = "tree_only"
-parse_pool_workers = 2
-post_edit_check_enabled = true
-
-[[profiling.matrix]]
-name = "clang_only_p2_post_on"
-parser_strategy = "clang_only"
-parse_pool_workers = 2
-post_edit_check_enabled = true

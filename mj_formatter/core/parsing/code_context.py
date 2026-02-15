@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from .clang_decls import ClangDeclCollector, ClangFunctionDecl, ClangVarDecl
-from ..types.context import (
+from ..types import (
     CodeBlock,
     CodeContext,
     SemanticContext,
@@ -14,6 +15,14 @@ from ..types.context import (
     TreeContextData,
     TreeDeclaration,
 )
+
+_FUNCTION_SYMBOL_KINDS: Final[frozenset[str]] = frozenset(
+    {"function_decl", "cxx_method", "constructor", "destructor", "function_template"}
+)
+_BLOCK_STOP_TYPES: Final[frozenset[str]] = frozenset(
+    {"compound_statement", "field_declaration_list", "declaration_list"}
+)
+_ATOMIC_TYPE_SEPARATORS: Final[tuple[str, ...]] = ("::", "<", ">", ",", "*", "&", "(", ")", "[", "]")
 
 def build_code_context(
     path: str,
@@ -39,6 +48,12 @@ def build_code_context(
     semantic_project_reference_counts: dict[str, int] = {}
     semantic_project_consensus_scores: dict[str, float] = {}
     semantic_hybrid_confidence = 0.0
+    semantic_line_confidence: dict[int, float] = {}
+    semantic_consensus_summary = 0.0
+    semantic_reference_alignment = 0.0
+    semantic_declaration_alignment = 0.0
+    semantic_coverage_score = 0.0
+    hybrid_context_score = 0.0
     hybrid_blocks: tuple[CodeBlock, ...] = tree_context.blocks
 
     if clang_ast is not None:
@@ -87,6 +102,27 @@ def build_code_context(
                     sum(semantic_consensus_scores.values()) / float(len(semantic_consensus_scores))
                 )
         semantic_scope_purity = _pairs_to_float_map(semantic_context.scope_purity_by_usr)
+        semantic_line_confidence = _build_semantic_line_confidence(
+            semantic=semantic_context,
+            consensus_scores=semantic_consensus_scores,
+            reference_consensus_scores=semantic_reference_consensus_scores,
+            declaration_consensus_scores=semantic_declaration_consensus_scores,
+        )
+        semantic_consensus_summary = _mean_float(semantic_consensus_scores.values())
+        semantic_reference_alignment = _mean_float(semantic_reference_consensus_scores.values())
+        semantic_declaration_alignment = _mean_float(semantic_declaration_consensus_scores.values())
+        semantic_coverage_score = _semantic_coverage_score(
+            semantic=semantic_context,
+            reference_counts=semantic_reference_counts,
+            declaration_consensus=semantic_declaration_consensus_scores,
+        )
+        hybrid_context_score = _hybrid_context_score(
+            semantic_hybrid_confidence=semantic_hybrid_confidence,
+            consensus_mean=semantic_consensus_summary,
+            reference_alignment=semantic_reference_alignment,
+            declaration_alignment=semantic_declaration_alignment,
+            coverage_score=semantic_coverage_score,
+        )
         if project_index_cache is not None:
             usrs = {symbol.usr for symbol in semantic_context.symbols if symbol.usr}
             semantic_project_reference_counts = {
@@ -125,6 +161,12 @@ def build_code_context(
         semantic_project_reference_counts=semantic_project_reference_counts,
         semantic_project_consensus_scores=semantic_project_consensus_scores,
         semantic_hybrid_confidence=semantic_hybrid_confidence,
+        semantic_line_confidence=semantic_line_confidence,
+        semantic_consensus_summary=semantic_consensus_summary,
+        semantic_reference_alignment=semantic_reference_alignment,
+        semantic_declaration_alignment=semantic_declaration_alignment,
+        semantic_coverage_score=semantic_coverage_score,
+        hybrid_context_score=hybrid_context_score,
     )
 
 
@@ -539,7 +581,6 @@ def _build_semantic_indexes(
     non_decl_counts: dict[str, int] = {}
     function_symbols: list[SemanticSymbol] = []
     class_names: set[str] = set()
-    function_kinds = {"function_decl", "cxx_method", "constructor", "destructor", "function_template"}
 
     for ref in semantic.references:
         refs_by_usr.setdefault(ref.usr, []).append(ref)
@@ -547,7 +588,7 @@ def _build_semantic_indexes(
             non_decl_counts[ref.usr] = non_decl_counts.get(ref.usr, 0) + 1
 
     for symbol in semantic.symbols:
-        if symbol.kind in function_kinds and symbol.scope_kind == "function":
+        if symbol.kind in _FUNCTION_SYMBOL_KINDS and symbol.scope_kind == "function":
             function_symbols.append(symbol)
         if symbol.scope_kind in {"class", "struct"} and symbol.name:
             class_names.add(symbol.name)
@@ -728,6 +769,7 @@ def _node_body(node: Any) -> Any | None:
     return None
 
 
+@lru_cache(maxsize=256)
 def _canonical_kind_from_node_type(node_type: str) -> str:
     raw = str(node_type or "").strip().lower()
     if not raw:
@@ -755,7 +797,7 @@ def _node_header_text(node: Any, body: Any, data: bytes) -> str:
 
 def _extract_name(node: Any, data: bytes, kind: str | None = None) -> str | None:
     node_type = str(getattr(node, "type", "") or "")
-    stop_types = {"compound_statement", "field_declaration_list", "declaration_list"}
+    stop_types = _BLOCK_STOP_TYPES
     effective_kind = str(kind or "").strip().lower()
     if node_type == "namespace_definition" or effective_kind == "namespace":
         name_node = _rightmost_descendant_by_types(
@@ -808,7 +850,7 @@ def _refine_kind_from_tree(node: Any, base_kind: str) -> str:
     if kind in {"class", "struct", "namespace", "function"}:
         return kind
 
-    stop_types = {"compound_statement", "field_declaration_list", "declaration_list"}
+    stop_types = _BLOCK_STOP_TYPES
     kind_checks: tuple[tuple[set[str], str], ...] = (
         ({"class_specifier"}, "class"),
         ({"struct_specifier"}, "struct"),
@@ -852,7 +894,7 @@ def _tree_scope_for_node(node: Any, data: bytes) -> tuple[str, str | None]:
 def _first_descendant_by_types(
     node: Any,
     target_types: set[str],
-    stop_types: set[str] | None = None,
+    stop_types: set[str] | frozenset[str] | None = None,
 ) -> Any | None:
     stop_types = stop_types or set()
     stack = [node]
@@ -870,7 +912,7 @@ def _first_descendant_by_types(
 def _rightmost_descendant_by_types(
     node: Any,
     target_types: set[str],
-    stop_types: set[str] | None = None,
+    stop_types: set[str] | frozenset[str] | None = None,
 ) -> Any | None:
     stop_types = stop_types or set()
     best: Any | None = None
@@ -939,6 +981,7 @@ def _hybrid_consensus_score(reference_score: float, declaration_score: float) ->
     return float(max(0.0, min(1.0, blended)))
 
 
+@lru_cache(maxsize=128)
 def _scope_kind_compatible(symbol_scope: str, tree_scope: str) -> bool:
     symbol_scope_norm = str(symbol_scope or "").strip().lower()
     tree_scope_norm = str(tree_scope or "").strip().lower()
@@ -955,6 +998,7 @@ def _scope_kind_compatible(symbol_scope: str, tree_scope: str) -> bool:
     return False
 
 
+@lru_cache(maxsize=256)
 def _kind_compatible(symbol_kind: str, tree_kind: str) -> bool:
     symbol_kind_norm = str(symbol_kind or "").strip().lower()
     tree_kind_norm = str(tree_kind or "").strip().lower()
@@ -1021,11 +1065,16 @@ def _merge_blocks_with_semantic(
 
 
 def _is_atomic_type(type_spelling: str, token_set: set[str]) -> bool:
+    return _is_atomic_type_cached(str(type_spelling or ""), frozenset(token_set))
+
+
+@lru_cache(maxsize=4096)
+def _is_atomic_type_cached(type_spelling: str, token_set: frozenset[str]) -> bool:
     if "atomic" in token_set or "_Atomic" in token_set:
         return True
     spelling = str(type_spelling or "")
     # Tokenize C/C++ type spelling without regex.
-    for separator in ("::", "<", ">", ",", "*", "&", "(", ")", "[", "]"):
+    for separator in _ATOMIC_TYPE_SEPARATORS:
         spelling = spelling.replace(separator, " ")
     for token in spelling.split():
         if token == "_Atomic" or token == "atomic" or token.startswith("atomic_"):
@@ -1033,6 +1082,7 @@ def _is_atomic_type(type_spelling: str, token_set: set[str]) -> bool:
     return False
 
 
+@lru_cache(maxsize=4096)
 def _normalize_space(text: str) -> str:
     return " ".join(str(text or "").strip().split())
 
@@ -1057,3 +1107,108 @@ def _float_pairs(values: dict[str, float]) -> tuple[tuple[str, float], ...]:
 
 def _int_pairs(values: dict[str, int]) -> tuple[tuple[str, int], ...]:
     return tuple(sorted((str(key), int(value)) for key, value in values.items()))
+
+
+def _build_semantic_line_confidence(
+    *,
+    semantic: SemanticContext,
+    consensus_scores: dict[str, float],
+    reference_consensus_scores: dict[str, float],
+    declaration_consensus_scores: dict[str, float],
+) -> dict[int, float]:
+    if not semantic.symbols:
+        return {}
+    scores: dict[int, float] = {}
+
+    def update(line: int, value: float) -> None:
+        if line <= 0:
+            return
+        current = scores.get(line, 0.0)
+        scores[line] = max(current, _clamp(value))
+
+    for symbol in semantic.symbols:
+        usr = str(symbol.usr or "")
+        if not usr:
+            continue
+        base = float(consensus_scores.get(usr, symbol.parser_consensus))
+        ref = float(reference_consensus_scores.get(usr, base))
+        decl = float(declaration_consensus_scores.get(usr, base))
+        combined = (0.60 * base) + (0.20 * ref) + (0.20 * decl)
+        update(int(symbol.line), combined)
+
+    for ref in semantic.references:
+        usr = str(ref.usr or "")
+        if not usr:
+            continue
+        base = float(consensus_scores.get(usr, 0.50))
+        if ref.is_declaration:
+            base = max(base, float(declaration_consensus_scores.get(usr, base)))
+        else:
+            base = max(base, float(reference_consensus_scores.get(usr, base)))
+        update(int(ref.line), base)
+
+    return scores
+
+
+def _semantic_coverage_score(
+    *,
+    semantic: SemanticContext,
+    reference_counts: dict[str, int],
+    declaration_consensus: dict[str, float],
+) -> float:
+    symbols = [item for item in semantic.symbols if item.usr]
+    if not symbols:
+        return 0.0
+    symbol_usrs = {item.usr for item in symbols}
+    count = len(symbol_usrs)
+    if count <= 0:
+        return 0.0
+
+    declaration_hits = sum(1 for usr in symbol_usrs if float(declaration_consensus.get(usr, 0.0)) >= 0.70)
+    declaration_ratio = float(declaration_hits) / float(count)
+
+    reference_evidence = sum(1 for usr in symbol_usrs if int(reference_counts.get(usr, 0)) > 0)
+    reference_ratio = float(reference_evidence) / float(count)
+
+    scope_purity_map = _pairs_to_float_map(semantic.scope_purity_by_usr)
+    scope_purity_mean = _mean_float(scope_purity_map.values())
+
+    score = (0.45 * declaration_ratio) + (0.35 * reference_ratio) + (0.20 * scope_purity_mean)
+    return _clamp(score)
+
+
+def _hybrid_context_score(
+    *,
+    semantic_hybrid_confidence: float,
+    consensus_mean: float,
+    reference_alignment: float,
+    declaration_alignment: float,
+    coverage_score: float,
+) -> float:
+    semantic_anchor = max(float(semantic_hybrid_confidence), float(consensus_mean))
+    if semantic_anchor <= 0.0 and reference_alignment <= 0.0 and declaration_alignment <= 0.0:
+        return 0.0
+    score = (
+        (0.55 * semantic_anchor)
+        + (0.20 * float(reference_alignment))
+        + (0.15 * float(declaration_alignment))
+        + (0.10 * float(coverage_score))
+    )
+    return _clamp(score)
+
+
+def _mean_float(values: object) -> float:
+    total = 0.0
+    count = 0
+    if values is None:
+        return 0.0
+    for item in values:
+        total += float(item)
+        count += 1
+    if count <= 0:
+        return 0.0
+    return _clamp(total / float(count))
+
+
+def _clamp(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))

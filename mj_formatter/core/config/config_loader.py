@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..types import AppConfig
+from ..types import PolicyEnforcement
 from ..types import ParserStrategy
 from ..types import PolicySourceArgs
 from .toml_store import TomlStore
@@ -209,9 +210,8 @@ class ConfigLoader:
         conflict_detection_enabled = bool(formatter.get("conflict_detection_enabled", True))
         conflict_touch_threshold = int(formatter.get("conflict_touch_threshold", 3))
         conflict_fail_on_detected = bool(formatter.get("conflict_fail_on_detected", False))
-        parser_strategy = ParserStrategy.from_value(
-            getattr(args, "parser_strategy", None) or formatter.get("parser_strategy", ParserStrategy.HYBRID.value)
-        )
+        # Parser strategy is normalized to hybrid-only runtime.
+        parser_strategy = ParserStrategy.HYBRID
         parse_pool_workers = int(
             formatter.get("parse_pool_workers", 2)
             if getattr(args, "parse_pool_workers", None) is None
@@ -279,6 +279,15 @@ class ConfigLoader:
             for item in (formatter.get("confidence_blocking_policies", ["naming_conventions", "snake_case"]) or [])
             if str(item).strip()
         )
+        confidence_default_enforcement = PolicyEnforcement.from_value(
+            formatter.get("confidence_default_enforcement", PolicyEnforcement.HARD.value)
+        )
+        confidence_strict_delta = float(formatter.get("confidence_strict_delta", 0.05))
+        confidence_strict_delta = max(0.0, min(1.0, confidence_strict_delta))
+        confidence_relaxed_delta = float(formatter.get("confidence_relaxed_delta", 0.10))
+        confidence_relaxed_delta = max(0.0, min(1.0, confidence_relaxed_delta))
+        confidence_context_bonus_cap = float(formatter.get("confidence_context_bonus_cap", 0.08))
+        confidence_context_bonus_cap = max(0.0, min(0.25, confidence_context_bonus_cap))
 
         clang_args = tuple(formatter.get("clang_args", []) or [])
         clang_library_paths = tuple(str(item) for item in (formatter.get("clang_library_paths", []) or []))
@@ -358,4 +367,8 @@ class ConfigLoader:
             confidence_blocking_enabled=confidence_blocking_enabled,
             confidence_blocking_min=confidence_blocking_min,
             confidence_blocking_policies=frozenset(confidence_blocking_policies),
+            confidence_default_enforcement=confidence_default_enforcement,
+            confidence_strict_delta=confidence_strict_delta,
+            confidence_relaxed_delta=confidence_relaxed_delta,
+            confidence_context_bonus_cap=confidence_context_bonus_cap,
         )
