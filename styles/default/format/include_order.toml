@@ -25,6 +25,8 @@ include_path_segment = "/include/"
 
 # Separator length (matches comment style)
 separator_length = 64
+# when false, rewrites only #include directives (preprocessor-safe for preprocessor_only contract)
+emit_group_comments = false
 
 [policy.group_titles]
 main = "Main header"
@@ -35,3 +37,7 @@ local = "User Defined Headers"
 
 [policy.third_party_labels]
 # fmt = "fmt"
+
+[policy.convergence]
+domain = "includes.structure"
+priority = 900
