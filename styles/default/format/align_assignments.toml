@@ -1,8 +1,0 @@
-[policy]
-name = "align_assignments"
-enabled = true
-type = "align_columns"
-touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
-operator = "="
-ignore_in = ["for", "if", "while", "switch"]
-non_assignment_patterns = ["\\)\\s*=\\s*(?:delete|default)\\s*;", "\\)\\s*=\\s*0\\s*;", "^\\s*template\\s*<"]
