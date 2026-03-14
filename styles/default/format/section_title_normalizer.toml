@@ -2,7 +2,7 @@
 name = "section_title_normalizer"
 enabled = true
 type = "lua"
-touch_contract = "whitespace_only" # any | code_only | preprocessor_only | whitespace_only
+touch_contract = "any" # any | code_only | preprocessor_only | whitespace_only
 script = "styles/default/lua/section_title_normalizer.lua"
 function = "apply"
 sandbox = true
@@ -11,3 +11,7 @@ sandbox = true
 "Standard cpp library" = "Standard cpp library"
 "User Defined libraries" = "User-defined libraries"
 "Main Header" = "Main Header"
+
+[policy.convergence]
+domain = "includes.structure"
+priority = 930
