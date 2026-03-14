@@ -11,6 +11,8 @@ exclude = [
 
 # 0 means auto (CPU count)
 jobs = 0
+# 1 disables multi-process mode; 0 means auto (CPU count)
+processes = 1
 
 # if true, only reports issues; does not write changes
 check = false
@@ -19,96 +21,97 @@ check = false
 backup = true
 backup_mode = "suffix" # "suffix" or "mirror"
 backup_suffix = ".bak"
-backup_dir = "scripts/mj_formatter/backups"
+backup_dir = "var/backups"
 
 # reporting
-report_path = "scripts/mj_formatter/reports/format_report.jsonl"
-run_journal_dir = "scripts/mj_formatter/runs"
+report_path = "var/reports/run.ndjson"
+run_journal_dir = "var/runs"
 
-# cache
-cache_enabled = true
-cache_path = "scripts/mj_formatter/.cache/cache.bin"
 check_result_cache_enabled = true
-check_result_cache_path = "scripts/mj_formatter/.cache/check_results"
+check_result_cache_path = "var/cache/check_results.bin"
 check_result_cache_l1_size = 2048
-policy_cache_path = "styles/default/cache/policy_cache.bin"
-sort_results = true
+policy_context_tracker_path = "var/cache/context_tracker.bin"
 
-# logging
-log_level = "INFO"
-log_file = "scripts/mj_formatter/logs/mj_formatter.log"
-async_logging = true
-log_queue_size = 10000
-shard_merge_workers = 2
+# cpp_standard: auto-detected from compile_commands.json; override here if needed
+# cpp_standard = "c++20"
 clang_args = []
-clang_compdb = ""
-clang_args_mode = "merge"
-parser_strategy = "hybrid" # hybrid only
-clang_library_paths = []
-parse_pool_workers = 2 # process-global parse thread pool size
-worker_batch_size = 2 # files per worker-task batch
-worker_batch_prefetch = true # prefetch next file read while current file formats
-worker_batch_smart = true # group files by size to balance worker batch cost
-worker_batch_autotune_enabled = false
-worker_batch_autotune_path = "scripts/mj_formatter/.cache/worker_batch_autotune.json"
-worker_batch_autotune_candidates = [1, 2, 4, 8]
-worker_batch_autotune_probe_interval = 12
-worker_batch_autotune_min_files = 16
+clang_compdb = "../HazardSystem/build/compile_commands.json"
+clang_args_mode = "compdb_only"
+# phase-1 semantic fidelity controls
+semantic_require_compdb = true
+semantic_disable_inferred_includes = true
+worker_process_timeout_seconds = 900
+worker_process_kill_grace_seconds = 5
+worker_max_restarts = 1
 post_edit_check_enabled = true
+post_edit_fail_on_parser_unavailable = true
+post_edit_tree_error_ratio_tolerance = 0.01
 post_edit_retry_enabled = true
-post_edit_retry_max_attempts = 6
-post_edit_retry_confidence_step = 0.05
+post_edit_retry_max_attempts = 8
+post_edit_retry_confidence_step = 0.03
 post_edit_retry_confidence_max = 1.00
+post_edit_retry_aggressive_step_multiplier = 1.8
+post_edit_retry_no_improve_limit = 2
+post_edit_retry_max_blocked_policies = 6
 retry_snapshot_cache_size = 128
+project_graph_enabled = true
+project_graph_path = "var/cache/graph_state.bin"
+project_graph_prune_enabled = true
+project_graph_retention_days = 30
+project_graph_max_nodes = 250000
+project_graph_max_edges = 1000000
+project_graph_tombstone_enabled = true
+project_graph_tombstone_retention_days = 90
+project_graph_tombstone_decay_days = 30
+project_graph_convergence_decay_enabled = true
+project_graph_convergence_decay_half_life_days = 30
+project_graph_convergence_decay_min_count = 1
+project_graph_incremental_neighborhood_enabled = true
+project_graph_incremental_neighborhood_hops = 1
+project_graph_incremental_neighborhood_max_files = 256
+convergence_learn_on_check = true
 confidence_blocking_enabled = true
-confidence_blocking_min = 0.70
-confidence_blocking_policies = ["naming_conventions", "snake_case"]
 confidence_default_enforcement = "hard" # must | hard | soft | advisory
-confidence_strict_delta = 0.05
-confidence_relaxed_delta = 0.10
-confidence_context_bonus_cap = 0.08
+retry_strategy_optimizer_enabled = true
+retry_strategy_optimizer_path = "var/cache/retry_optimizer.json"
+retry_strategy_optimizer_ema_alpha = 0.20
+retry_strategy_optimizer_context_weight = 0.70
+retry_strategy_optimizer_min_samples = 6
+retry_strategy_optimizer_max_bonus = 140
+retry_strategy_optimizer_persist_every = 4
+retry_strategy_optimizer_canary_only = false
+retry_strategy_optimizer_auto_tune_enabled = true
+retry_strategy_optimizer_auto_tune_ema_alpha = 0.15
+retry_strategy_optimizer_auto_tune_target_retry_success_rate = 0.80
+retry_strategy_optimizer_auto_tune_deadband = 0.05
+retry_strategy_optimizer_auto_tune_step = 10
+retry_strategy_optimizer_auto_tune_adjust_every = 4
+retry_strategy_optimizer_auto_tune_min_samples = 16
+retry_strategy_optimizer_auto_tune_min_bonus = 40
+retry_strategy_optimizer_auto_tune_max_bonus_cap = 240
+# phase-12 rollout controls
+accuracy_gate_enabled = true
+accuracy_profile = "balanced" # strict | balanced | adaptive
+semantic_required = true
+fail_closed = false
+accuracy_rollout_defer_fail_closed_until_stable = true
+accuracy_rollout_stable_passes_required = 6
+accuracy_rollout_state_path = "var/cache/rollout_state.bin"
+accuracy_ci_require_benchmark = false
+accuracy_gate_min_precision = 0.95
+accuracy_gate_min_recall = 0.24
+accuracy_gate_min_samples = 5
+accuracy_benchmark_enabled = true
+accuracy_benchmark_input_dir = "tests/input"
+accuracy_benchmark_expected_dir = "tests/expected"
+accuracy_benchmark_min_precision = 0.95
+accuracy_benchmark_min_recall = 0.24
+accuracy_benchmark_min_match_ratio = 0.39
+accuracy_benchmark_min_samples = 5
+accuracy_benchmark_fail_closed = true
 
 [policies]
-# default can be "all" or "none"
-default = "all"
-# explicit overrides
 enabled = []
 disabled = []
-# optional order; if empty, registry order is used
 order = []
-# style pack folder under styles/<style>/
 style = "default"
-# optional explicit policy files (relative to config.toml)
-files = []
-
-[profiling]
-root = "../HazardSystem"
-output_dir = "scripts/mj_formatter/profile_matrix"
-python_bin = "venv/bin/python"
-check = true
-profile = true
-cache = false
-
-[[profiling.matrix]]
-name = "hybrid_p1_post_on"
-parser_strategy = "hybrid"
-parse_pool_workers = 1
-post_edit_check_enabled = true
-
-[[profiling.matrix]]
-name = "hybrid_p2_post_on"
-parser_strategy = "hybrid"
-parse_pool_workers = 2
-post_edit_check_enabled = true
-
-[[profiling.matrix]]
-name = "hybrid_p4_post_on"
-parser_strategy = "hybrid"
-parse_pool_workers = 4
-post_edit_check_enabled = true
-
-[[profiling.matrix]]
-name = "hybrid_p2_post_off"
-parser_strategy = "hybrid"
-parse_pool_workers = 2
-post_edit_check_enabled = false
