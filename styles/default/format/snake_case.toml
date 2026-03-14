@@ -1,6 +1,6 @@
 [policy]
 name = "snake_case"
-enabled = false
+enabled = true
 type = "python"
 touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
 
@@ -10,37 +10,5 @@ apply_to = "both"
 exclude_class_namespace = true
 prefer_clang = true
 use_tree_sitter = true
-
-[policy.confidence_profile]
-low_score_downgrade_threshold = 0.45
-high_score_upgrade_threshold = 0.90
-high_consensus_upgrade_threshold = 0.90
-low_consensus_downgrade_threshold = 0.60
-project_consensus_upgrade_threshold = 0.92
-project_score_upgrade_threshold = 0.82
-reason_low_consensus_threshold = 0.60
-risk_limit_hard = 0.15
-risk_limit_soft = 0.30
-risk_limit_advisory = 0.95
-risk_limit_floor = 0.05
-delta_risk_penalty_cap = 0.15
-retry_risk_penalty = 0.05
-line_confidence_default = 0.50
-line_index_weight = 0.65
-line_block_weight = 0.35
-line_neighbor_deltas = [1, 2]
-line_neighbor_decay = 0.15
-block_confidence_default = 0.70
-context_bonus_clang = 0.02
-context_refs_threshold_low = 32
-context_bonus_refs_low = 0.02
-context_refs_threshold_high = 128
-context_bonus_refs_high = 0.02
-context_scope_threshold_low = 0.85
-context_bonus_scope_low = 0.02
-context_scope_threshold_high = 0.95
-context_bonus_scope_high = 0.02
-context_hybrid_threshold = 0.85
-context_bonus_hybrid = 0.01
-context_coverage_threshold = 0.80
-context_bonus_coverage = 0.01
+parser_consensus_mode = "strict" # off | advisory | strict | adaptive
+enforcement = "hard" # must | hard | soft | advisory
