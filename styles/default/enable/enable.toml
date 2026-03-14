@@ -1,25 +1,21 @@
 [enable]
 # Policies listed here are explicitly enabled/disabled.
 enabled = [
-  "trim_trailing_whitespace",
   "dash_comment_normalizer",
   "section_title_normalizer",
   "include_order",
-  "align_assignments",
   "compact_declarations",
   "pragma_once_spacing",
   "operator_overload_spacing",
-  "brace_style",
-  "spacing_style",
   "function_void_params",
-  "pointer_bind_style",
-  "line_wrap",
+  "logical_keyword_operators",
   "class_layout",
   "namespace_end_comments",
   "include_guards",
   "naming_conventions",
   "snake_case",
   "lua_macro_spacing",
+  "numeric_literal_suffix",
   "clang_format",
 ]
 
