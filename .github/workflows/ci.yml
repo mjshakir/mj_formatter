@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build CI compdb and config
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+
+          repo = pathlib.Path(".").resolve()
+          include_root = repo / "include"
+          patterns = [
+              "include/**/*.h",
+              "include/**/*.hpp",
+              "include/**/*.hh",
+              "include/**/*.hxx",
+              "src/**/*.c",
+              "src/**/*.cc",
+              "src/**/*.cpp",
+              "src/**/*.cxx",
+              "src/**/*.h",
+              "src/**/*.hpp",
+              "src/**/*.hh",
+              "src/**/*.hxx",
+              "tests/input/**/*.h",
+              "tests/input/**/*.hpp",
+              "tests/input/**/*.hh",
+              "tests/input/**/*.hxx",
+              "tests/input/**/*.c",
+              "tests/input/**/*.cc",
+              "tests/input/**/*.cpp",
+              "tests/input/**/*.cxx",
+          ]
+
+          files = sorted(
+              {
+                  path.resolve()
+                  for pattern in patterns
+                  for path in repo.glob(pattern)
+                  if path.is_file()
+              }
+          )
+
+          commands = []
+          for path in files:
+              extension = path.suffix.lower()
+              is_c = extension == ".c"
+              language = "c" if is_c else "c++"
+              compiler = "clang" if is_c else "clang++"
+              standard = "c11" if is_c else "c++20"
+              commands.append(
+                  {
+                      "directory": str(path.parent),
+                      "file": str(path),
+                      "arguments": [
+                          compiler,
+                          f"-std={standard}",
+                          "-x",
+                          language,
+                          "-fsyntax-only",
+                          f"-I{include_root}",
+                          str(path),
+                      ],
+                  }
+              )
+
+          compdb_path = repo / "var/cache/ci_compile_commands.json"
+          compdb_path.parent.mkdir(parents=True, exist_ok=True)
+          compdb_path.write_text(json.dumps(commands, indent=2), encoding="utf-8")
+
+          config_path = repo / "config/config.toml"
+          config_text = config_path.read_text(encoding="utf-8")
+          updated = re.sub(
+              r'^clang_compdb\s*=.*$',
+              f'clang_compdb = "{compdb_path.as_posix()}"',
+              config_text,
+              flags=re.MULTILINE,
+          )
+          ci_path = repo / "config/config.ci.toml"
+          ci_path.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: Tests
+        run: cargo test
+
+      - name: Benchmark gate
+        run: |
+          cargo run -q -- \
+            --config config/config.ci.toml \
+            --root . \
+            --processes 2 \
+            --jobs 4 \
+            --check

@@ -1,0 +1,9 @@
+[policy]
+name = "logical_keyword_operators"
+enabled = true
+type = "python"
+touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
+
+replace_and = true
+replace_or = true
+skip_preprocessor = true

@@ -1,0 +1,117 @@
+use std::collections::BTreeSet;
+
+use super::{
+    CoordinatedPolicyStage, PartialRollbackInput, PolicyCheckpointResult,
+    PolicyPipeline, PolicyPipelineRunState,
+};
+use crate::model::edit::Edit;
+
+impl PolicyPipeline {
+    pub(super) fn checkpoint_policy_stage(
+        &self,
+        state: &PolicyPipelineRunState<'_>,
+        coordinated: &CoordinatedPolicyStage,
+        policy_name: &str,
+    ) -> PolicyCheckpointResult {
+        if !coordinated.text_changed {
+            return PolicyCheckpointResult::Accept { validated_tree: None };
+        }
+
+        let before_errors = state
+            .tree_for_text
+            .as_ref()
+            .map(|t| crate::parser::ts_traversal::tree_error_stats(t).error_nodes)
+            .unwrap_or(0);
+
+        let after_tree = self
+            .parser_manager
+            .parse_tree_sitter(
+                &coordinated.result.text,
+                state.path,
+            );
+
+        match after_tree {
+            Ok(tree) => {
+                let stats = crate::parser::ts_traversal::tree_error_stats(&tree);
+                if stats.error_nodes <= before_errors {
+                    return PolicyCheckpointResult::Accept {
+                        validated_tree: Some(tree),
+                    };
+                }
+                let new_error_lines: BTreeSet<usize> = stats.error_lines;
+                let rollback_attempt = self.attempt_partial_rollback(
+                    state,
+                    PartialRollbackInput {
+                        coordinated,
+                        policy_name,
+                        before_errors,
+                        new_error_lines: &new_error_lines,
+                    },
+                );
+                if let Some(partial) = rollback_attempt {
+                    return partial;
+                }
+                PolicyCheckpointResult::Rollback {
+                    reason: format!(
+                        "checkpoint: '{}' introduced {} new error node(s) — rolling back",
+                        policy_name,
+                        stats.error_nodes.saturating_sub(before_errors),
+                    ),
+                }
+            }
+            Err(_) => {
+                PolicyCheckpointResult::Accept { validated_tree: None }
+            }
+        }
+    }
+
+    pub(super) fn attempt_partial_rollback(
+        &self,
+        state: &PolicyPipelineRunState<'_>,
+        input: PartialRollbackInput<'_>,
+    ) -> Option<PolicyCheckpointResult> {
+        let PartialRollbackInput {
+            coordinated,
+            policy_name,
+            before_errors,
+            new_error_lines,
+        } = input;
+        if coordinated.result.edits.is_empty() {
+            return None;
+        }
+        let safe_edits: Vec<Edit> = coordinated
+            .result
+            .edits
+            .iter()
+            .filter(|edit| !new_error_lines.contains(&edit.line))
+            .cloned()
+            .collect();
+        if safe_edits.is_empty() {
+            return None;
+        }
+        let recovered = Self::apply_synthesized_edits_best_effort(&state.current, &safe_edits);
+        let recovered_text = recovered?;
+        let recovered_tree = self
+            .parser_manager
+            .parse_tree_sitter(&recovered_text, state.path)
+            .ok()?;
+        let recovered_errors =
+            crate::parser::ts_traversal::tree_error_stats(&recovered_tree).error_nodes;
+        if recovered_errors > before_errors {
+            return None;
+        }
+        let warning = format!(
+            "checkpoint: '{}' partial rollback recovered {} of {} edits ({} error lines excluded)",
+            policy_name,
+            safe_edits.len(),
+            coordinated.result.edits.len(),
+            new_error_lines.len(),
+        );
+        Some(PolicyCheckpointResult::PartialRollback {
+            recovered_text,
+            recovered_edits: safe_edits,
+            validated_tree: Some(recovered_tree),
+            warning,
+        })
+    }
+}

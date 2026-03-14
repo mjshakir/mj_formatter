@@ -1,0 +1,518 @@
+use std::ops::Range;
+
+use tree_sitter::{Node, StreamingIterator};
+
+use crate::model::edit::Edit;
+use crate::model::policy_context::PolicyContext;
+use crate::model::policy_result::PolicyResult;
+use crate::model::context_query::SemanticContextQuery;
+use crate::model::violation::Violation;
+use crate::parser::file_context::SemanticScopeKind;
+use crate::parser::node_kind;
+use crate::parser::query_cache::TsQueryCache;
+use crate::policy::traits::Policy;
+use crate::text_scan;
+
+struct Replacement {
+    start: usize,
+    end: usize,
+    replacement: String,
+    line: usize,
+    before: &'static str,
+}
+
+pub struct LogicalKeywordOperatorsPolicy {
+    replace_and: bool,
+    replace_or: bool,
+    skip_preprocessor: bool,
+}
+
+impl LogicalKeywordOperatorsPolicy {
+    pub fn new(replace_and: bool, replace_or: bool, skip_preprocessor: bool) -> Self {
+        Self {
+            replace_and,
+            replace_or,
+            skip_preprocessor,
+        }
+    }
+
+    fn is_protected_kind(kind: &str, skip_preprocessor: bool) -> bool {
+        kind == node_kind::COMMENT
+            || node_kind::is_string_like(kind)
+            || (skip_preprocessor && kind.starts_with("preproc_"))
+    }
+
+    const PROTECTED_QUERY_NO_PREPROC: &str = r#"[
+        (comment) @p
+        (string_literal) @p
+        (raw_string_literal) @p
+        (char_literal) @p
+        (system_lib_string) @p
+        (concatenated_string) @p
+    ]"#;
+
+    const PROTECTED_QUERY_WITH_PREPROC: &str = r#"[
+        (comment) @p
+        (string_literal) @p
+        (raw_string_literal) @p
+        (char_literal) @p
+        (system_lib_string) @p
+        (concatenated_string) @p
+        (preproc_if) @p
+        (preproc_ifdef) @p
+        (preproc_elif) @p
+        (preproc_else) @p
+        (preproc_include) @p
+        (preproc_def) @p
+        (preproc_function_def) @p
+    ]"#;
+
+    fn collect_protected_ranges(
+        root: Node<'_>,
+        skip_preprocessor: bool,
+        query_cache: Option<&TsQueryCache>,
+    ) -> Vec<Range<usize>> {
+        let mut protected = Vec::<Range<usize>>::new();
+
+        let pattern = if skip_preprocessor {
+            Self::PROTECTED_QUERY_WITH_PREPROC
+        } else {
+            Self::PROTECTED_QUERY_NO_PREPROC
+        };
+
+        if let Some(query) = query_cache
+            .and_then(|qc| qc.get_or_compile(pattern).ok())
+        {
+            let mut cursor = tree_sitter::QueryCursor::new();
+            let mut matches = cursor.matches(&query, root, "".as_bytes());
+            while let Some(m) = {
+                matches.advance();
+                matches.get()
+            } {
+                for capture in m.captures {
+                    protected.push(capture.node.start_byte()..capture.node.end_byte());
+                }
+            }
+        } else {
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                if Self::is_protected_kind(node.kind(), skip_preprocessor) {
+                    protected.push(node.start_byte()..node.end_byte());
+                    continue;
+                }
+                for idx in (0..node.child_count()).rev() {
+                    if let Some(child) = node.child(idx as u32) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+
+        if protected.is_empty() {
+            return protected;
+        }
+        protected.sort_by_key(|range| range.start);
+        let mut merged = Vec::<Range<usize>>::with_capacity(protected.len());
+        let mut current = protected[0].clone();
+        for range in protected.into_iter().skip(1) {
+            if range.start <= current.end {
+                current.end = current.end.max(range.end);
+            } else {
+                merged.push(current);
+                current = range;
+            }
+        }
+        merged.push(current);
+        merged
+    }
+
+    fn compute_line_starts(text: &str) -> Vec<usize> {
+        text_scan::line_starts(text, true)
+    }
+
+    fn line_for_offset(line_starts: &[usize], offset: usize) -> usize {
+        match line_starts.binary_search(&offset) {
+            Ok(idx) => idx + 1,
+            Err(idx) => idx.max(1),
+        }
+    }
+
+    fn needs_left_space(bytes: &[u8], start: usize) -> bool {
+        if start == 0 {
+            return false;
+        }
+        let prev = bytes[start - 1];
+        !(prev.is_ascii_whitespace() || matches!(prev, b'(' | b'[' | b'{'))
+    }
+
+    fn needs_right_space(bytes: &[u8], end: usize) -> bool {
+        if end >= bytes.len() {
+            return false;
+        }
+        let next = bytes[end];
+        !(next.is_ascii_whitespace()
+            || matches!(next, b')' | b']' | b'}' | b';' | b',' | b':' | b'?'))
+    }
+
+    fn build_keyword_replacement(bytes: &[u8], start: usize, end: usize, keyword: &str) -> String {
+        let mut result = String::with_capacity(keyword.len() + 2);
+        if Self::needs_left_space(bytes, start) {
+            result.push(' ');
+        }
+        result.push_str(keyword);
+        if Self::needs_right_space(bytes, end) {
+            result.push(' ');
+        }
+        result
+    }
+
+    fn contains_offset(ranges: &[Range<usize>], offset: usize) -> bool {
+        let mut left = 0usize;
+        let mut right = ranges.len();
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let range = &ranges[mid];
+            if offset < range.start {
+                right = mid;
+            } else if offset >= range.end {
+                left = mid + 1;
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn parent_allows_logical_keyword(node: Node<'_>) -> bool {
+        matches!(node.kind(), node_kind::BINARY_EXPRESSION)
+    }
+
+    const LOGICAL_OP_QUERY: &str = r#"(binary_expression ["&&" "||"] @op)"#;
+
+    fn collect_replacements_from_tree(
+        &self,
+        text: &str,
+        root: Node<'_>,
+        protected: &[Range<usize>],
+        semantic_query: &SemanticContextQuery<'_>,
+        query_cache: Option<&TsQueryCache>,
+    ) -> (Vec<Replacement>, usize) {
+        let bytes = text.as_bytes();
+        if bytes.len() < 2 {
+            return (Vec::new(), 0);
+        }
+        let line_starts = Self::compute_line_starts(text);
+        let mut replacements = Vec::<Replacement>::new();
+        let mut skipped_semantic_unsafe = 0usize;
+
+        let process_node =
+            |node: Node<'_>,
+             replacements: &mut Vec<Replacement>,
+             skipped: &mut usize| {
+                let kind = node.kind();
+                if (!self.replace_and || kind != "&&") && (!self.replace_or || kind != "||") {
+                    return;
+                }
+                let start = node.start_byte();
+                let end = node.end_byte();
+                if start >= end || end > bytes.len() {
+                    return;
+                }
+                if Self::contains_offset(protected, start) {
+                    return;
+                }
+                let line = Self::line_for_offset(line_starts.as_slice(), start);
+                let column = node.start_position().column + 1;
+                if semantic_query.is_available()
+                    && semantic_query
+                        .scope_at(line, column)
+                        .is_some_and(|scope| scope.kind == SemanticScopeKind::Preprocessor)
+                {
+                    *skipped = skipped.saturating_add(1);
+                    return;
+                }
+                if semantic_query.is_available() && semantic_query.is_macro_region(line, column) {
+                    *skipped = skipped.saturating_add(1);
+                    return;
+                }
+                let replacement = if kind == "&&" {
+                    Self::build_keyword_replacement(bytes, start, end, "and")
+                } else {
+                    Self::build_keyword_replacement(bytes, start, end, "or")
+                };
+                replacements.push(Replacement {
+                    start,
+                    end,
+                    replacement,
+                    line,
+                    before: if kind == "&&" { "&&" } else { "||" },
+                });
+            };
+
+        if let Some(query) = query_cache
+            .and_then(|qc| qc.get_or_compile(Self::LOGICAL_OP_QUERY).ok())
+        {
+            let mut cursor = tree_sitter::QueryCursor::new();
+            let mut matches = cursor.matches(&query, root, "".as_bytes());
+            while let Some(m) = {
+                matches.advance();
+                matches.get()
+            } {
+                for capture in m.captures {
+                    process_node(
+                        capture.node,
+                        &mut replacements,
+                        &mut skipped_semantic_unsafe,
+                    );
+                }
+            }
+        } else {
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                let kind = node.kind();
+                if ((self.replace_and && kind == "&&") || (self.replace_or && kind == "||"))
+                    && node
+                        .parent()
+                        .is_some_and(|p| Self::parent_allows_logical_keyword(p))
+                {
+                    process_node(
+                        node,
+                        &mut replacements,
+                        &mut skipped_semantic_unsafe,
+                    );
+                }
+                for idx in (0..node.child_count()).rev() {
+                    if let Some(child) = node.child(idx as u32) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+
+        replacements.sort_by_key(|item| (item.start, item.end));
+        (replacements, skipped_semantic_unsafe)
+    }
+}
+
+impl Policy for LogicalKeywordOperatorsPolicy {
+    fn name(&self) -> &str {
+        "logical_keyword_operators"
+    }
+    fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
+        if !self.replace_and && !self.replace_or {
+            return PolicyResult {
+                text: context.text.to_string(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                warnings: Vec::new(),
+            };
+        }
+
+        let Some(tree) = context.tree_sitter_tree else {
+            return PolicyResult {
+                text: context.text.to_string(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                warnings: vec![
+                    "logical_keyword_operators: tree-sitter context unavailable".to_string()
+                ],
+            };
+        };
+
+        if context.has_fatal_clang_diagnostics() {
+            return PolicyResult {
+                text: context.text.to_string(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                warnings: vec![format!(
+                    "logical_keyword_operators: skipped due fatal clang diagnostics (fatal={})",
+                    context.clang_fatal_diagnostic_count()
+                )],
+            };
+        }
+
+        let semantic_query = context.semantic_query();
+        if !semantic_query.is_available() {
+            return PolicyResult {
+                text: context.text.to_string(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                warnings: vec![
+                    "logical_keyword_operators: semantic context unavailable; skipping accuracy-unsafe replacement"
+                        .to_string(),
+                ],
+            };
+        }
+
+        let root = tree.root_node();
+        let protected =
+            Self::collect_protected_ranges(root, self.skip_preprocessor, context.query_cache);
+        let (replacements, skipped_semantic_unsafe) = self.collect_replacements_from_tree(
+            context.text,
+            root,
+            protected.as_slice(),
+            &semantic_query,
+            context.query_cache,
+        );
+        if replacements.is_empty() {
+            return PolicyResult {
+                text: context.text.to_string(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                warnings: if skipped_semantic_unsafe > 0 {
+                    vec![format!(
+                        "logical_keyword_operators: skipped {} semantic-unsafe replacement(s)",
+                        skipped_semantic_unsafe
+                    )]
+                } else {
+                    Vec::new()
+                },
+            };
+        }
+
+        let mut rewritten = String::with_capacity(context.text.len() + replacements.len() * 2);
+        let mut cursor = 0usize;
+        let mut edits = Vec::<Edit>::with_capacity(replacements.len());
+        for replacement in replacements {
+            rewritten.push_str(&context.text[cursor..replacement.start]);
+            rewritten.push_str(&replacement.replacement);
+            cursor = replacement.end;
+            edits.push(Edit {
+                policy: self.name().into(),
+                line: replacement.line,
+                before: replacement.before.to_string(),
+                after: replacement.replacement,
+            });
+        }
+        rewritten.push_str(&context.text[cursor..]);
+
+        let mut warnings = Vec::new();
+        if skipped_semantic_unsafe > 0 {
+            warnings.push(format!(
+                "logical_keyword_operators: skipped {} semantic-unsafe replacement(s)",
+                skipped_semantic_unsafe
+            ));
+        }
+
+        PolicyResult {
+            text: rewritten,
+            violations: vec![Violation {
+                policy: self.name().into(),
+                message: "replaced logical operators with keyword forms where safe".to_string(),
+                line: edits[0].line,
+                column: Some(1),
+            }],
+            edits,
+            warnings,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tree_sitter::Parser;
+
+    use crate::model::policy_context::PolicyContext;
+    use crate::parser::file_context::SemanticFileContext;
+    use crate::policy::keyword_operators::LogicalKeywordOperatorsPolicy;
+    use crate::policy::traits::Policy;
+
+    fn parse_cpp(text: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("cpp language");
+        parser.parse(text, None).expect("parse tree")
+    }
+
+    #[test]
+    fn replaces_logical_ops_in_regular_code() {
+        let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
+        let path = PathBuf::from("sample.cpp");
+        let source = "bool ok = a&&b || c;\n";
+        let tree = parse_cpp(source);
+        let semantic = SemanticFileContext::default();
+        let ctx = PolicyContext::new(source, &path)
+            .with_tree_sitter_tree(Some(&tree))
+            .with_semantic_file_context(Some(&semantic));
+        let result = policy.apply(&ctx);
+        assert_eq!(result.text, "bool ok = a and b or c;\n");
+    }
+
+    #[test]
+    fn skips_preprocessor_regions() {
+        let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
+        let path = PathBuf::from("sample.cpp");
+        let source = "#if defined(A) && defined(B)\nint x = a&&b;\n#endif\n";
+        let tree = parse_cpp(source);
+        let semantic = SemanticFileContext::default();
+        let ctx = PolicyContext::new(source, &path)
+            .with_tree_sitter_tree(Some(&tree))
+            .with_semantic_file_context(Some(&semantic));
+        let result = policy.apply(&ctx);
+        assert_eq!(result.text, source);
+    }
+
+    #[test]
+    fn preserves_comments_and_strings() {
+        let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
+        let path = PathBuf::from("sample.cpp");
+        let source = "const char* s = \"a&&b || c\"; // keep && ||\nbool x = a||b;\n";
+        let tree = parse_cpp(source);
+        let semantic = SemanticFileContext::default();
+        let ctx = PolicyContext::new(source, &path)
+            .with_tree_sitter_tree(Some(&tree))
+            .with_semantic_file_context(Some(&semantic));
+        let result = policy.apply(&ctx);
+        assert_eq!(
+            result.text,
+            "const char* s = \"a&&b || c\"; // keep && ||\nbool x = a or b;\n"
+        );
+    }
+
+    #[test]
+    fn does_not_replace_rvalue_reference_tokens() {
+        let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
+        let path = PathBuf::from("sample.hpp");
+        let source =
+            "struct A {\n  A(A&& other) noexcept;\n  A& operator=(A&& other) noexcept;\n};\n";
+        let tree = parse_cpp(source);
+        let semantic = SemanticFileContext::default();
+        let ctx = PolicyContext::new(source, &path)
+            .with_tree_sitter_tree(Some(&tree))
+            .with_semantic_file_context(Some(&semantic));
+        let result = policy.apply(&ctx);
+        assert_eq!(result.text, source);
+    }
+
+    #[test]
+    fn does_not_replace_operator_overload_symbol() {
+        let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
+        let path = PathBuf::from("sample.hpp");
+        let source = "struct A {\n  bool operator&&(const A& rhs) const;\n};\n";
+        let tree = parse_cpp(source);
+        let semantic = SemanticFileContext::default();
+        let ctx = PolicyContext::new(source, &path)
+            .with_tree_sitter_tree(Some(&tree))
+            .with_semantic_file_context(Some(&semantic));
+        let result = policy.apply(&ctx);
+        assert_eq!(result.text, source);
+    }
+
+    #[test]
+    fn applies_to_header_files() {
+        let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
+        let path = PathBuf::from("sample.hpp");
+        let source = "bool ok = a && b || c;\n";
+        let tree = parse_cpp(source);
+        let semantic = SemanticFileContext::default();
+        let ctx = PolicyContext::new(source, &path)
+            .with_tree_sitter_tree(Some(&tree))
+            .with_semantic_file_context(Some(&semantic));
+        let result = policy.apply(&ctx);
+        assert_eq!(result.text, "bool ok = a and b or c;\n");
+        assert_eq!(result.edits.len(), 2);
+    }
+}

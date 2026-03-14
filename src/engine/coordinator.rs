@@ -1,0 +1,1093 @@
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+
+use crate::config::gate_config::AccuracyGateConfig;
+use crate::config::retry_config::RetryConfig;
+use crate::engine::accuracy_gate::{
+    AccuracyGate, AccuracyGateFailure, AccuracyGateInput, AccuracyGateStatus,
+};
+use crate::engine::catalog::PolicyCapabilityMatrix;
+use crate::engine::catalog::PolicyCertainty;
+use crate::engine::pipeline::PolicyPipeline;
+use crate::engine::run_options::PolicyRunOptions;
+use crate::engine::post_check::PostEditCheckBaseline;
+use crate::engine::post_check::PostEditCheckResult;
+use crate::engine::post_check::PostEditChecker;
+use crate::engine::post_check::PostEditFailureKind;
+use crate::engine::semantic_contract::SemanticContract;
+use crate::engine::semantic_contract::SemanticContractSnapshot;
+use crate::model::edit::Edit;
+use crate::model::pass_result::{FormatPassMetrics, FormatPassResult};
+use crate::model::policy_result::PolicyResult;
+use crate::model::violation::Violation;
+use crate::parser::manager::{ParserManager, SemanticCompdbContextKind};
+use crate::runtime::cluster_telemetry::{ClusterOutcome, PolicyClusterTelemetry};
+use crate::runtime::graph_runtime::ProjectGraphRuntime;
+use crate::text_scan;
+
+const UNTRACKED_TEXT_DELTA_SYNTHESIS_CAP: usize = 256;
+
+#[derive(Clone, Copy)]
+struct AccuracyGateEvaluation {
+    semantic_ready: bool,
+    attempted_edits: usize,
+    attempted_violations: usize,
+    accepted_edits: usize,
+    semantic_context_kind: SemanticCompdbContextKind,
+}
+
+pub struct FormatterEngine {
+    pipeline: PolicyPipeline,
+    post_edit_checker: PostEditChecker,
+    retry: RetryConfig,
+    accuracy_gate: AccuracyGateConfig,
+    project_graph: Option<Arc<ProjectGraphRuntime>>,
+}
+
+impl FormatterEngine {
+    pub fn new(
+        pipeline: PolicyPipeline,
+        parser_manager: ParserManager,
+        retry: RetryConfig,
+        accuracy_gate: AccuracyGateConfig,
+        project_graph: Option<Arc<ProjectGraphRuntime>>,
+    ) -> Self {
+        let semantic_contract = SemanticContract::new();
+        debug_assert!(
+            !SemanticContract::invariant_specs().is_empty(),
+            "semantic contract invariants must be declared"
+        );
+        let post_edit_checker = PostEditChecker::new(
+            parser_manager,
+            retry.post_edit_fail_on_parser_unavailable,
+            retry.post_edit_tree_error_ratio_tolerance,
+            semantic_contract,
+        );
+        Self {
+            pipeline,
+            post_edit_checker,
+            retry,
+            accuracy_gate,
+            project_graph,
+        }
+    }
+
+    pub fn save_certainty_state(&self, path: &Path) -> anyhow::Result<()> {
+        self.pipeline.save_certainty_state(path)
+    }
+
+    pub fn set_context_tracker(&self, tracker: crate::engine::context_tracker::PolicyContextTracker) {
+        self.pipeline.set_context_tracker(tracker);
+    }
+
+    pub fn save_context_tracker(&self, path: &Path) -> anyhow::Result<()> {
+        self.pipeline.save_context_tracker(path)
+    }
+
+    pub fn apply(&self, text: &str, path: &Path) -> Result<FormatPassResult> {
+        let result = self.apply_inner(text, path)?;
+        if let Some(certainty) = &result.policy_certainty {
+            let estimates = [
+                certainty.structural,
+                certainty.semantic,
+                certainty.coverage,
+                certainty.richness,
+                certainty.edit_success,
+            ];
+            self.pipeline.correlate_paired_certainty(path, estimates);
+        }
+        Ok(result)
+    }
+
+    fn apply_inner(&self, text: &str, path: &Path) -> Result<FormatPassResult> {
+        let mut warnings = Vec::<String>::new();
+        let baseline_required = self.retry.post_edit_check_enabled
+            || self.accuracy_gate.semantic_required
+            || self.accuracy_gate.enabled;
+        let semantic_context_kind = self.post_edit_checker.semantic_context_kind_for_path(path);
+        let post_edit_baseline: Option<PostEditCheckBaseline> =
+            baseline_required.then(|| self.post_edit_checker.build_baseline(path, text));
+        let semantic_ready = post_edit_baseline
+            .as_ref()
+            .map(PostEditCheckBaseline::semantic_ready)
+            .unwrap_or(false);
+
+        if self.accuracy_gate.semantic_required && !semantic_ready {
+            let detail = post_edit_baseline
+                .as_ref()
+                .and_then(PostEditCheckBaseline::semantic_readiness_note)
+                .unwrap_or("semantic baseline unavailable");
+            let decision = AccuracyGate::evaluate(
+                &self.accuracy_gate,
+                AccuracyGateInput {
+                    semantic_ready: false,
+                    attempted_edits: 0,
+                    attempted_violations: 0,
+                    accepted_edits: 0,
+                    semantic_context_kind,
+                },
+            );
+            if decision.status == AccuracyGateStatus::FailedClosed {
+                self.pipeline.record_edit_outcome(path, 0.70);
+                return Err(
+                    AccuracyGateFailure::semantic_required_unmet(path, detail, decision).into(),
+                );
+            }
+            warnings.push(format!(
+                "accuracy_gate warning: semantic_required unmet for {} ({})",
+                path.display(),
+                detail
+            ));
+        }
+
+        let project_graph_snapshot = self
+            .project_graph
+            .as_ref()
+            .map(|runtime| runtime.snapshot());
+        // Pass 1: full pipeline run
+        let options_1 = PolicyRunOptions {
+            project_graph_snapshot: project_graph_snapshot.clone(),
+            ..Default::default()
+        };
+        let mut pass_result = self.pipeline.run_with_options(text, path, &options_1)?;
+        Self::normalize_untracked_text_delta(text, &mut pass_result);
+
+        // Quick accept: no edits were produced
+        if crate::text_scan::TEXT_SCAN.strings_equal(&pass_result.policy_result.text, text) {
+            pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
+                warnings.as_slice(),
+                pass_result.policy_result.warnings.as_slice(),
+            ]);
+            let attempted_edits = pass_result.policy_result.edits.len();
+            let attempted_violations = pass_result.policy_result.violations.len();
+            self.apply_accuracy_gate_to_result(
+                &mut pass_result,
+                path,
+                AccuracyGateEvaluation {
+                    semantic_ready,
+                    attempted_edits,
+                    attempted_violations,
+                    accepted_edits: attempted_edits,
+                    semantic_context_kind,
+                },
+            )?;
+            PolicyClusterTelemetry::record_outcome(
+                pass_result.policy_traces.as_slice(),
+                ClusterOutcome::Accepted,
+            );
+            self.record_success(0);
+            self.pipeline.record_edit_outcome(path, 0.50);
+            return Ok(pass_result);
+        }
+
+        // If post-edit checking is disabled, accept the edits as-is
+        if !self.retry.post_edit_check_enabled {
+            let trust_no_check = pass_result.policy_certainty.as_ref()
+                .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
+            self.pipeline.record_edit_outcome(
+                path,
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(0, true, 1.0, trust_no_check),
+            );
+            pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
+                warnings.as_slice(),
+                pass_result.policy_result.warnings.as_slice(),
+            ]);
+            let attempted_edits = pass_result.policy_result.edits.len();
+            let attempted_violations = pass_result.policy_result.violations.len();
+            self.apply_accuracy_gate_to_result(
+                &mut pass_result,
+                path,
+                AccuracyGateEvaluation {
+                    semantic_ready,
+                    attempted_edits,
+                    attempted_violations,
+                    accepted_edits: attempted_edits,
+                    semantic_context_kind,
+                },
+            )?;
+            PolicyClusterTelemetry::record_outcome(
+                pass_result.policy_traces.as_slice(),
+                ClusterOutcome::Accepted,
+            );
+            self.record_success(0);
+            return Ok(pass_result);
+        }
+
+        // Validate Pass 1 result with PostEditChecker
+        let edited_lines_1 = pass_result
+            .policy_result
+            .edits
+            .iter()
+            .map(|edit| edit.line)
+            .collect::<BTreeSet<_>>();
+        let all_structural_safe = !pass_result.policy_result.edits.is_empty()
+            && pass_result.policy_result.edits.iter().all(|edit| {
+                let cap = PolicyCapabilityMatrix::for_policy(edit.policy.as_str());
+                cap.structural_safe && !cap.semantic_rewrite
+            });
+        let check_1 = if all_structural_safe {
+            if let Some(baseline) = post_edit_baseline.as_ref() {
+                self.post_edit_checker.validate_structural_only(
+                    path,
+                    pass_result.policy_result.text.as_str(),
+                    baseline,
+                    pass_result.policy_certainty.as_ref(),
+                )
+            } else {
+                self.post_edit_checker.validate_for_edits(
+                    path,
+                    text,
+                    pass_result.policy_result.text.as_str(),
+                    Some(&edited_lines_1),
+                    pass_result.policy_certainty.as_ref(),
+                )
+            }
+        } else if let Some(baseline) = post_edit_baseline.as_ref() {
+            self.post_edit_checker.validate_with_baseline_for_edits(
+                path,
+                pass_result.policy_result.text.as_str(),
+                baseline,
+                Some(&edited_lines_1),
+                pass_result.policy_certainty.as_ref(),
+            )
+        } else {
+            self.post_edit_checker.validate_for_edits(
+                path,
+                text,
+                pass_result.policy_result.text.as_str(),
+                Some(&edited_lines_1),
+                pass_result.policy_certainty.as_ref(),
+            )
+        };
+
+        let scope_ranges = post_edit_baseline
+            .as_ref()
+            .and_then(|b| b.before_semantic_snapshot())
+            .map(|s| &s.scope_ranges_by_kind);
+
+        let trust_1 = pass_result.policy_certainty.as_ref()
+            .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
+        if let Some(acceptance_score_1) = self.accept_pass_result(
+            &pass_result,
+            &edited_lines_1,
+            &check_1,
+            &mut warnings,
+            scope_ranges,
+            semantic_context_kind,
+            pass_result.policy_certainty.as_ref(),
+        ) {
+            pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
+                warnings.as_slice(),
+                pass_result.policy_result.warnings.as_slice(),
+            ]);
+            let attempted_edits = pass_result.policy_result.edits.len();
+            let attempted_violations = pass_result.policy_result.violations.len();
+            self.apply_accuracy_gate_to_result(
+                &mut pass_result,
+                path,
+                AccuracyGateEvaluation {
+                    semantic_ready,
+                    attempted_edits,
+                    attempted_violations,
+                    accepted_edits: attempted_edits,
+                    semantic_context_kind,
+                },
+            )?;
+            let outcome = if check_1.accepted {
+                ClusterOutcome::Accepted
+            } else {
+                ClusterOutcome::Regressed
+            };
+            self.pipeline.record_edit_outcome(
+                path,
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
+                    0, true, acceptance_score_1, trust_1,
+                ),
+            );
+            PolicyClusterTelemetry::record_outcome(
+                pass_result.policy_traces.as_slice(),
+                outcome,
+            );
+            self.record_success(0);
+            return Ok(pass_result);
+        }
+
+        // Identify which policies caused culprit lines (direct match + declaration backtrack)
+        tracing::debug!(
+            path = %path.display(),
+            failure_kinds = ?check_1.failure_kinds,
+            culprit_lines = ?check_1.culprit_lines,
+            messages = ?check_1.messages,
+            accepted = check_1.accepted,
+            "pass 1 rejected by accept_pass_result"
+        );
+        let culprit_policies = Self::causal_culprit_policies(
+            &pass_result.policy_result.edits,
+            &check_1,
+            post_edit_baseline
+                .as_ref()
+                .and_then(|b| b.before_semantic_snapshot()),
+        );
+        if culprit_policies.is_empty() {
+            self.pipeline.record_edit_outcome(
+                path,
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(0, false, 0.0, trust_1),
+            );
+            return self.reverted_result(path, text, pass_result, warnings, 1);
+        }
+
+        // Pass 2: block culprit policies and re-run
+        let options_2 = PolicyRunOptions {
+            blocked_policies: culprit_policies,
+            project_graph_snapshot,
+            ..Default::default()
+        };
+        let mut pass_2 = self.pipeline.run_with_options(text, path, &options_2)?;
+        Self::normalize_untracked_text_delta(text, &mut pass_2);
+
+        let edited_lines_2 = pass_2
+            .policy_result
+            .edits
+            .iter()
+            .map(|edit| edit.line)
+            .collect::<BTreeSet<_>>();
+        let all_structural_safe_2 = !pass_2.policy_result.edits.is_empty()
+            && pass_2.policy_result.edits.iter().all(|edit| {
+                let cap = PolicyCapabilityMatrix::for_policy(edit.policy.as_str());
+                cap.structural_safe && !cap.semantic_rewrite
+            });
+        let check_2 = if all_structural_safe_2 {
+            if let Some(baseline) = post_edit_baseline.as_ref() {
+                self.post_edit_checker.validate_structural_only(
+                    path,
+                    pass_2.policy_result.text.as_str(),
+                    baseline,
+                    pass_2.policy_certainty.as_ref(),
+                )
+            } else {
+                self.post_edit_checker.validate_for_edits(
+                    path,
+                    text,
+                    pass_2.policy_result.text.as_str(),
+                    Some(&edited_lines_2),
+                    pass_2.policy_certainty.as_ref(),
+                )
+            }
+        } else if let Some(baseline) = post_edit_baseline.as_ref() {
+            self.post_edit_checker.validate_with_baseline_for_edits(
+                path,
+                pass_2.policy_result.text.as_str(),
+                baseline,
+                Some(&edited_lines_2),
+                pass_2.policy_certainty.as_ref(),
+            )
+        } else {
+            self.post_edit_checker.validate_for_edits(
+                path,
+                text,
+                pass_2.policy_result.text.as_str(),
+                Some(&edited_lines_2),
+                pass_2.policy_certainty.as_ref(),
+            )
+        };
+
+        let trust_2 = pass_2.policy_certainty.as_ref()
+            .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
+        if let Some(acceptance_score_2) = self.accept_pass_result(
+            &pass_2,
+            &edited_lines_2,
+            &check_2,
+            &mut warnings,
+            scope_ranges,
+            semantic_context_kind,
+            pass_2.policy_certainty.as_ref(),
+        ) {
+            pass_2.policy_result.warnings = Self::dedup_warning_slices(&[
+                warnings.as_slice(),
+                pass_2.policy_result.warnings.as_slice(),
+            ]);
+            let attempted_edits = pass_2.policy_result.edits.len();
+            let attempted_violations = pass_2.policy_result.violations.len();
+            self.apply_accuracy_gate_to_result(
+                &mut pass_2,
+                path,
+                AccuracyGateEvaluation {
+                    semantic_ready,
+                    attempted_edits,
+                    attempted_violations,
+                    accepted_edits: attempted_edits,
+                    semantic_context_kind,
+                },
+            )?;
+            self.pipeline.record_edit_outcome(
+                path,
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
+                    1, true, acceptance_score_2, trust_2,
+                ),
+            );
+            PolicyClusterTelemetry::record_outcome(
+                pass_2.policy_traces.as_slice(),
+                ClusterOutcome::Accepted,
+            );
+            self.record_success(1);
+            return Ok(pass_2);
+        }
+
+        // Both passes failed → revert all edits
+        self.pipeline.record_edit_outcome(
+            path,
+            crate::engine::fuzzy_inference::fuzzy_edit_outcome(1, false, 0.0, trust_2),
+        );
+        self.reverted_result(path, text, pass_2, warnings, 2)
+    }
+
+    /// Returns the acceptance score for this pass result. Post-edit is informational only —
+    /// per-policy checkpoint is the only gate. The score feeds Kalman learning for adaptive trust.
+    #[allow(clippy::too_many_arguments)]
+    fn accept_pass_result(
+        &self,
+        pass: &FormatPassResult,
+        edited_lines: &BTreeSet<usize>,
+        check: &PostEditCheckResult,
+        warnings: &mut Vec<String>,
+        scope_ranges: Option<&BTreeMap<String, BTreeSet<(usize, usize)>>>,
+        context_kind: SemanticCompdbContextKind,
+        certainty: Option<&PolicyCertainty>,
+    ) -> Option<f64> {
+        warnings.extend(check.messages.iter().cloned());
+        if check.accepted || check.failure_kinds.is_empty() {
+            return Some(1.0);
+        }
+        tracing::debug!(
+            failure_kinds = ?check.failure_kinds,
+            culprit_lines = check.culprit_lines.len(),
+            messages = check.messages.len(),
+            context_kind = ?context_kind,
+            "post-edit accept_pass_result: computing acceptance score (informational)"
+        );
+        let has_semantic_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
+            PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
+        });
+        let all_edits_whitespace_safe = !pass.policy_result.edits.is_empty()
+            && pass.policy_result.edits.iter().all(|edit| {
+                !PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
+                    && edit.before != edit.after
+                    && Self::whitespace_equivalent(edit.before.as_str(), edit.after.as_str())
+            });
+        let locality_radius = crate::engine::fuzzy_inference::fuzzy_locality_radius(certainty);
+        let (local, total) =
+            Self::effective_culprit_locality(check, edited_lines, locality_radius, scope_ranges);
+        let locality_ratio = if total > 0 {
+            local as f64 / total as f64
+        } else {
+            1.0
+        };
+        let observation = crate::engine::fuzzy_inference::PostEditObservation {
+            clang_diagnostics_increased: check
+                .failure_kinds
+                .contains(&PostEditFailureKind::ClangDiagnosticsIncreased),
+            tree_error_regressed: check
+                .failure_kinds
+                .contains(&PostEditFailureKind::TreeErrorRegressed)
+                || check
+                    .failure_kinds
+                    .contains(&PostEditFailureKind::TreeErrorRatioRegressed),
+            culprit_locality_ratio: locality_ratio,
+            has_semantic_rewrite_edits,
+            all_edits_whitespace_safe,
+            exact_compdb: matches!(context_kind, SemanticCompdbContextKind::Exact),
+            identity_severity: check.identity_severity,
+            reference_severity: check.reference_severity,
+            scope_severity: check.scope_severity,
+        };
+        let acceptance_score =
+            crate::engine::fuzzy_inference::fuzzy_edit_acceptance(&observation, certainty, context_kind);
+        warnings.push(format!(
+            "post-edit check informational: acceptance_score={acceptance_score:.3}, failure_kinds={:?}",
+            check.failure_kinds
+        ));
+        Some(acceptance_score)
+    }
+
+    fn reverted_result(
+        &self,
+        path: &Path,
+        original_text: &str,
+        failed_pass: FormatPassResult,
+        mut warnings: Vec<String>,
+        attempt_count: usize,
+    ) -> Result<FormatPassResult> {
+        let revert_message = format!(
+            "Post-edit parser check failed after retries; reverted file changes (attempts={})",
+            attempt_count
+        );
+        let mut violations = failed_pass.policy_result.violations;
+        if self.accuracy_gate.fail_closed {
+            violations.push(Violation {
+                policy: "post_edit_check".into(),
+                message: revert_message.clone(),
+                line: 1,
+                column: Some(1),
+            });
+            PolicyClusterTelemetry::record_outcome(
+                failed_pass.policy_traces.as_slice(),
+                ClusterOutcome::Reverted,
+            );
+            return Err(anyhow!(
+                "accuracy gate fail-closed: post-edit validation failed after {} attempt(s) for {}",
+                attempt_count,
+                path.display()
+            ));
+        }
+        warnings.push(format!("post-edit check warning: {}", revert_message));
+        let all_warnings = Self::dedup_warning_slices(&[
+            warnings.as_slice(),
+            failed_pass.policy_result.warnings.as_slice(),
+        ]);
+        PolicyClusterTelemetry::record_outcome(
+            failed_pass.policy_traces.as_slice(),
+            ClusterOutcome::Reverted,
+        );
+        self.record_revert();
+        Ok(FormatPassResult {
+            policy_result: PolicyResult {
+                text: original_text.to_string(),
+                violations,
+                edits: Vec::new(),
+                warnings: all_warnings,
+            },
+            convergence_pairs: BTreeMap::new(),
+            policy_traces: Vec::new(),
+            accuracy_gate: None,
+            metrics: FormatPassMetrics::default(),
+            policy_certainty: None,
+        })
+    }
+
+    fn apply_accuracy_gate_to_result(
+        &self,
+        pass_result: &mut FormatPassResult,
+        path: &Path,
+        evaluation: AccuracyGateEvaluation,
+    ) -> Result<()> {
+        let decision = AccuracyGate::evaluate(
+            &self.accuracy_gate,
+            AccuracyGateInput {
+                semantic_ready: evaluation.semantic_ready,
+                attempted_edits: evaluation.attempted_edits,
+                attempted_violations: evaluation.attempted_violations,
+                accepted_edits: evaluation.accepted_edits,
+                semantic_context_kind: evaluation.semantic_context_kind,
+            },
+        );
+        if decision.passed() {
+            return Ok(());
+        }
+        let message = decision.summary();
+        match decision.status {
+            AccuracyGateStatus::Passed => Ok(()),
+            AccuracyGateStatus::WarningOnly => {
+                pass_result.accuracy_gate = Some(decision.clone());
+                pass_result.policy_result.warnings.push(message);
+                pass_result.policy_result.violations.push(Violation {
+                    policy: "accuracy_gate".into(),
+                    message: "accuracy gate warning (fail-open rollout)".to_string(),
+                    line: 1,
+                    column: Some(1),
+                });
+                Ok(())
+            }
+            AccuracyGateStatus::FailedClosed => {
+                self.pipeline.record_edit_outcome(path, 0.70);
+                Err(AccuracyGateFailure::threshold_miss(path, decision).into())
+            }
+        }
+    }
+
+    fn record_success(&self, _attempt_index: usize) {
+        // adaptive calibrator removed; outcomes are tracked via AdaptiveTelemetry only
+    }
+
+    fn record_revert(&self) {
+        // adaptive calibrator removed
+    }
+
+    fn semantic_culprit_locality(
+        check: &PostEditCheckResult,
+        edited_lines: &BTreeSet<usize>,
+        radius: usize,
+    ) -> (usize, usize) {
+        if check.culprit_lines.is_empty() {
+            return (0, 0);
+        }
+        let local = check
+            .culprit_lines
+            .iter()
+            .copied()
+            .filter(|line| Self::line_near_edited_lines(*line, edited_lines, radius))
+            .count();
+        (local, check.culprit_lines.len())
+    }
+
+    fn effective_culprit_locality(
+        check: &PostEditCheckResult,
+        edited_lines: &BTreeSet<usize>,
+        numeric_radius: usize,
+        scope_ranges: Option<&BTreeMap<String, BTreeSet<(usize, usize)>>>,
+    ) -> (usize, usize) {
+        match scope_ranges {
+            Some(ranges) if !ranges.is_empty() => {
+                Self::scope_aware_culprit_locality(check, edited_lines, numeric_radius, ranges)
+            }
+            _ => Self::semantic_culprit_locality(check, edited_lines, numeric_radius),
+        }
+    }
+
+    fn scope_aware_culprit_locality(
+        check: &PostEditCheckResult,
+        edited_lines: &BTreeSet<usize>,
+        numeric_radius: usize,
+        scope_ranges: &BTreeMap<String, BTreeSet<(usize, usize)>>,
+    ) -> (usize, usize) {
+        if check.culprit_lines.is_empty() {
+            return (0, 0);
+        }
+        let edited_scopes: Vec<(&str, usize, usize)> = scope_ranges
+            .iter()
+            .flat_map(|(kind, ranges)| {
+                ranges.iter().filter_map(move |&(start, end)| {
+                    if edited_lines.iter().any(|&el| el >= start && el <= end) {
+                        Some((kind.as_str(), start, end))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        let local = check
+            .culprit_lines
+            .iter()
+            .copied()
+            .filter(|&cl| {
+                if Self::line_near_edited_lines(cl, edited_lines, numeric_radius) {
+                    return true;
+                }
+                edited_scopes
+                    .iter()
+                    .any(|&(_, start, end)| cl >= start && cl <= end)
+            })
+            .count();
+        (local, check.culprit_lines.len())
+    }
+
+    fn whitespace_equivalent(before: &str, after: &str) -> bool {
+        before.split_whitespace().eq(after.split_whitespace())
+    }
+
+    fn policies_touching_lines(edits: &[Edit], lines: &BTreeSet<usize>) -> HashSet<String> {
+        if edits.is_empty() || lines.is_empty() {
+            return HashSet::new();
+        }
+        let mut policies = HashSet::new();
+        for edit in edits {
+            if edit.line == 0 || edit.policy.is_empty() || !lines.contains(&edit.line) {
+                continue;
+            }
+            policies.insert(edit.policy.to_string());
+        }
+        policies
+    }
+
+    fn causal_culprit_policies(
+        edits: &[Edit],
+        check: &PostEditCheckResult,
+        before_snapshot: Option<&SemanticContractSnapshot>,
+    ) -> HashSet<String> {
+        let mut policies = Self::policies_touching_lines(edits, &check.culprit_lines);
+        let needs_backtrack = check
+            .failure_kinds
+            .contains(&PostEditFailureKind::SemanticReferenceIntegrityRegressed)
+            || check
+                .failure_kinds
+                .contains(&PostEditFailureKind::SemanticIdentityRegressed);
+        if !needs_backtrack {
+            return policies;
+        }
+        let Some(snapshot) = before_snapshot else {
+            return policies;
+        };
+        let mut declaration_lines = BTreeSet::new();
+        for culprit_line in &check.culprit_lines {
+            if let Some(stable_ids) = snapshot.declaration_stable_ids_by_line.get(culprit_line) {
+                for sid in stable_ids {
+                    if let Some(&decl_line) = snapshot.stable_id_decl_lines.get(sid) {
+                        declaration_lines.insert(decl_line);
+                    }
+                }
+            }
+            for (ref_sid, &ref_first_line) in &snapshot.reference_stable_id_first_line {
+                if ref_first_line == *culprit_line {
+                    if let Some(&decl_line) = snapshot.stable_id_decl_lines.get(ref_sid) {
+                        declaration_lines.insert(decl_line);
+                    }
+                }
+            }
+        }
+        if !declaration_lines.is_empty() {
+            let backtracked = Self::policies_touching_lines(edits, &declaration_lines);
+            policies.extend(backtracked);
+        }
+        policies
+    }
+
+    fn normalize_untracked_text_delta(
+        input_text: &str,
+        pass_result: &mut FormatPassResult,
+    ) -> bool {
+        if pass_result.policy_result.edits.is_empty()
+            && pass_result.policy_result.text != input_text
+        {
+            let fallback_policy = pass_result
+                .policy_result
+                .violations
+                .first()
+                .map(|item| item.policy.as_str())
+                .unwrap_or("retry_guard");
+            let synthesized = Self::synthesize_line_edits(
+                input_text,
+                pass_result.policy_result.text.as_str(),
+                fallback_policy,
+            );
+            if !synthesized.is_empty() {
+                if synthesized.len() > UNTRACKED_TEXT_DELTA_SYNTHESIS_CAP {
+                    pass_result.policy_result.text = input_text.to_string();
+                    pass_result.policy_result.warnings.push(format!(
+                        "retry guard: discarded oversized untracked text delta ({} line(s) > cap {})",
+                        synthesized.len(),
+                        UNTRACKED_TEXT_DELTA_SYNTHESIS_CAP
+                    ));
+                    return true;
+                }
+                let count = synthesized.len();
+                pass_result.policy_result.edits = synthesized;
+                pass_result.policy_result.warnings.push(format!(
+                    "retry guard: synthesized {count} edit(s) from untracked text delta"
+                ));
+            }
+        }
+        false
+    }
+
+    fn synthesize_line_edits(before: &str, after: &str, fallback_policy: &str) -> Vec<Edit> {
+        let before_lines = text_scan::split_lines_as_slices(before, true);
+        let after_lines = text_scan::split_lines_as_slices(after, true);
+        let max_lines = before_lines.len().max(after_lines.len());
+        let mut edits = Vec::<Edit>::new();
+        for idx in 0..max_lines {
+            let left = before_lines.get(idx).copied().unwrap_or("");
+            let right = after_lines.get(idx).copied().unwrap_or("");
+            if text_scan::TEXT_SCAN.slices_equal(left.as_bytes(), right.as_bytes()) {
+                continue;
+            }
+            edits.push(Edit {
+                policy: fallback_policy.into(),
+                line: idx + 1,
+                before: left.to_string(),
+                after: right.to_string(),
+            });
+        }
+        edits
+    }
+
+    fn dedup_warning_slices(sources: &[&[String]]) -> Vec<String> {
+        let mut seen = HashSet::<String>::new();
+        let mut merged = Vec::new();
+        for source in sources {
+            for warning in *source {
+                if seen.insert(warning.clone()) {
+                    merged.push(warning.clone());
+                }
+            }
+        }
+        merged
+    }
+
+    fn line_near_edited_lines(line: usize, edited_lines: &BTreeSet<usize>, radius: usize) -> bool {
+        if line == 0 || edited_lines.is_empty() {
+            return false;
+        }
+        let start = line.saturating_sub(radius);
+        let end = line.saturating_add(radius);
+        edited_lines.range(start..=end).next().is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::engine::post_check::{PostEditCheckResult, PostEditFailureKind};
+    use crate::model::edit::Edit;
+    use crate::model::pass_result::FormatPassResult;
+
+    use super::FormatterEngine;
+
+    #[test]
+    fn normalize_untracked_text_delta_synthesizes_edits_when_possible() {
+        let mut pass_result = FormatPassResult::default();
+        pass_result.policy_result.text = "changed".to_string();
+        let normalized =
+            FormatterEngine::normalize_untracked_text_delta("baseline", &mut pass_result);
+        assert!(!normalized);
+        assert_eq!(pass_result.policy_result.text, "changed");
+        assert_eq!(pass_result.policy_result.edits.len(), 1);
+        assert_eq!(pass_result.policy_result.edits[0].policy, "retry_guard");
+        assert!(pass_result
+            .policy_result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("synthesized")));
+    }
+
+    #[test]
+    fn normalize_untracked_text_delta_synthesizes_eof_newline_diff() {
+        let mut pass_result = FormatPassResult::default();
+        pass_result.policy_result.text = "baseline\n".to_string();
+        let normalized =
+            FormatterEngine::normalize_untracked_text_delta("baseline", &mut pass_result);
+        assert!(!normalized);
+        assert_eq!(pass_result.policy_result.text, "baseline\n");
+        assert_eq!(pass_result.policy_result.edits.len(), 1);
+        assert!(pass_result
+            .policy_result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("synthesized")));
+    }
+
+    #[test]
+    fn normalize_untracked_text_delta_discards_oversized_delta() {
+        let mut pass_result = FormatPassResult::default();
+        let mut changed = String::new();
+        for index in 0..=super::UNTRACKED_TEXT_DELTA_SYNTHESIS_CAP {
+            changed.push_str(format!("line_{index}\n").as_str());
+        }
+        pass_result.policy_result.text = changed;
+        let normalized =
+            FormatterEngine::normalize_untracked_text_delta("baseline\n", &mut pass_result);
+        assert!(normalized);
+        assert_eq!(pass_result.policy_result.text, "baseline\n");
+        assert!(pass_result.policy_result.edits.is_empty());
+        assert!(pass_result
+            .policy_result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("discarded oversized untracked text delta")));
+    }
+
+    #[test]
+    fn normalize_untracked_text_delta_keeps_tracked_edit_output() {
+        let mut pass_result = FormatPassResult::default();
+        pass_result.policy_result.text = "changed".to_string();
+        pass_result.policy_result.edits.push(Edit {
+            policy: "compact_declarations".into(),
+            line: 10,
+            before: "a".to_string(),
+            after: "b".to_string(),
+        });
+        let normalized =
+            FormatterEngine::normalize_untracked_text_delta("baseline", &mut pass_result);
+        assert!(!normalized);
+        assert_eq!(pass_result.policy_result.text, "changed");
+    }
+
+    #[test]
+    fn causal_culprit_traces_declaration_line_from_reference_culprit() {
+        use crate::engine::semantic_contract::SemanticContractSnapshot;
+
+        let edits = vec![
+            Edit {
+                policy: "naming_conventions".into(),
+                line: 10,
+                before: "int myVar".to_string(),
+                after: "int my_var".to_string(),
+            },
+        ];
+        let check = PostEditCheckResult {
+            accepted: false,
+
+            messages: vec![],
+            failure_kinds: BTreeSet::from([
+                PostEditFailureKind::SemanticReferenceIntegrityRegressed,
+            ]),
+            culprit_lines: BTreeSet::from([20, 25, 30]),
+            identity_severity: 0.0, reference_severity: 0.0, scope_severity: 0.0,
+        };
+        let mut snapshot = SemanticContractSnapshot::default();
+        snapshot
+            .declaration_stable_ids_by_line
+            .insert(20, BTreeSet::from(["sid_myVar".to_string()]));
+        snapshot
+            .stable_id_decl_lines
+            .insert("sid_myVar".to_string(), 10);
+        let result =
+            FormatterEngine::causal_culprit_policies(&edits, &check, Some(&snapshot));
+        assert!(result.contains("naming_conventions"));
+    }
+
+    #[test]
+    fn causal_culprit_falls_back_to_direct_match_without_snapshot() {
+        let edits = vec![
+            Edit {
+                policy: "compact_declarations".into(),
+                line: 20,
+                before: "a=1".to_string(),
+                after: "a = 1".to_string(),
+            },
+        ];
+        let check = PostEditCheckResult {
+            accepted: false,
+
+            messages: vec![],
+            failure_kinds: BTreeSet::from([
+                PostEditFailureKind::SemanticReferenceIntegrityRegressed,
+            ]),
+            culprit_lines: BTreeSet::from([20]),
+            identity_severity: 0.0, reference_severity: 0.0, scope_severity: 0.0,
+        };
+        let result = FormatterEngine::causal_culprit_policies(&edits, &check, None);
+        assert!(result.contains("compact_declarations"));
+    }
+
+    #[test]
+    fn causal_culprit_union_includes_both_direct_and_backtracked() {
+        use crate::engine::semantic_contract::SemanticContractSnapshot;
+
+        let edits = vec![
+            Edit {
+                policy: "naming_conventions".into(),
+                line: 10,
+                before: "int myVar".to_string(),
+                after: "int my_var".to_string(),
+            },
+            Edit {
+                policy: "compact_declarations".into(),
+                line: 25,
+                before: "a=1".to_string(),
+                after: "a = 1".to_string(),
+            },
+        ];
+        let check = PostEditCheckResult {
+            accepted: false,
+
+            messages: vec![],
+            failure_kinds: BTreeSet::from([
+                PostEditFailureKind::SemanticReferenceIntegrityRegressed,
+                PostEditFailureKind::SemanticIdentityRegressed,
+            ]),
+            culprit_lines: BTreeSet::from([20, 25]),
+            identity_severity: 0.0, reference_severity: 0.0, scope_severity: 0.0,
+        };
+        let mut snapshot = SemanticContractSnapshot::default();
+        snapshot
+            .declaration_stable_ids_by_line
+            .insert(20, BTreeSet::from(["sid_myVar".to_string()]));
+        snapshot
+            .stable_id_decl_lines
+            .insert("sid_myVar".to_string(), 10);
+        let result =
+            FormatterEngine::causal_culprit_policies(&edits, &check, Some(&snapshot));
+        assert!(result.contains("naming_conventions"));
+        assert!(result.contains("compact_declarations"));
+    }
+
+    #[test]
+    fn scope_aware_locality_accepts_culprit_in_same_function_beyond_numeric_radius() {
+        use std::collections::BTreeMap;
+
+        let check = PostEditCheckResult {
+            accepted: false,
+
+            messages: vec![],
+            failure_kinds: BTreeSet::from([
+                PostEditFailureKind::SemanticReferenceIntegrityRegressed,
+            ]),
+            culprit_lines: BTreeSet::from([150]),
+            identity_severity: 0.0, reference_severity: 0.0, scope_severity: 0.0,
+        };
+        let edited_lines = BTreeSet::from([100]);
+        let mut scope_ranges: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+        scope_ranges.insert(
+            "function".to_string(),
+            BTreeSet::from([(80, 200)]),
+        );
+        let (local, total) = FormatterEngine::scope_aware_culprit_locality(
+            &check,
+            &edited_lines,
+            2,
+            &scope_ranges,
+        );
+        assert_eq!(total, 1);
+        assert_eq!(local, 1);
+    }
+
+    #[test]
+    fn scope_aware_locality_rejects_culprit_in_different_scope_within_numeric_radius() {
+        use std::collections::BTreeMap;
+
+        let check = PostEditCheckResult {
+            accepted: false,
+
+            messages: vec![],
+            failure_kinds: BTreeSet::from([
+                PostEditFailureKind::SemanticReferenceIntegrityRegressed,
+            ]),
+            culprit_lines: BTreeSet::from([50]),
+            identity_severity: 0.0, reference_severity: 0.0, scope_severity: 0.0,
+        };
+        let edited_lines = BTreeSet::from([100]);
+        let mut scope_ranges: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+        scope_ranges.insert(
+            "function".to_string(),
+            BTreeSet::from([(10, 60), (80, 120)]),
+        );
+        let (local, total) = FormatterEngine::scope_aware_culprit_locality(
+            &check,
+            &edited_lines,
+            2,
+            &scope_ranges,
+        );
+        assert_eq!(total, 1);
+        assert_eq!(local, 0);
+    }
+
+    #[test]
+    fn scope_aware_locality_falls_back_to_numeric_when_no_scope_match() {
+        use std::collections::BTreeMap;
+
+        let check = PostEditCheckResult {
+            accepted: false,
+
+            messages: vec![],
+            failure_kinds: BTreeSet::from([
+                PostEditFailureKind::SemanticReferenceIntegrityRegressed,
+            ]),
+            culprit_lines: BTreeSet::from([102]),
+            identity_severity: 0.0, reference_severity: 0.0, scope_severity: 0.0,
+        };
+        let edited_lines = BTreeSet::from([100]);
+        let scope_ranges: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+        let (local, total) = FormatterEngine::scope_aware_culprit_locality(
+            &check,
+            &edited_lines,
+            5,
+            &scope_ranges,
+        );
+        assert_eq!(total, 1);
+        assert_eq!(local, 1);
+    }
+
+}

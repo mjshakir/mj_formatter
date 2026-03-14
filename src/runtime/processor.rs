@@ -1,0 +1,209 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::engine::accuracy_gate::AccuracyGateFailure;
+use crate::engine::coordinator::FormatterEngine;
+use crate::files::file_io::FileIo;
+use crate::model::file_result::FileResult;
+use crate::model::rename_plan::SemanticRenamePlan;
+use crate::policy::id::PolicyId;
+use crate::runtime::result_cache::CheckResultCache;
+use crate::runtime::scheduler::{DispatchObservation, ProcessedFileOutcome};
+
+#[derive(Clone)]
+pub struct FileProcessor {
+    engine: Arc<FormatterEngine>,
+    file_io: FileIo,
+    check: bool,
+    check_result_cache: Option<Arc<CheckResultCache>>,
+}
+
+impl FileProcessor {
+    pub fn new(
+        engine: Arc<FormatterEngine>,
+        file_io: FileIo,
+        check: bool,
+        check_result_cache: Option<Arc<CheckResultCache>>,
+    ) -> Self {
+        Self {
+            engine,
+            file_io,
+            check,
+            check_result_cache,
+        }
+    }
+
+    pub fn process(&self, path: PathBuf) -> ProcessedFileOutcome {
+        let total_started = Instant::now();
+        let original = match self.file_io.read_text(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                let total_elapsed = total_started.elapsed();
+                let result = FileResult {
+                    path,
+                    changed: false,
+                    pending_text: None,
+                    semantic_rename_plans: Vec::new(),
+                    convergence_pairs: BTreeMap::new(),
+                    violations: Vec::new(),
+                    edits: Vec::new(),
+                    policy_traces: Vec::new(),
+                    accuracy_gate: None,
+                    error: Some(format!("read failed: {err}")),
+                    backup_path: None,
+                    warnings: Vec::new(),
+                    elapsed_engine_ms: 0.0,
+                    elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                    policy_certainty: None,
+                };
+                let observation = DispatchObservation::from_processed_file(
+                    result.path.as_path(),
+                    None,
+                    Duration::default(),
+                    total_elapsed,
+                    0,
+                    &result,
+                );
+                return ProcessedFileOutcome {
+                    result,
+                    observation,
+                };
+            }
+        };
+        let content_hash = if self.check && self.check_result_cache.is_some() {
+            Some(CheckResultCache::content_hash(original.as_str()))
+        } else {
+            None
+        };
+        if self.check {
+            if let (Some(cache), Some(hash)) =
+                (self.check_result_cache.as_ref(), content_hash.as_ref())
+            {
+                if let Some(cached) = cache.get(path.as_path(), hash.as_str()) {
+                    let observation = DispatchObservation::from_processed_file(
+                        cached.path.as_path(),
+                        Some(original.as_str()),
+                        Duration::default(),
+                        total_started.elapsed(),
+                        0,
+                        &cached,
+                    );
+                    return ProcessedFileOutcome {
+                        result: cached,
+                        observation,
+                    };
+                }
+            }
+        }
+
+        let engine_started = Instant::now();
+        let pass_result = match self.engine.apply(&original, &path) {
+            Ok(result) => result,
+            Err(err) => {
+                let accuracy_gate = err
+                    .downcast_ref::<AccuracyGateFailure>()
+                    .map(|failure| failure.decision().clone());
+                let engine_elapsed = engine_started.elapsed();
+                let total_elapsed = total_started.elapsed();
+                let result = FileResult {
+                    path,
+                    changed: false,
+                    pending_text: None,
+                    semantic_rename_plans: Vec::new(),
+                    convergence_pairs: BTreeMap::new(),
+                    violations: Vec::new(),
+                    edits: Vec::new(),
+                    policy_traces: Vec::new(),
+                    accuracy_gate,
+                    error: Some(format!("pipeline failed: {err}")),
+                    backup_path: None,
+                    warnings: Vec::new(),
+                    elapsed_engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
+                    elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                    policy_certainty: None,
+                };
+                let observation = DispatchObservation::from_processed_file(
+                    result.path.as_path(),
+                    Some(original.as_str()),
+                    engine_elapsed,
+                    total_elapsed,
+                    0,
+                    &result,
+                );
+                return ProcessedFileOutcome {
+                    result,
+                    observation,
+                };
+            }
+        };
+        let engine_elapsed = engine_started.elapsed();
+        let retry_effort_units = pass_result.metrics.retry_effort_units();
+        let policy_result = pass_result.policy_result;
+        let changed = !crate::text_scan::TEXT_SCAN.strings_equal(&policy_result.text, &original);
+        let semantic_rename_policy = PolicyId::NamingConventions;
+        let naming_edits_applied = policy_result.edits.iter().any(|edit| {
+            PolicyId::from_str_lossy(edit.policy.as_str()) == PolicyId::NamingConventions
+        });
+        let mut semantic_rename_plans = Vec::new();
+        let mut warnings = Vec::new();
+        let mut dropped_propagation_plans = 0usize;
+        for warning in policy_result.warnings {
+            if let Some(plan) = SemanticRenamePlan::from_internal_warning(warning.as_str()) {
+                if naming_edits_applied {
+                    semantic_rename_plans.push(plan);
+                } else {
+                    dropped_propagation_plans = dropped_propagation_plans.saturating_add(1);
+                }
+            } else {
+                warnings.push(warning);
+            }
+        }
+        if dropped_propagation_plans > 0 {
+            warnings.push(format!(
+                "{}: skipped {} semantic propagation plan(s) because local rename edits were not applied",
+                semantic_rename_policy.as_str(),
+                dropped_propagation_plans
+            ));
+        }
+
+        let total_elapsed = total_started.elapsed();
+        let result = FileResult {
+            path,
+            changed,
+            pending_text: (changed && !self.check).then_some(policy_result.text),
+            semantic_rename_plans,
+            convergence_pairs: pass_result.convergence_pairs,
+            violations: policy_result.violations,
+            edits: policy_result.edits,
+            policy_traces: pass_result.policy_traces,
+            accuracy_gate: pass_result.accuracy_gate,
+            error: None,
+            backup_path: None,
+            warnings,
+            elapsed_engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
+            elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
+            policy_certainty: pass_result.policy_certainty,
+        };
+        if self.check {
+            if let (Some(cache), Some(hash)) =
+                (self.check_result_cache.as_ref(), content_hash.as_ref())
+            {
+                cache.put(result.path.as_path(), hash.as_str(), &result);
+            }
+        }
+        let observation = DispatchObservation::from_processed_file(
+            result.path.as_path(),
+            Some(original.as_str()),
+            engine_elapsed,
+            total_started.elapsed(),
+            retry_effort_units,
+            &result,
+        );
+        ProcessedFileOutcome {
+            result,
+            observation,
+        }
+    }
+}
