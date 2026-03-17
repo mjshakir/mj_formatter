@@ -3136,6 +3136,7 @@ mod tests {
             stable_model_prob: 0.50,
             edit_success: 0.50,
             edit_success_variance: 0.01,
+            observation_count: 10,
             ..Default::default()
         };
         let high_var = PolicyCertainty {
