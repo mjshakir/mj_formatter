@@ -504,24 +504,6 @@ impl NamingConventionsPolicy {
                     continue;
                 }
             }
-            let text_occurrence_count = if let Some(t) = tree {
-                text_scan::count_identifier_occurrences_excluding_non_code(text, &plan.old_name, t)
-            } else {
-                text_scan::count_identifier_occurrences(text, &plan.old_name)
-            };
-            if text_occurrence_count > offsets.len() {
-                warnings.push(format!(
-                    "naming_conventions: skipped semantic rename '{}' on line {} due text-scan coverage gap (text_occurrences={}, semantic_offsets={})",
-                    plan.old_name, plan.line, text_occurrence_count, offsets.len()
-                ));
-                strict_issues.push_lazy(|| {
-                    format!(
-                        "text-scan coverage gap for '{}' on line {} (text={}, semantic={})",
-                        plan.old_name, plan.line, text_occurrence_count, offsets.len()
-                    )
-                });
-                continue;
-            }
             if offsets.is_empty() {
                 warnings.push(format!(
                     "naming_conventions: no semantic references found for '{}' on line {}",
@@ -535,50 +517,6 @@ impl NamingConventionsPolicy {
                 });
                 continue;
             }
-            if plan.expected_occurrences > 0 {
-                let coverage_gap = plan
-                    .minimum_required_occurrences
-                    .saturating_sub(offsets.len());
-                if coverage_gap > 0 {
-                    warnings.push(format!(
-                        "naming_conventions: skipped semantic rename '{}' on line {} due incomplete semantic safe-coverage ({} < {})",
-                        plan.old_name,
-                        plan.line,
-                        offsets.len(),
-                        plan.minimum_required_occurrences
-                    ));
-                    strict_issues.push_lazy(|| {
-                        format!(
-                            "incomplete semantic safe-coverage for '{}' on line {} ({} < {})",
-                            plan.old_name,
-                            plan.line,
-                            offsets.len(),
-                            plan.minimum_required_occurrences
-                        )
-                    });
-                    continue;
-                }
-                if offsets.len() < plan.expected_occurrences {
-                    warnings.push(format!(
-                        "naming_conventions: skipped semantic rename '{}' on line {} due incomplete full-coverage ({} < {})",
-                        plan.old_name,
-                        plan.line,
-                        offsets.len(),
-                        plan.expected_occurrences
-                    ));
-                    strict_issues.push_lazy(|| {
-                        format!(
-                            "incomplete full-coverage for '{}' on line {} ({} < {})",
-                            plan.old_name,
-                            plan.line,
-                            offsets.len(),
-                            plan.expected_occurrences
-                        )
-                    });
-                    continue;
-                }
-            }
-
             let declaration_offset =
                 Self::offset_for_line_column(line_starts.as_slice(), plan.line, plan.column)
                     .and_then(|offset| {
