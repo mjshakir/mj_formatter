@@ -333,6 +333,8 @@ impl PolicyPipeline {
                 state.tree_for_text.as_ref(),
                 state.clang_for_text.as_deref(),
                 state.semantic_for_text.as_ref(),
+                &state.current,
+                state.tree_for_text.as_ref(),
             );
             let measurement = Self::extract_raw_observation(
                 &confidence,
@@ -769,6 +771,8 @@ impl PolicyPipeline {
                 state.tree_for_text.as_ref(),
                 state.clang_for_text.as_deref(),
                 state.semantic_for_text.as_ref(),
+                &state.current,
+                state.tree_for_text.as_ref(),
             );
             let measurement = Self::extract_raw_observation(
                 &confidence,
@@ -2391,7 +2395,8 @@ impl PolicyPipeline {
             error_count,
         );
 
-        let coverage = confidence.semantic_usr_ratio;
+        let coverage = (confidence.semantic_usr_ratio * 0.6 + confidence.text_scan_agreement * 0.4)
+            .clamp(0.0, 1.0);
 
         let richness = if let Some(summary) = semantic_summary {
             let combined = (summary.scope_count + summary.reference_count) as f64;
