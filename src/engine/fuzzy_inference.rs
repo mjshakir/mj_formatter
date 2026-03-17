@@ -213,9 +213,11 @@ fn adaptive_variance_damp(
     variance: f64,
     dim: usize,
     model_probs: [f64; 3],
+    observation_count: u32,
 ) -> f64 {
     let regime_mod = compute_regime_mod(&model_probs);
-    let coeff = (VARIANCE_DAMP_BASE[dim] * regime_mod).clamp(0.15, 0.85);
+    let maturity = (observation_count as f64 / 5.0).clamp(0.0, 1.0);
+    let coeff = (VARIANCE_DAMP_BASE[dim] * regime_mod * maturity).clamp(0.0, 0.85);
     let sigma = variance.sqrt().min(1.0);
     (estimate * (1.0 - coeff * sigma)).clamp(0.0, 1.0)
 }
@@ -248,8 +250,9 @@ fn modulation(certainty: &PolicyCertainty) -> f64 {
 /// damped by variance and modulated by stability/edit_success/richness.
 pub fn fuzzy_trust_semantic_rewrite(certainty: &PolicyCertainty) -> f64 {
     let mp = certainty.model_probs();
-    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp);
-    let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp);
+    let oc = certainty.observation_count;
+    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp, oc);
+    let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp, oc);
     let base = (sem * cov).sqrt().clamp(0.0, 1.0);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
@@ -257,15 +260,17 @@ pub fn fuzzy_trust_semantic_rewrite(certainty: &PolicyCertainty) -> f64 {
 /// Kalman-direct trust: structural estimate damped by variance.
 pub fn fuzzy_trust_structural(certainty: &PolicyCertainty) -> f64 {
     let mp = certainty.model_probs();
-    let base = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp);
+    let oc = certainty.observation_count;
+    let base = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp, oc);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
 
 /// Kalman-direct trust: average of semantic + structural, damped by variance.
 pub fn fuzzy_trust_general(certainty: &PolicyCertainty) -> f64 {
     let mp = certainty.model_probs();
-    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp);
-    let str_val = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp);
+    let oc = certainty.observation_count;
+    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp, oc);
+    let str_val = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp, oc);
     let base = (sem * 0.5 + str_val * 0.5).clamp(0.0, 1.0);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
@@ -418,8 +423,9 @@ pub fn fuzzy_semantic_fidelity(
     };
 
     let mp = certainty.model_probs();
-    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp);
-    let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp);
+    let oc = certainty.observation_count;
+    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp, oc);
+    let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp, oc);
     let kalman_fidelity = (sem * cov).sqrt().clamp(0.0, 1.0);
 
     (context_base * 0.4 + kalman_fidelity * 0.6).clamp(0.0, 1.0)
