@@ -489,7 +489,9 @@ fn collect_non_code_ranges_recursive(
     loop {
         let node = cursor.node();
         let kind = node.kind();
-        if kind == "comment" || kind == "string_literal" || kind == "raw_string_literal" {
+        if kind == "comment" || kind == "string_literal" || kind == "raw_string_literal"
+            || kind == "char_literal" || kind == "system_lib_string"
+        {
             ranges.push((node.start_byte(), node.end_byte()));
         } else if cursor.goto_first_child() {
             collect_non_code_ranges_recursive(cursor, ranges);
