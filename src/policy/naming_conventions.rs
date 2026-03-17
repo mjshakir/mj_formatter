@@ -425,7 +425,7 @@ impl NamingConventionsPolicy {
         clang_parse: &ClangParseResult,
         plans: &[RenamePlan],
         semantic_query: &SemanticContextQuery<'_>,
-        tree: Option<&tree_sitter::Tree>,
+        _tree: Option<&tree_sitter::Tree>,
         warnings: &mut Vec<String>,
         strict_issues: &mut StrictIssues,
     ) -> Vec<Replacement> {
