@@ -52,7 +52,7 @@ pub struct CheckResultCache {
     path: PathBuf,
     fingerprint: String,
     l1: Option<Cache<String, Arc<CachedFileResult>>>,
-    disk_entries: DashMap<String, CachedFileResult>,
+    disk_entries: DashMap<String, Arc<CachedFileResult>>,
     dirty: AtomicBool,
 }
 
@@ -76,7 +76,7 @@ impl CheckResultCache {
             path,
             fingerprint,
             l1: Some(Cache::builder().max_capacity(l1_size as u64).build()),
-            disk_entries: DashMap::from_iter(entries),
+            disk_entries: DashMap::from_iter(entries.into_iter().map(|(k, v)| (k, Arc::new(v)))),
             dirty: AtomicBool::new(false),
         }
     }
@@ -112,11 +112,11 @@ impl CheckResultCache {
             }
         }
 
-        let value = self.disk_entries.get(&key)?.clone();
+        let arc_value = self.disk_entries.get(&key)?.clone();
         if let Some(l1) = self.l1.as_ref() {
-            l1.insert(key, Arc::new(value.clone()));
+            l1.insert(key, arc_value.clone());
         }
-        Some(Self::to_file_result(path, &value))
+        Some(Self::to_file_result(path, arc_value.as_ref()))
     }
 
     pub fn put(&self, path: &Path, content_hash: &str, result: &FileResult) {
@@ -124,11 +124,11 @@ impl CheckResultCache {
             return;
         }
         let key = Self::make_key(path, content_hash, self.fingerprint.as_str());
-        let value = Self::from_file_result(result);
+        let arc_value = Arc::new(Self::from_file_result(result));
         if let Some(l1) = self.l1.as_ref() {
-            l1.insert(key.clone(), Arc::new(value.clone()));
+            l1.insert(key.clone(), arc_value.clone());
         }
-        self.disk_entries.insert(key, value);
+        self.disk_entries.insert(key, arc_value);
         self.dirty.store(true, Ordering::Release);
     }
 
@@ -140,7 +140,7 @@ impl CheckResultCache {
         let entries: std::collections::HashMap<String, CachedFileResult> = self
             .disk_entries
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| (entry.key().clone(), entry.value().as_ref().clone()))
             .collect();
         let payload = PersistedCheckResultCache {
             version: CACHE_VERSION,

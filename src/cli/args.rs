@@ -28,8 +28,13 @@ pub struct CliArgs {
     #[arg(long)]
     pub jobs: Option<usize>,
 
+    /// Number of worker processes. Use "max" to auto-detect all CPU cores.
     #[arg(long)]
-    pub processes: Option<usize>,
+    pub processes: Option<String>,
+
+    /// Threads per worker process. Overrides --jobs when specified (total = processes × N).
+    #[arg(long = "threads-per-process")]
+    pub threads_per_process: Option<usize>,
 
     #[arg(long)]
     pub check: bool,

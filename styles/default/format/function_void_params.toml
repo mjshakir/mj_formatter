@@ -1,6 +1,6 @@
 [policy]
 name = "function_void_params"
-enabled = false
+enabled = true
 type = "python"
 touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
 

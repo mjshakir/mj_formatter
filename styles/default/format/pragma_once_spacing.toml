@@ -1,6 +1,6 @@
 [policy]
 name = "pragma_once_spacing"
-enabled = false
+enabled = true
 type = "python"
 touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whitespace_only
 blank_lines_after = 1

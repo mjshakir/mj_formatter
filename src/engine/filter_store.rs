@@ -1,12 +1,74 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use crate::engine::adaptive_rules::AdaptiveRuleBases;
 use crate::engine::certainty_filter::{CertaintyFilterResult, CertaintyFilterState, NUM_DIMS};
+use crate::engine::fuzzy_inference::AdaptiveFiringRecord;
+use crate::engine::mat5::{Mat5, mat5_add, mat5_diagonal, mat5_identity, mat5_inverse_spd, mat5_mul, mat5_matvec, mat5_sub, vec5_sub};
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ProjectFilter {
+    pub estimate: [f64; NUM_DIMS],
+    pub covariance: Mat5,
+    pub observation_count: u64,
+}
+
+impl ProjectFilter {
+    pub fn new() -> Self {
+        Self {
+            estimate: [0.5; NUM_DIMS],
+            covariance: mat5_diagonal(&[0.25; NUM_DIMS]),
+            observation_count: 0,
+        }
+    }
+
+    pub fn update(&mut self, file_estimate: &[f64; NUM_DIMS], file_covariance: &Mat5) {
+        let inter_file_noise = mat5_diagonal(&[0.02; NUM_DIMS]);
+        let r = mat5_add(file_covariance, &inter_file_noise);
+
+        let s = mat5_add(&self.covariance, &r);
+        let s_inv = mat5_inverse_spd(&s).unwrap_or(mat5_identity());
+        let k = mat5_mul(&self.covariance, &s_inv);
+
+        let innov = vec5_sub(file_estimate, &self.estimate);
+        let k_innov = mat5_matvec(&k, &innov);
+        for d in 0..NUM_DIMS {
+            self.estimate[d] = (self.estimate[d] + k_innov[d]).clamp(0.0, 1.0);
+        }
+
+        let i_k = mat5_sub(&mat5_identity(), &k);
+        self.covariance = mat5_mul(&i_k, &self.covariance);
+
+        let q_project = mat5_diagonal(&[0.005; NUM_DIMS]);
+        self.covariance = mat5_add(&self.covariance, &q_project);
+
+        self.observation_count += 1;
+    }
+
+    pub fn prior_for_new_file(&self) -> Option<([f64; NUM_DIMS], [f64; NUM_DIMS])> {
+        if self.observation_count < 3 {
+            return None;
+        }
+        let widened = mat5_add(&self.covariance, &mat5_diagonal(&[0.03; NUM_DIMS]));
+        let variances = [
+            widened[0][0],
+            widened[1][1],
+            widened[2][2],
+            widened[3][3],
+            widened[4][4],
+        ];
+        Some((self.estimate, variances))
+    }
+}
 
 pub struct CertaintyFilterStore {
     entries: DashMap<String, CertaintyFilterState>,
-    population_priors: Option<([f64; NUM_DIMS], [f64; NUM_DIMS])>,
+    population_priors: ArcSwap<Option<([f64; NUM_DIMS], [f64; NUM_DIMS])>>,
+    project_filter: Mutex<ProjectFilter>,
+    adaptive_rules: Mutex<AdaptiveRuleBases>,
 }
 
 impl CertaintyFilterStore {
@@ -18,7 +80,9 @@ impl CertaintyFilterStore {
         });
         Self {
             entries: DashMap::new(),
-            population_priors,
+            population_priors: ArcSwap::from_pointee(population_priors),
+            project_filter: Mutex::new(ProjectFilter::new()),
+            adaptive_rules: Mutex::new(AdaptiveRuleBases::new()),
         }
     }
 
@@ -54,9 +118,22 @@ impl CertaintyFilterStore {
         for (k, v) in map {
             entries.insert(k, v);
         }
+        let adaptive_rules = path
+            .with_extension("adaptive_rules.bin")
+            .exists()
+            .then(|| {
+                let bytes = std::fs::read(path.with_extension("adaptive_rules.bin")).ok()?;
+                let (rules, _): (AdaptiveRuleBases, _) =
+                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
+                Some(rules)
+            })
+            .flatten()
+            .unwrap_or_else(AdaptiveRuleBases::new);
         Some(Self {
             entries,
-            population_priors,
+            population_priors: ArcSwap::from_pointee(population_priors),
+            project_filter: Mutex::new(ProjectFilter::new()),
+            adaptive_rules: Mutex::new(adaptive_rules),
         })
     }
 
@@ -87,18 +164,29 @@ impl CertaintyFilterStore {
         measurement: [f64; NUM_DIMS],
         content_hash: u64,
     ) -> CertaintyFilterResult {
-        let priors = self.population_priors;
+        let priors = **self.population_priors.load();
+        let project_prior = self.project_filter.lock().ok().and_then(|pf| pf.prior_for_new_file());
         let mut entry = self
             .entries
             .entry(file_path.to_string())
             .or_insert_with(|| {
-                if let Some((est, var)) = priors {
+                if let Some((est, var)) = project_prior {
+                    CertaintyFilterState::new_with_prior(est, var)
+                } else if let Some((est, var)) = priors {
                     CertaintyFilterState::new_with_prior(est, var)
                 } else {
                     CertaintyFilterState::new()
                 }
             });
-        entry.observe(measurement, content_hash)
+        let result = entry.observe(measurement, content_hash);
+
+        if result.observation_count >= 3 {
+            if let Ok(mut pf) = self.project_filter.lock() {
+                pf.update(&result.estimates, &result.covariance);
+            }
+        }
+
+        result
     }
 
     pub fn last_edit_outcome(&self, file_path: &str) -> Option<f64> {
@@ -142,6 +230,18 @@ impl CertaintyFilterStore {
             for model in &mut entry.models {
                 model.estimates[..NUM_DIMS].copy_from_slice(&blended[..NUM_DIMS]);
             }
+        }
+    }
+
+    pub fn adaptive_rules(&self) -> MutexGuard<'_, AdaptiveRuleBases> {
+        self.adaptive_rules.lock().expect("adaptive_rules lock poisoned")
+    }
+
+    pub fn update_adaptive_rules(&self, record: &AdaptiveFiringRecord, outcome: f64) {
+        if let Ok(mut rules) = self.adaptive_rules.lock() {
+            rules.failure_severity.update(&record.severity_firing, record.severity_value);
+            rules.edit_acceptance.update(&record.acceptance_firing, record.acceptance_value);
+            rules.edit_outcome.update(&record.outcome_firing, outcome);
         }
     }
 }

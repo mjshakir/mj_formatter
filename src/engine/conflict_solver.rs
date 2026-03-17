@@ -5,7 +5,7 @@ use crate::engine::catalog::policy_catalog;
 use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
 use crate::engine::run_options::RetryScopeStage;
 use crate::engine::zone::PolicyZone;
-use crate::engine::semantic_contract::SemanticContract;
+use crate::engine::semantic_contract::{SemanticContract, ALL_CLAUSES};
 
 #[derive(Clone, Debug, Default)]
 pub struct GlobalConflictSolveResult {
@@ -94,23 +94,23 @@ impl GlobalConflictSolver {
     ) -> Vec<PolicyEditCandidate> {
         let mut best_by_line = std::collections::HashMap::<usize, PolicyEditCandidate>::new();
         for candidate in incoming {
-            match best_by_line.get(&candidate.line) {
-                Some(existing) => {
+            match best_by_line.entry(candidate.line) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
                     let candidate_utility = Self::utility_score(candidate, certainty, scope_stage);
-                    let existing_utility = Self::utility_score(existing, certainty, scope_stage);
+                    let existing_utility = Self::utility_score(e.get(), certainty, scope_stage);
                     let choose_new = candidate_utility > existing_utility + 0.000_001
                         || (candidate_utility - existing_utility).abs() <= 0.000_001
-                            && candidate.confidence > existing.confidence + 0.001
+                            && candidate.confidence > e.get().confidence + 0.001
                         || (candidate_utility - existing_utility).abs() <= 0.000_001
-                            && (candidate.confidence - existing.confidence).abs() <= 0.001
+                            && (candidate.confidence - e.get().confidence).abs() <= 0.001
                             && candidate.risk_tier.precedence_score()
-                                > existing.risk_tier.precedence_score();
+                                > e.get().risk_tier.precedence_score();
                     if choose_new {
-                        best_by_line.insert(candidate.line, candidate.clone());
+                        *e.get_mut() = candidate.clone();
                     }
                 }
-                None => {
-                    best_by_line.insert(candidate.line, candidate.clone());
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(candidate.clone());
                 }
             }
         }
@@ -165,11 +165,13 @@ impl GlobalConflictSolver {
     }
 
     fn violates_hard_constraints(candidate: &PolicyEditCandidate) -> bool {
-        candidate.hard_constraints_touched.iter().any(|clause| {
-            SemanticContract::invariant_spec(*clause)
-                .map(|spec| spec.hard)
-                .unwrap_or(true)
-        })
+        ALL_CLAUSES.iter()
+            .filter(|&&clause| (candidate.hard_constraints_touched & clause.bit()) != 0)
+            .any(|&clause| {
+                SemanticContract::invariant_spec(clause)
+                    .map(|spec| spec.hard)
+                    .unwrap_or(true)
+            })
     }
 
     fn conflicts(left: &PolicyEditCandidate, right: &PolicyEditCandidate, certainty: &PolicyCertainty) -> bool {
@@ -178,8 +180,8 @@ impl GlobalConflictSolver {
         }
         let either_bypasses = {
             let catalog = policy_catalog();
-            catalog.bypasses_line_conflict(left.policy.as_str())
-                || catalog.bypasses_line_conflict(right.policy.as_str())
+            catalog.bypasses_line_conflict(left.policy.as_ref())
+                || catalog.bypasses_line_conflict(right.policy.as_ref())
         };
         if either_bypasses {
             return false;
@@ -188,18 +190,18 @@ impl GlobalConflictSolver {
             return true;
         }
         if Self::ranges_overlap(
-            left.range_footprint.as_slice(),
-            right.range_footprint.as_slice(),
+            left.range_footprint.as_ref(),
+            right.range_footprint.as_ref(),
         ) {
             return true;
         }
         if Self::symbols_overlap(
-            left.symbol_footprint.as_slice(),
-            right.symbol_footprint.as_slice(),
+            left.symbol_footprint.as_ref(),
+            right.symbol_footprint.as_ref(),
         ) {
             let line_gap = left.line.abs_diff(right.line);
-            let semantic_sensitive = Self::is_semantic_rewrite_policy(left.policy.as_str())
-                || Self::is_semantic_rewrite_policy(right.policy.as_str())
+            let semantic_sensitive = Self::is_semantic_rewrite_policy(left.policy.as_ref())
+                || Self::is_semantic_rewrite_policy(right.policy.as_ref())
                 || left.risk_tier == CandidateRiskTier::High
                 || right.risk_tier == CandidateRiskTier::High;
             let trust = certainty.trust_for_general();
@@ -215,8 +217,8 @@ impl GlobalConflictSolver {
         (left.zone == PolicyZone::Preprocessor || right.zone == PolicyZone::Preprocessor)
             && left.after_fingerprint != right.after_fingerprint
             && (Self::ranges_overlap(
-                left.range_footprint.as_slice(),
-                right.range_footprint.as_slice(),
+                left.range_footprint.as_ref(),
+                right.range_footprint.as_ref(),
             ) || left.line.abs_diff(right.line) <= left.impact_radius.max(right.impact_radius))
     }
 
@@ -537,9 +539,9 @@ mod tests {
             confidence: 0.9,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 2,
-            symbol_footprint: vec![11],
-            range_footprint: vec![(7, 7)],
-            hard_constraints_touched: BTreeSet::from([SemanticInvariantClause::EditSafety]),
+            symbol_footprint: vec![11u64].into(),
+            range_footprint: vec![(7usize, 7usize)].into(),
+            hard_constraints_touched: SemanticInvariantClause::EditSafety.bit(),
             zone: PolicyZone::Code,
             after_fingerprint: 1,
             style_gain: 1.0,
@@ -567,9 +569,9 @@ mod tests {
             confidence: 0.82,
             risk_tier: CandidateRiskTier::Low,
             impact_radius: 1,
-            symbol_footprint: vec![55],
-            range_footprint: vec![(12, 12)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![55u64].into(),
+            range_footprint: vec![(12usize, 12usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 2,
             style_gain: 1.1,
@@ -580,9 +582,9 @@ mod tests {
             confidence: 0.85,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 2,
-            symbol_footprint: vec![55],
-            range_footprint: vec![(11, 13)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![55u64].into(),
+            range_footprint: vec![(11usize, 13usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 3,
             style_gain: 1.0,
@@ -610,9 +612,9 @@ mod tests {
             confidence: 0.90,
             risk_tier: CandidateRiskTier::Low,
             impact_radius: 3,
-            symbol_footprint: vec![1],
-            range_footprint: vec![(20, 23)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![1u64].into(),
+            range_footprint: vec![(20usize, 23usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 11,
             style_gain: 2.0,
@@ -623,9 +625,9 @@ mod tests {
             confidence: 0.90,
             risk_tier: CandidateRiskTier::Low,
             impact_radius: 1,
-            symbol_footprint: vec![2],
-            range_footprint: vec![(21, 21)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![2u64].into(),
+            range_footprint: vec![(21usize, 21usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 12,
             style_gain: 1.5,
@@ -636,9 +638,9 @@ mod tests {
             confidence: 0.90,
             risk_tier: CandidateRiskTier::Low,
             impact_radius: 1,
-            symbol_footprint: vec![3],
-            range_footprint: vec![(23, 23)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![3u64].into(),
+            range_footprint: vec![(23usize, 23usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 13,
             style_gain: 1.5,
@@ -657,10 +659,10 @@ mod tests {
         let accepted_policies = result
             .accepted
             .iter()
-            .map(|candidate| candidate.policy.as_str())
+            .map(|candidate| candidate.policy.as_ref())
             .collect::<BTreeSet<_>>();
-        assert!(accepted_policies.contains(left_pair.policy.as_str()));
-        assert!(accepted_policies.contains(right_pair.policy.as_str()));
+        assert!(accepted_policies.contains(left_pair.policy.as_ref()));
+        assert!(accepted_policies.contains(right_pair.policy.as_ref()));
         assert_eq!(result.accepted.len(), 2);
     }
 
@@ -672,9 +674,9 @@ mod tests {
             confidence: 0.92,
             risk_tier: CandidateRiskTier::Medium,
             impact_radius: 2,
-            symbol_footprint: vec![777],
-            range_footprint: vec![(20, 20)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![777u64].into(),
+            range_footprint: vec![(20usize, 20usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 101,
             style_gain: 1.0,
@@ -685,9 +687,9 @@ mod tests {
             confidence: 0.91,
             risk_tier: CandidateRiskTier::Medium,
             impact_radius: 2,
-            symbol_footprint: vec![777],
-            range_footprint: vec![(120, 120)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![777u64].into(),
+            range_footprint: vec![(120usize, 120usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 202,
             style_gain: 1.0,
@@ -714,9 +716,9 @@ mod tests {
             confidence: 0.96,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 8,
-            symbol_footprint: vec![99, 100],
-            range_footprint: vec![(41, 120)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![99u64, 100u64].into(),
+            range_footprint: vec![(41usize, 120usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 303,
             style_gain: 1.0,
@@ -727,9 +729,9 @@ mod tests {
             confidence: 0.96,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 8,
-            symbol_footprint: vec![99, 101],
-            range_footprint: vec![(41, 120)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![99u64, 101u64].into(),
+            range_footprint: vec![(41usize, 120usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 303,
             style_gain: 1.0,
@@ -757,9 +759,9 @@ mod tests {
             confidence: 0.92,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 2,
-            symbol_footprint: vec![44],
-            range_footprint: vec![(9, 12)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![44u64].into(),
+            range_footprint: vec![(9usize, 12usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 1,
             style_gain: 1.0,
@@ -770,9 +772,9 @@ mod tests {
             confidence: 0.91,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 2,
-            symbol_footprint: vec![44],
-            range_footprint: vec![(9, 12)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![44u64].into(),
+            range_footprint: vec![(9usize, 12usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 2,
             style_gain: 1.0,

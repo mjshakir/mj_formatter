@@ -9,7 +9,6 @@ pub const NUM_FILE_KINDS: usize = 3;
 pub const NUM_BLOCK_KINDS: usize = 6;
 const FILE_EMA_LEN: usize = NUM_POLICIES * NUM_FILE_KINDS; // 48
 const BLOCK_EMA_LEN: usize = NUM_POLICIES * NUM_BLOCK_KINDS; // 96
-const EMA_ALPHA: f32 = 0.20;
 const MIN_OBSERVATIONS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -101,6 +100,7 @@ impl Default for PolicyContextTracker {
     }
 }
 
+#[cfg(test)]
 pub struct PolicyOutcomeRecord {
     pub policy_index: u8,
     pub block_kind: BlockContextKind,
@@ -129,17 +129,19 @@ impl PolicyContextTracker {
         Some(tracker)
     }
 
-    #[inline]
+    #[cfg(test)]
     fn file_idx(policy_idx: u8, file_kind: FileContextKind) -> usize {
         (policy_idx as usize) * NUM_FILE_KINDS + (file_kind as usize)
     }
 
-    #[inline]
+    #[cfg(test)]
     fn block_idx(policy_idx: u8, block_kind: BlockContextKind) -> usize {
         (policy_idx as usize) * NUM_BLOCK_KINDS + (block_kind as usize)
     }
 
+    #[cfg(test)]
     pub fn observe_file(&mut self, policy_idx: u8, file_kind: FileContextKind, success: bool) {
+        const EMA_ALPHA: f32 = 0.20;
         let idx = Self::file_idx(policy_idx, file_kind);
         if idx >= FILE_EMA_LEN {
             return;
@@ -149,12 +151,14 @@ impl PolicyContextTracker {
         self.file_cnt[idx] = self.file_cnt[idx].saturating_add(1);
     }
 
+    #[cfg(test)]
     pub fn observe_block(
         &mut self,
         policy_idx: u8,
         block_kind: BlockContextKind,
         success: bool,
     ) {
+        const EMA_ALPHA: f32 = 0.20;
         let idx = Self::block_idx(policy_idx, block_kind);
         if idx >= BLOCK_EMA_LEN {
             return;
@@ -164,6 +168,7 @@ impl PolicyContextTracker {
         self.block_cnt[idx] = self.block_cnt[idx].saturating_add(1);
     }
 
+    #[cfg(test)]
     pub fn batch_observe_outcomes(
         &mut self,
         file_kind: FileContextKind,

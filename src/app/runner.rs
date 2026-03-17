@@ -378,7 +378,11 @@ impl App {
                 Some(ctx)
             });
             let mut final_population: Option<PopulationContext> = prev_population.clone();
-            for iteration in 0..max_iterations {
+            let obs_max = if prev_population.is_some() { 1 } else { max_iterations };
+            if prev_population.is_some() && config.verbose {
+                info!("warm start available — limiting observation to 1 iteration");
+            }
+            for iteration in 0..obs_max {
                 let obs_results = Self::run_processing_pass(
                     &obs_config,
                     files.clone(),

@@ -1,6 +1,6 @@
 [policy]
 name = "include_guards"
-enabled = false
+enabled = true
 type = "python"
 touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whitespace_only
 

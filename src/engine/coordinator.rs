@@ -87,6 +87,7 @@ impl FormatterEngine {
         self.pipeline.save_context_tracker(path)
     }
 
+
     pub fn apply(&self, text: &str, path: &Path) -> Result<FormatPassResult> {
         let result = self.apply_inner(text, path)?;
         if let Some(certainty) = &result.policy_certainty {
@@ -179,7 +180,8 @@ impl FormatterEngine {
                 ClusterOutcome::Accepted,
             );
             self.record_success(0);
-            self.pipeline.record_edit_outcome(path, 0.50);
+            let penalized = Self::rollback_penalized_outcome(0.50, pass_result.rollback_count);
+            self.pipeline.record_edit_outcome(path, penalized);
             return Ok(pass_result);
         }
 
@@ -187,10 +189,14 @@ impl FormatterEngine {
         if !self.retry.post_edit_check_enabled {
             let trust_no_check = pass_result.policy_certainty.as_ref()
                 .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
-            self.pipeline.record_edit_outcome(
-                path,
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome(0, true, 1.0, trust_no_check),
-            );
+            let adaptive_outcome_base = self.pipeline.adaptive_rules();
+            let (edit_outcome, _) =
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                    0, true, 1.0, trust_no_check, Some(&adaptive_outcome_base.edit_outcome),
+                );
+            drop(adaptive_outcome_base);
+            let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_result.rollback_count);
+            self.pipeline.record_edit_outcome(path, penalized);
             pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
                 pass_result.policy_result.warnings.as_slice(),
@@ -270,7 +276,7 @@ impl FormatterEngine {
 
         let trust_1 = pass_result.policy_certainty.as_ref()
             .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
-        if let Some(acceptance_score_1) = self.accept_pass_result(
+        if let Some((acceptance_score_1, firing_record_1)) = self.accept_pass_result(
             &pass_result,
             &edited_lines_1,
             &check_1,
@@ -301,12 +307,18 @@ impl FormatterEngine {
             } else {
                 ClusterOutcome::Regressed
             };
-            self.pipeline.record_edit_outcome(
-                path,
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
-                    0, true, acceptance_score_1, trust_1,
-                ),
-            );
+            let adaptive_outcome_base = self.pipeline.adaptive_rules();
+            let (edit_outcome, outcome_firing) =
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                    0, true, acceptance_score_1, trust_1, Some(&adaptive_outcome_base.edit_outcome),
+                );
+            drop(adaptive_outcome_base);
+            let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_result.rollback_count);
+            self.pipeline.record_edit_outcome(path, penalized);
+            if let Some(mut record) = firing_record_1 {
+                record.outcome_firing = outcome_firing;
+                self.pipeline.update_adaptive_rules(&record, penalized);
+            }
             PolicyClusterTelemetry::record_outcome(
                 pass_result.policy_traces.as_slice(),
                 outcome,
@@ -332,10 +344,14 @@ impl FormatterEngine {
                 .and_then(|b| b.before_semantic_snapshot()),
         );
         if culprit_policies.is_empty() {
-            self.pipeline.record_edit_outcome(
-                path,
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome(0, false, 0.0, trust_1),
-            );
+            let adaptive_outcome_base = self.pipeline.adaptive_rules();
+            let (edit_outcome, _) =
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                    0, false, 0.0, trust_1, Some(&adaptive_outcome_base.edit_outcome),
+                );
+            drop(adaptive_outcome_base);
+            let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_result.rollback_count);
+            self.pipeline.record_edit_outcome(path, penalized);
             return self.reverted_result(path, text, pass_result, warnings, 1);
         }
 
@@ -396,7 +412,7 @@ impl FormatterEngine {
 
         let trust_2 = pass_2.policy_certainty.as_ref()
             .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
-        if let Some(acceptance_score_2) = self.accept_pass_result(
+        if let Some((acceptance_score_2, firing_record_2)) = self.accept_pass_result(
             &pass_2,
             &edited_lines_2,
             &check_2,
@@ -422,12 +438,18 @@ impl FormatterEngine {
                     semantic_context_kind,
                 },
             )?;
-            self.pipeline.record_edit_outcome(
-                path,
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
-                    1, true, acceptance_score_2, trust_2,
-                ),
-            );
+            let adaptive_outcome_base = self.pipeline.adaptive_rules();
+            let (edit_outcome, outcome_firing) =
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                    1, true, acceptance_score_2, trust_2, Some(&adaptive_outcome_base.edit_outcome),
+                );
+            drop(adaptive_outcome_base);
+            let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_2.rollback_count);
+            self.pipeline.record_edit_outcome(path, penalized);
+            if let Some(mut record) = firing_record_2 {
+                record.outcome_firing = outcome_firing;
+                self.pipeline.update_adaptive_rules(&record, penalized);
+            }
             PolicyClusterTelemetry::record_outcome(
                 pass_2.policy_traces.as_slice(),
                 ClusterOutcome::Accepted,
@@ -437,10 +459,14 @@ impl FormatterEngine {
         }
 
         // Both passes failed → revert all edits
-        self.pipeline.record_edit_outcome(
-            path,
-            crate::engine::fuzzy_inference::fuzzy_edit_outcome(1, false, 0.0, trust_2),
-        );
+        let adaptive_outcome_base = self.pipeline.adaptive_rules();
+        let (edit_outcome, _) =
+            crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                1, false, 0.0, trust_2, Some(&adaptive_outcome_base.edit_outcome),
+            );
+        drop(adaptive_outcome_base);
+        let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_2.rollback_count);
+        self.pipeline.record_edit_outcome(path, penalized);
         self.reverted_result(path, text, pass_2, warnings, 2)
     }
 
@@ -456,10 +482,10 @@ impl FormatterEngine {
         scope_ranges: Option<&BTreeMap<String, BTreeSet<(usize, usize)>>>,
         context_kind: SemanticCompdbContextKind,
         certainty: Option<&PolicyCertainty>,
-    ) -> Option<f64> {
+    ) -> Option<(f64, Option<crate::engine::fuzzy_inference::AdaptiveFiringRecord>)> {
         warnings.extend(check.messages.iter().cloned());
         if check.accepted || check.failure_kinds.is_empty() {
-            return Some(1.0);
+            return Some((1.0, None));
         }
         tracing::debug!(
             failure_kinds = ?check.failure_kinds,
@@ -503,13 +529,26 @@ impl FormatterEngine {
             reference_severity: check.reference_severity,
             scope_severity: check.scope_severity,
         };
-        let acceptance_score =
-            crate::engine::fuzzy_inference::fuzzy_edit_acceptance(&observation, certainty, context_kind);
+        let adaptive_bases = self.pipeline.adaptive_rules();
+        let (acceptance_score, firing_record) =
+            crate::engine::fuzzy_inference::fuzzy_edit_acceptance_adaptive(
+                &observation, certainty, context_kind, Some(&adaptive_bases),
+            );
+        drop(adaptive_bases);
         warnings.push(format!(
             "post-edit check informational: acceptance_score={acceptance_score:.3}, failure_kinds={:?}",
             check.failure_kinds
         ));
-        Some(acceptance_score)
+        Some((acceptance_score, firing_record))
+    }
+
+    #[inline(always)]
+    fn rollback_penalized_outcome(edit_outcome: f64, rollback_count: usize) -> f64 {
+        if rollback_count == 0 {
+            edit_outcome
+        } else {
+            (edit_outcome * (1.0 - 0.3 * rollback_count as f64).max(0.05)).clamp(0.0, 1.0)
+        }
     }
 
     fn reverted_result(
@@ -564,6 +603,7 @@ impl FormatterEngine {
             accuracy_gate: None,
             metrics: FormatPassMetrics::default(),
             policy_certainty: None,
+            rollback_count: 0,
         })
     }
 
@@ -803,11 +843,11 @@ impl FormatterEngine {
     }
 
     fn dedup_warning_slices(sources: &[&[String]]) -> Vec<String> {
-        let mut seen = HashSet::<String>::new();
+        let mut seen = HashSet::<&str>::new();
         let mut merged = Vec::new();
         for source in sources {
             for warning in *source {
-                if seen.insert(warning.clone()) {
+                if seen.insert(warning.as_str()) {
                     merged.push(warning.clone());
                 }
             }

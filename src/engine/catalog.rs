@@ -60,6 +60,10 @@ impl PolicyCertainty {
         (self.edit_success - Z_ALPHA * self.edit_success_variance.sqrt()).clamp(0.0, 1.0)
     }
 
+    pub fn model_probs(&self) -> [f64; 3] {
+        [self.stable_model_prob, self.transitional_model_prob, self.noisy_model_prob]
+    }
+
     pub fn trust_for_semantic_rewrite(&self) -> f64 {
         crate::engine::fuzzy_inference::fuzzy_trust_semantic_rewrite(self)
     }

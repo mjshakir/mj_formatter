@@ -352,40 +352,37 @@ impl ClangParseHelperProcess {
             .flush()
             .map_err(|err| format!("failed flushing helper stdin: {err}"))?;
 
-        let child_id = self.child.id();
         let timeout = Self::HELPER_TIMEOUT;
-        let (cancel_tx, cancel_rx) = crossbeam::bounded::<()>(1);
-        let watchdog = thread::Builder::new()
-            .name("clang-helper-watchdog".to_string())
-            .spawn(move || {
-                if cancel_rx.recv_timeout(timeout).is_err() {
-                    unsafe {
-                        libc::kill(child_id as i32, libc::SIGKILL);
-                    }
+        let stdout = &mut self.stdout;
+        let child = &mut self.child;
+        let (tx, rx) = crossbeam::bounded(1);
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                let result =
+                    ClangParseService::read_payload::<ClangParseHelperResponse, _>(stdout);
+                let _ = tx.send(result);
+            });
+
+            match rx.recv_timeout(timeout) {
+                Ok(Ok(Some(response))) => response.result,
+                Ok(Ok(None)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err("clang parse helper disconnected".to_string())
                 }
-            })
-            .ok();
-
-        let result =
-            ClangParseService::read_payload::<ClangParseHelperResponse, _>(&mut self.stdout);
-        let _ = cancel_tx.send(());
-        if let Some(handle) = watchdog {
-            let _ = handle.join();
-        }
-
-        match result {
-            Ok(Some(response)) => response.result,
-            Ok(None) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                Err("clang parse helper disconnected".to_string())
+                Ok(Err(err)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(format!("clang parse helper failed: {err}"))
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err("clang parse helper timed out".to_string())
+                }
             }
-            Err(err) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                Err(format!("clang parse helper timed out or failed: {err}"))
-            }
-        }
+        })
     }
 }
 

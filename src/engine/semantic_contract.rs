@@ -71,6 +71,34 @@ impl SemanticInvariantClause {
     }
 }
 
+pub const ALL_CLAUSES: &[SemanticInvariantClause] = &[
+    SemanticInvariantClause::ParserAvailability,
+    SemanticInvariantClause::ParseQuality,
+    SemanticInvariantClause::SymbolIdentity,
+    SemanticInvariantClause::ScopeIntegrity,
+    SemanticInvariantClause::UsageRoleConsistency,
+    SemanticInvariantClause::MacroRegionSafety,
+    SemanticInvariantClause::TouchContract,
+    SemanticInvariantClause::DeclarationReferenceIntegrity,
+    SemanticInvariantClause::EditSafety,
+];
+
+impl SemanticInvariantClause {
+    pub fn bit(self) -> u16 {
+        match self {
+            Self::ParserAvailability            => 1 << 0,
+            Self::ParseQuality                  => 1 << 1,
+            Self::SymbolIdentity                => 1 << 2,
+            Self::ScopeIntegrity                => 1 << 3,
+            Self::UsageRoleConsistency          => 1 << 4,
+            Self::MacroRegionSafety             => 1 << 5,
+            Self::TouchContract                 => 1 << 6,
+            Self::DeclarationReferenceIntegrity => 1 << 7,
+            Self::EditSafety                    => 1 << 8,
+        }
+    }
+}
+
 impl Serialize for SemanticInvariantClause {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

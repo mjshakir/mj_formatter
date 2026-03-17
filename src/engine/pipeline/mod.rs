@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+use arc_swap::ArcSwap;
 use tree_sitter::StreamingIterator;
 use tracing::{debug, warn};
 
@@ -62,7 +63,7 @@ use crate::text_scan;
 use tree_sitter::Tree;
 use crate::engine::filter_store::CertaintyFilterStore;
 use crate::engine::context_tracker::{
-    BlockContextKind, FileContextKind, PolicyContextTracker, PolicyOutcomeRecord,
+    BlockContextKind, FileContextKind, PolicyContextTracker,
 };
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::ts_traversal;
@@ -81,7 +82,7 @@ pub struct PolicyPipeline {
     conflict_detection_enabled: bool,
     conflict_touch_threshold: usize,
     certainty_filter_store: CertaintyFilterStore,
-    context_tracker: std::sync::Mutex<PolicyContextTracker>,
+    context_tracker: ArcSwap<PolicyContextTracker>,
     query_cache: TsQueryCache,
 }
 
@@ -112,10 +113,9 @@ pub(super) struct PolicyPipelineRunState<'a> {
     cached_certainty: Option<PolicyCertainty>,
     content_hash: u64,
     clang_structural_edits_since_parse: usize,
-    file_context_kind: FileContextKind,
     context_modifiers: [f32; 24],
     block_context_modifiers: [[f32; 24]; 6],
-    pending_context_outcomes: Vec<PolicyOutcomeRecord>,
+    rollback_count: usize,
 }
 
 impl<'a> PolicyPipelineRunState<'a> {
@@ -255,15 +255,13 @@ impl PolicyPipeline {
             conflict_detection_enabled,
             conflict_touch_threshold,
             certainty_filter_store,
-            context_tracker: std::sync::Mutex::new(PolicyContextTracker::new()),
+            context_tracker: ArcSwap::new(Arc::new(PolicyContextTracker::new())),
             query_cache,
         }
     }
 
     pub fn set_context_tracker(&self, tracker: PolicyContextTracker) {
-        if let Ok(mut guard) = self.context_tracker.lock() {
-            *guard = tracker;
-        }
+        self.context_tracker.store(Arc::new(tracker));
     }
 
     fn context_modifier_for_policy(&self, state: &PolicyPipelineRunState<'_>, policy_name: &str, block_kind: Option<BlockContextKind>) -> f64 {
@@ -281,9 +279,11 @@ impl PolicyPipeline {
         }
     }
 
+
+
     pub fn save_context_tracker(&self, path: &Path) -> anyhow::Result<()> {
-        let guard = self.context_tracker.lock().map_err(|e| anyhow!("lock: {}", e))?;
-        guard.save_to_path(path)
+        let tracker = self.context_tracker.load();
+        (**tracker).save_to_path(path)
     }
 
     pub fn save_certainty_state(&self, path: &Path) -> anyhow::Result<()> {
@@ -292,6 +292,14 @@ impl PolicyPipeline {
 
     pub fn record_edit_outcome(&self, path: &Path, outcome: f64) {
         self.certainty_filter_store.record_edit_outcome(&path.to_string_lossy(), outcome);
+    }
+
+    pub fn adaptive_rules(&self) -> std::sync::MutexGuard<'_, crate::engine::adaptive_rules::AdaptiveRuleBases> {
+        self.certainty_filter_store.adaptive_rules()
+    }
+
+    pub fn update_adaptive_rules(&self, record: &crate::engine::fuzzy_inference::AdaptiveFiringRecord, outcome: f64) {
+        self.certainty_filter_store.update_adaptive_rules(record, outcome);
     }
 
     pub fn correlate_paired_certainty(&self, path: &Path, estimates: [f64; crate::engine::certainty_filter::NUM_DIMS]) {
@@ -348,8 +356,7 @@ impl PolicyPipeline {
             self.run_policy_stage(&mut state, policy.as_ref())?;
         }
 
-        self.flush_context_outcomes(&state);
-        PolicyTelemetry::record_batch(state.telemetry_samples);
+        PolicyTelemetry::record_batch(&state.telemetry_samples);
         let finalized = state.convergence_controller.finalize(
             state.all_edits,
             state.all_violations,
@@ -375,6 +382,7 @@ impl PolicyPipeline {
             accuracy_gate: None,
             metrics: FormatPassMetrics::default(),
             policy_certainty: state.cached_certainty,
+            rollback_count: state.rollback_count,
         })
     }
 
@@ -431,19 +439,9 @@ impl PolicyPipeline {
             cached_certainty: None,
             content_hash: crc32fast::hash(text.as_bytes()) as u64,
             clang_structural_edits_since_parse: 0,
-            file_context_kind: FileContextKind::from_path(path),
             context_modifiers: self.batch_context_modifiers(path),
             block_context_modifiers: self.batch_block_context_modifiers(),
-            pending_context_outcomes: Vec::new(),
-        }
-    }
-
-    fn flush_context_outcomes(&self, state: &PolicyPipelineRunState<'_>) {
-        if state.pending_context_outcomes.is_empty() {
-            return;
-        }
-        if let Ok(mut guard) = self.context_tracker.lock() {
-            guard.batch_observe_outcomes(state.file_context_kind, &state.pending_context_outcomes);
+            rollback_count: 0,
         }
     }
 
@@ -488,26 +486,19 @@ impl PolicyPipeline {
 
     fn batch_context_modifiers(&self, path: &Path) -> [f32; 24] {
         let file_kind = FileContextKind::from_path(path);
-        match self.context_tracker.lock() {
-            Ok(guard) => guard.batch_file_modifiers(file_kind),
-            Err(_) => [1.0f32; 24],
-        }
+        self.context_tracker.load().batch_file_modifiers(file_kind)
     }
 
     fn batch_block_context_modifiers(&self) -> [[f32; 24]; 6] {
-        match self.context_tracker.lock() {
-            Ok(guard) => {
-                let mut result = [[1.0f32; 24]; 6];
-                result[0] = guard.batch_block_modifiers(BlockContextKind::Namespace);
-                result[1] = guard.batch_block_modifiers(BlockContextKind::Type);
-                result[2] = guard.batch_block_modifiers(BlockContextKind::Function);
-                result[3] = guard.batch_block_modifiers(BlockContextKind::Preprocessor);
-                result[4] = guard.batch_block_modifiers(BlockContextKind::Global);
-                result[5] = guard.batch_block_modifiers(BlockContextKind::Template);
-                result
-            }
-            Err(_) => [[1.0f32; 24]; 6],
-        }
+        let guard = self.context_tracker.load();
+        let mut result = [[1.0f32; 24]; 6];
+        result[0] = guard.batch_block_modifiers(BlockContextKind::Namespace);
+        result[1] = guard.batch_block_modifiers(BlockContextKind::Type);
+        result[2] = guard.batch_block_modifiers(BlockContextKind::Function);
+        result[3] = guard.batch_block_modifiers(BlockContextKind::Preprocessor);
+        result[4] = guard.batch_block_modifiers(BlockContextKind::Global);
+        result[5] = guard.batch_block_modifiers(BlockContextKind::Template);
+        result
     }
 
     fn record_initial_fidelity_warnings(&self, state: &mut PolicyPipelineRunState<'_>) {
@@ -576,34 +567,17 @@ impl PolicyPipeline {
             return Ok(());
         }
         let coordinated = self.coordinate_policy_stage(state, policy_name, executed);
-        let policy_idx = crate::engine::context_tracker::policy_index(policy_name);
         if is_whitespace_safe && coordinated.text_changed {
-            let block_kind = Self::dominant_block_kind_for_edits(state, &coordinated.result.edits);
             self.commit_policy_stage(state, CommitPolicyInput {
                 policy_name, policy_started, coordinated, is_semantic_rewrite,
             });
-            if let Some(idx) = policy_idx {
-                state.pending_context_outcomes.push(PolicyOutcomeRecord {
-                    policy_index: idx,
-                    block_kind,
-                    success: true,
-                });
-            }
             return Ok(());
         }
         match self.checkpoint_policy_stage(state, &coordinated, policy_name) {
             PolicyCheckpointResult::Accept { validated_tree } => {
-                let block_kind = Self::dominant_block_kind_for_edits(state, &coordinated.result.edits);
                 self.commit_policy_stage(state, CommitPolicyInput {
                     policy_name, policy_started, coordinated, is_semantic_rewrite,
                 });
-                if let Some(idx) = policy_idx {
-                    state.pending_context_outcomes.push(PolicyOutcomeRecord {
-                        policy_index: idx,
-                        block_kind,
-                        success: true,
-                    });
-                }
                 if let Some(tree) = validated_tree {
                     state.tree_for_text = Some(tree);
                 }
@@ -614,7 +588,6 @@ impl PolicyPipeline {
                 validated_tree,
                 warning,
             } => {
-                let block_kind = Self::dominant_block_kind_for_edits(state, &recovered_edits);
                 state.all_warnings.push(warning);
                 let edit_count = recovered_edits.len();
                 state.policy_traces.push(PolicyExecutionTrace {
@@ -639,13 +612,6 @@ impl PolicyPipeline {
                 ));
                 state.current = Arc::from(recovered_text.as_str());
                 state.all_edits.extend(recovered_edits);
-                if let Some(idx) = policy_idx {
-                    state.pending_context_outcomes.push(PolicyOutcomeRecord {
-                        policy_index: idx,
-                        block_kind,
-                        success: true,
-                    });
-                }
                 if let Some(tree) = validated_tree {
                     state.tree_for_text = Some(tree);
                 }
@@ -655,19 +621,12 @@ impl PolicyPipeline {
             }
             PolicyCheckpointResult::Rollback { reason } => {
                 state.all_warnings.push(reason);
-                if let Some(idx) = policy_idx {
-                    state.pending_context_outcomes.push(PolicyOutcomeRecord {
-                        policy_index: idx,
-                        block_kind: BlockContextKind::Global,
-                        success: false,
-                    });
-                }
-                state.telemetry_samples.push(PolicyExecutionSample::success(
+                state.telemetry_samples.push(PolicyExecutionSample::failed(
                     policy_name,
                     policy_started.elapsed(),
-                    0,
-                    0,
+                    false,
                 ));
+                state.rollback_count += 1;
             }
         }
         Ok(())
@@ -706,7 +665,7 @@ impl PolicyPipeline {
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(state.telemetry_samples.clone());
+                    PolicyTelemetry::record_batch(&state.telemetry_samples);
                     warn!(policy = policy_name, error = %err, "tree-sitter parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
@@ -731,7 +690,7 @@ impl PolicyPipeline {
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(state.telemetry_samples.clone());
+                    PolicyTelemetry::record_batch(&state.telemetry_samples);
                     warn!(policy = policy_name, error = %err, "clang parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
@@ -748,7 +707,7 @@ impl PolicyPipeline {
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(state.telemetry_samples.clone());
+                    PolicyTelemetry::record_batch(&state.telemetry_samples);
                     warn!(policy = policy_name, error = %err, "tree-sitter parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
@@ -766,7 +725,7 @@ impl PolicyPipeline {
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(state.telemetry_samples.clone());
+                    PolicyTelemetry::record_batch(&state.telemetry_samples);
                     warn!(policy = policy_name, error = %err, "clang parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
@@ -781,8 +740,7 @@ impl PolicyPipeline {
         }
         if state.semantic_for_text.is_none() {
             let semantic = SemanticFileContext::from_parses_with_cache(
-                &state.current,
-                state.path,
+                &state.current, state.path,
                 state.tree_for_text.as_ref(),
                 state.clang_for_text.as_deref(),
                 Some(&self.query_cache),
@@ -887,7 +845,7 @@ impl PolicyPipeline {
                 policy_started.elapsed(),
                 true,
             ));
-            PolicyTelemetry::record_batch(state.telemetry_samples.clone());
+            PolicyTelemetry::record_batch(&state.telemetry_samples);
             warn!(policy = policy_name, reason = %fatal, "policy produced fatal warning");
             return Err(anyhow!("{policy_name}: {fatal}"));
         }
@@ -1131,12 +1089,12 @@ impl PolicyPipeline {
             candidate_confidence,
             &executed.policy_certainty,
         );
-        let all_candidates = proposed_candidates.clone();
         let guardian_assessment = ProposerController::assess(
             proposed_candidates.as_slice(), &executed.capability, Some(&executed.policy_certainty));
         let disallowed_zone_lines = guardian_assessment.blocked_zone_lines;
         let guardian_hard_blocked_lines = guardian_assessment.blocked_hard_constraint_lines;
-        let mut guardian_suppressed_lines = disallowed_zone_lines.clone();
+        let mut guardian_suppressed_lines = BTreeSet::new();
+        guardian_suppressed_lines.extend(disallowed_zone_lines.iter().copied());
         guardian_suppressed_lines.extend(guardian_hard_blocked_lines.iter().copied());
         let mut candidates = guardian_assessment.allowed;
         if !guardian_suppressed_lines.is_empty() {
@@ -1179,7 +1137,7 @@ impl PolicyPipeline {
             &executed.policy_certainty,
             state.options.retry_scope_stage,
         );
-        let mut hard_blocked_lines = guardian_hard_blocked_lines.clone();
+        let mut hard_blocked_lines = guardian_hard_blocked_lines;
         hard_blocked_lines.extend(solve_result.hard_blocked_lines.iter().copied());
         if !solve_result.hard_blocked_lines.is_empty() {
             executed.result.warnings.push(format!(
@@ -1267,21 +1225,19 @@ impl PolicyPipeline {
             ));
         }
         let kept_lines = Self::edit_lines(executed.result.edits.as_slice());
+        let convergence_total = solve_result.accepted.len();
         let accepted_candidates = solve_result
             .accepted
-            .iter()
+            .into_iter()
             .filter(|candidate| kept_lines.contains(&candidate.line))
-            .cloned()
             .collect::<Vec<_>>();
-        let convergence_dropped = solve_result
-            .accepted
-            .len()
+        let convergence_dropped = convergence_total
             .saturating_sub(accepted_candidates.len());
         executed.dropped_line_count = executed
             .dropped_line_count
             .saturating_add(convergence_dropped);
         let candidate_trace = Self::build_policy_candidate_trace(
-            all_candidates.as_slice(),
+            proposed_candidates.as_slice(),
             &executed.policy_certainty,
             state.options.retry_scope_stage,
             &disallowed_zone_lines,
@@ -2489,12 +2445,12 @@ impl PolicyPipeline {
             semantic,
             coverage,
             richness,
-            semantic_variance: result.semantic_variance(),
-            structural_variance: result.structural_variance(),
-            coverage_variance: result.coverage_variance(),
-            richness_variance: result.richness_variance(),
+            semantic_variance: result.within_semantic_variance(),
+            structural_variance: result.within_structural_variance(),
+            coverage_variance: result.within_coverage_variance(),
+            richness_variance: result.within_richness_variance(),
             edit_success: result.edit_success(),
-            edit_success_variance: result.edit_success_variance(),
+            edit_success_variance: result.within_edit_success_variance(),
             stable_model_prob: result.model_probs[0],
             transitional_model_prob: result.model_probs[1],
             noisy_model_prob: result.model_probs[2],
@@ -2552,9 +2508,9 @@ impl PolicyPipeline {
                     impact_radius: candidate.impact_radius,
                     symbol_footprint_count: candidate.symbol_footprint.len(),
                     range_footprint_count: candidate.range_footprint.len(),
-                    hard_constraints_touched: candidate
-                        .hard_constraints_touched
+                    hard_constraints_touched: crate::engine::semantic_contract::ALL_CLAUSES
                         .iter()
+                        .filter(|&&clause| (candidate.hard_constraints_touched & clause.bit()) != 0)
                         .copied()
                         .collect(),
                     zone: candidate.zone,
@@ -3301,9 +3257,9 @@ mod tests {
             confidence: 0.86,
             risk_tier: CandidateRiskTier::High,
             impact_radius: 3,
-            symbol_footprint: vec![11],
-            range_footprint: vec![(40, 44)],
-            hard_constraints_touched: BTreeSet::from([SemanticInvariantClause::EditSafety]),
+            symbol_footprint: vec![11u64].into(),
+            range_footprint: vec![(40usize, 44usize)].into(),
+            hard_constraints_touched: SemanticInvariantClause::EditSafety.bit(),
             zone: PolicyZone::Code,
             after_fingerprint: 1,
             style_gain: 1.0,
@@ -3314,9 +3270,9 @@ mod tests {
             confidence: 0.84,
             risk_tier: CandidateRiskTier::Low,
             impact_radius: 1,
-            symbol_footprint: vec![11],
-            range_footprint: vec![(42, 42)],
-            hard_constraints_touched: BTreeSet::new(),
+            symbol_footprint: vec![11u64].into(),
+            range_footprint: vec![(42usize, 42usize)].into(),
+            hard_constraints_touched: 0,
             zone: PolicyZone::Code,
             after_fingerprint: 2,
             style_gain: 1.2,

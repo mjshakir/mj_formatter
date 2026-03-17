@@ -71,6 +71,10 @@ mod tests {
 pub struct ConfigLoader;
 
 impl ConfigLoader {
+    fn parse_processes_arg(s: &str) -> usize {
+        if s.eq_ignore_ascii_case("max") { 0 } else { s.parse().unwrap_or(1) }
+    }
+
     pub fn load(&self, args: &CliArgs) -> Result<AppConfig> {
         let config_path = self.resolve_config_path(args)?;
         let config_root = config_path
@@ -141,8 +145,31 @@ impl ConfigLoader {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let jobs = args.jobs.or(raw.formatter.jobs).unwrap_or(0);
-        let processes = args.processes.or(raw.formatter.processes).unwrap_or(1);
+        let processes = args
+            .processes
+            .as_deref()
+            .map(Self::parse_processes_arg)
+            .or(raw.formatter.processes)
+            .unwrap_or(1);
+        let jobs = args.jobs
+            .or_else(|| args.threads_per_process.map(|tpp| {
+                let p = if processes == 0 {
+                    std::thread::available_parallelism().map(usize::from).unwrap_or(1)
+                } else {
+                    processes
+                };
+                tpp * p
+            }))
+            .or_else(|| raw.formatter.jobs.filter(|&j| j != 0))
+            .unwrap_or_else(|| {
+                // I/O-aware default: actual I/O blocking fraction ~60%.
+                // Optimal threads/core ≈ 1/(1-0.60) ≈ 2.5, use 4 for headroom.
+                // Total = cores * 4. Distributes as 4 threads/process when p=cores,
+                // and gives 16 threads for single-process mode on a 4-core machine.
+                // jobs=0 in config means "auto" — use this formula instead of available_parallelism.
+                let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
+                cores.saturating_mul(4)
+            });
         let check = args.check || raw.formatter.check.unwrap_or(false);
         let verbose = args.verbose;
 

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::fuzzy_inference::{FuzzyVariable, TrapezoidalMF};
+use crate::engine::fuzzy_inference::{FuzzyVariable, GaussianMF};
 
 const MIN_FILES_FOR_POPULATION: usize = 3;
 const MIN_SPREAD: f64 = 0.10;
@@ -132,18 +132,17 @@ impl PopulationContext {
 fn derive_adaptive_variable(stats: &DimStats) -> FuzzyVariable {
     let spread = stats.p90 - stats.p10;
     if spread < MIN_SPREAD && stats.p90 < 0.30 {
-        let low_c = stats.p10.max(0.01);
         let low_d = stats.p25.max(MIN_P25);
-        let med_a = low_c;
         let med_b = low_d;
         let med_c = stats.p75.max(low_d + 0.02);
-        let med_d = stats.p90.max(med_c + 0.02);
-        let high_a = med_c;
-        let high_b = med_d;
+        let mid_center = (med_b + med_c) / 2.0;
+        let sigma_low = mid_center.max(0.05) / 2.15;
+        let sigma_med = (med_c - med_b).max(0.04) / 2.15;
+        let sigma_high = (1.0 - mid_center).max(0.05) / 2.15;
         return FuzzyVariable {
-            low: TrapezoidalMF::new(0.0, 0.0, low_c, low_d),
-            medium: TrapezoidalMF::new(med_a, med_b, med_c, med_d),
-            high: TrapezoidalMF::new(high_a, high_b, 1.0, 1.0),
+            low: GaussianMF::new(0.0, sigma_low.max(0.03)),
+            medium: GaussianMF::new(mid_center, sigma_med.max(0.03)),
+            high: GaussianMF::new(1.0, sigma_high.max(0.03)),
         };
     }
 
@@ -152,10 +151,15 @@ fn derive_adaptive_variable(stats: &DimStats) -> FuzzyVariable {
     let p75 = stats.p75.max(p25 + 0.05);
     let p90 = stats.p90.max(p75 + 0.01);
 
+    let mid_center = (p25 + p75) / 2.0;
+    let sigma_low = mid_center.max(0.05) / 2.15;
+    let sigma_med = ((p90 - p10) / 2.0).max(0.05) / 2.15;
+    let sigma_high = (1.0 - mid_center).max(0.05) / 2.15;
+
     FuzzyVariable {
-        low: TrapezoidalMF::new(0.0, 0.0, p10, p25),
-        medium: TrapezoidalMF::new(p10, p25, p75, p90),
-        high: TrapezoidalMF::new(p75, p90, 1.0, 1.0),
+        low: GaussianMF::new(0.0, sigma_low.max(0.03)),
+        medium: GaussianMF::new(mid_center, sigma_med.max(0.03)),
+        high: GaussianMF::new(1.0, sigma_high.max(0.03)),
     }
 }
 

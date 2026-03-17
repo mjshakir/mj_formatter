@@ -1,41 +1,34 @@
+use crate::engine::adaptive_rules::{AdaptiveRuleBases, AdaptiveTSRuleBase};
 use crate::engine::catalog::PolicyCertainty;
 use crate::parser::manager::SemanticCompdbContextKind;
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct TrapezoidalMF {
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
+pub struct GaussianMF {
+    pub center: f64,
+    pub sigma: f64,
 }
 
-impl TrapezoidalMF {
-    pub const fn new(a: f64, b: f64, c: f64, d: f64) -> Self {
-        Self { a, b, c, d }
+impl GaussianMF {
+    pub const fn new(center: f64, sigma: f64) -> Self {
+        Self { center, sigma }
     }
 
+    #[inline(always)]
     pub fn membership(&self, x: f64) -> f64 {
-        if x < self.a || x > self.d {
-            0.0
-        } else if x >= self.b && x <= self.c {
-            1.0
-        } else if x < self.b {
-            (x - self.a) / (self.b - self.a)
-        } else {
-            (self.d - x) / (self.d - self.c)
-        }
+        let z = (x - self.center) / self.sigma;
+        (-0.5 * z * z).exp()
     }
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FuzzyVariable {
-    pub low: TrapezoidalMF,
-    pub medium: TrapezoidalMF,
-    pub high: TrapezoidalMF,
+    pub low: GaussianMF,
+    pub medium: GaussianMF,
+    pub high: GaussianMF,
 }
 
 impl FuzzyVariable {
-    pub const fn new(low: TrapezoidalMF, medium: TrapezoidalMF, high: TrapezoidalMF) -> Self {
+    pub const fn new(low: GaussianMF, medium: GaussianMF, high: GaussianMF) -> Self {
         Self { low, medium, high }
     }
 
@@ -50,17 +43,17 @@ impl FuzzyVariable {
 
 pub const fn ci_variable() -> FuzzyVariable {
     FuzzyVariable::new(
-        TrapezoidalMF::new(0.0, 0.0, 0.15, 0.45),
-        TrapezoidalMF::new(0.15, 0.35, 0.65, 0.85),
-        TrapezoidalMF::new(0.55, 0.75, 1.0, 1.0),
+        GaussianMF::new(0.0, 0.22),
+        GaussianMF::new(0.50, 0.18),
+        GaussianMF::new(1.0, 0.22),
     )
 }
 
 pub const fn stability_variable() -> FuzzyVariable {
     FuzzyVariable::new(
-        TrapezoidalMF::new(0.0, 0.0, 0.20, 0.40),
-        TrapezoidalMF::new(0.30, 0.45, 0.55, 0.70),
-        TrapezoidalMF::new(0.60, 0.75, 1.0, 1.0),
+        GaussianMF::new(0.0, 0.19),
+        GaussianMF::new(0.50, 0.15),
+        GaussianMF::new(1.0, 0.19),
     )
 }
 
@@ -77,13 +70,11 @@ struct TsRule1 {
 
 fn evaluate_ts2(m0: &[f64; 3], m1: &[f64; 3], rules: &[TsRule2]) -> f64 {
     if rules.len() == 9 {
-        let m0f = [m0[0] as f32, m0[1] as f32, m0[2] as f32];
-        let m1f = [m1[0] as f32, m1[1] as f32, m1[2] as f32];
-        let mut cons = [0.0f32; 9];
+        let mut cons = [0.0f64; 9];
         for r in rules {
-            cons[r.term0 * 3 + r.term1] = r.consequent as f32;
+            cons[r.term0 * 3 + r.term1] = r.consequent;
         }
-        return evaluate_ts2_f32(&m0f, &m1f, &cons) as f64;
+        return evaluate_ts2_f64(m0, m1, &cons);
     }
     let mut num = 0.0;
     let mut den = 0.0;
@@ -95,22 +86,31 @@ fn evaluate_ts2(m0: &[f64; 3], m1: &[f64; 3], rules: &[TsRule2]) -> f64 {
     if den < 1e-12 { 0.0 } else { (num / den).clamp(0.0, 1.0) }
 }
 
-fn evaluate_ts1(m: &[f64; 3], rules: &[TsRule1]) -> f64 {
-    let mf = [m[0] as f32, m[1] as f32, m[2] as f32];
-    if rules.len() == 3
-        && rules[0].term == 0
-        && rules[1].term == 1
-        && rules[2].term == 2
-    {
-        let cons = [
-            rules[0].consequent as f32,
-            rules[1].consequent as f32,
-            rules[2].consequent as f32,
-        ];
-        return evaluate_ts1_f32(&mf, &cons) as f64;
+pub struct AdaptiveFiringRecord {
+    pub severity_firing: [f64; 9],
+    pub acceptance_firing: [f64; 9],
+    pub outcome_firing: [f64; 9],
+    pub severity_value: f64,
+    pub acceptance_value: f64,
+}
+
+fn compute_firing_weights(m0: &[f64; 3], m1: &[f64; 3]) -> [f64; 9] {
+    let mut firing = [0.0f64; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            firing[i * 3 + j] = m0[i] * m1[j];
+        }
     }
-    let mut num = 0.0;
-    let mut den = 0.0;
+    firing
+}
+
+fn evaluate_adaptive(firing: &[f64; 9], base: &AdaptiveTSRuleBase) -> f64 {
+    base.evaluate(firing)
+}
+
+fn evaluate_ts1(m: &[f64; 3], rules: &[TsRule1]) -> f64 {
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
     for r in rules {
         let firing = m[r.term];
         num += firing * r.consequent;
@@ -120,28 +120,25 @@ fn evaluate_ts1(m: &[f64; 3], rules: &[TsRule1]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// NEON f32 SIMD: 4-wide membership + T-S evaluation
+// NEON f64 SIMD: 2-wide T-S evaluation (float64x2_t)
 // ---------------------------------------------------------------------------
 
-#[repr(C, align(16))]
-struct Aligned16<const N: usize>([f32; N]);
-
 #[inline(always)]
-fn evaluate_ts2_f32(m0: &[f32; 3], m1: &[f32; 3], consequents: &[f32; 9]) -> f32 {
+fn evaluate_ts2_f64(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64; 9]) -> f64 {
     #[cfg(target_arch = "aarch64")]
     {
-        unsafe { evaluate_ts2_f32_neon(m0, m1, consequents) }
+        unsafe { evaluate_ts2_f64_neon(m0, m1, consequents) }
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
-        evaluate_ts2_f32_scalar(m0, m1, consequents)
+        evaluate_ts2_f64_scalar(m0, m1, consequents)
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
-fn evaluate_ts2_f32_scalar(m0: &[f32; 3], m1: &[f32; 3], consequents: &[f32; 9]) -> f32 {
-    let mut num = 0.0f32;
-    let mut den = 0.0f32;
+#[cfg(any(not(target_arch = "aarch64"), test))]
+fn evaluate_ts2_f64_scalar(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64; 9]) -> f64 {
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
     for i0 in 0..3 {
         for i1 in 0..3 {
             let f = m0[i0] * m1[i1];
@@ -149,68 +146,37 @@ fn evaluate_ts2_f32_scalar(m0: &[f32; 3], m1: &[f32; 3], consequents: &[f32; 9])
             den += f;
         }
     }
-    if den < 1e-7 { 0.0 } else { (num / den).clamp(0.0, 1.0) }
+    if den < 1e-15 { 0.0 } else { (num / den).clamp(0.0, 1.0) }
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn evaluate_ts2_f32_neon(m0: &[f32; 3], m1: &[f32; 3], consequents: &[f32; 9]) -> f32 {
+unsafe fn evaluate_ts2_f64_neon(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64; 9]) -> f64 {
     use core::arch::aarch64::*;
-    // Build 9 firing strengths: firing[i0*3+i1] = m0[i0] * m1[i1]
-    // Layout: [m0[0]*m1[0], m0[0]*m1[1], m0[0]*m1[2],
-    //          m0[1]*m1[0], m0[1]*m1[1], m0[1]*m1[2],
-    //          m0[2]*m1[0], m0[2]*m1[1], m0[2]*m1[2]]
-    let m1v = vld1q_f32([m1[0], m1[1], m1[2], 0.0].as_ptr());
-    // Row 0: m0[0] * m1[*]
-    let r0 = vmulq_f32(vdupq_n_f32(m0[0]), m1v);
-    // Row 1: m0[1] * m1[*]
-    let r1 = vmulq_f32(vdupq_n_f32(m0[1]), m1v);
-    // Row 2: m0[2] * m1[*]
-    let r2 = vmulq_f32(vdupq_n_f32(m0[2]), m1v);
+    let m1_01 = vld1q_f64([m1[0], m1[1]].as_ptr());
 
-    // Process in two 4-wide chunks + 1 scalar
-    // Chunk 1: rules 0-3 (firing[0..4], consequents[0..4])
-    let f03 = Aligned16([
-        vgetq_lane_f32(r0, 0), vgetq_lane_f32(r0, 1),
-        vgetq_lane_f32(r0, 2), vgetq_lane_f32(r1, 0),
-    ]);
-    let fv0 = vld1q_f32(f03.0.as_ptr());
-    let cv0 = vld1q_f32(consequents.as_ptr());
-    let num0 = vmulq_f32(fv0, cv0);
+    let mut sum_01 = vdupq_n_f64(0.0);
+    let mut sum_2 = 0.0f64;
+    let mut wsum_01 = vdupq_n_f64(0.0);
+    let mut wsum_2 = 0.0f64;
 
-    // Chunk 2: rules 4-7
-    let f47 = Aligned16([
-        vgetq_lane_f32(r1, 1), vgetq_lane_f32(r1, 2),
-        vgetq_lane_f32(r2, 0), vgetq_lane_f32(r2, 1),
-    ]);
-    let fv1 = vld1q_f32(f47.0.as_ptr());
-    let cv1 = vld1q_f32(consequents.as_ptr().add(4));
-    let num1 = vmulq_f32(fv1, cv1);
-
-    // Rule 8 (scalar)
-    let f8 = vgetq_lane_f32(r2, 2);
-    let c8 = consequents[8];
-
-    // Sum numerator: horizontal add of num0 + num1 + f8*c8
-    let sum01 = vaddq_f32(num0, num1);
-    let num_total = vaddvq_f32(sum01) + f8 * c8;
-
-    // Sum denominator: sum all firings
-    let den_sum01 = vaddq_f32(fv0, fv1);
-    let den_total = vaddvq_f32(den_sum01) + f8;
-
-    if den_total < 1e-7 { 0.0 } else { (num_total / den_total).clamp(0.0, 1.0) }
-}
-
-#[inline(always)]
-fn evaluate_ts1_f32(m: &[f32; 3], consequents: &[f32; 3]) -> f32 {
-    let mut num = 0.0f32;
-    let mut den = 0.0f32;
     for i in 0..3 {
-        num += m[i] * consequents[i];
-        den += m[i];
+        let mi = vdupq_n_f64(m0[i]);
+        let w01 = vmulq_f64(mi, m1_01);
+        let w2 = m0[i] * m1[2];
+
+        let c01 = vld1q_f64(consequents[i * 3..].as_ptr());
+        let c2 = consequents[i * 3 + 2];
+
+        sum_01 = vfmaq_f64(sum_01, w01, c01);
+        sum_2 += w2 * c2;
+        wsum_01 = vaddq_f64(wsum_01, w01);
+        wsum_2 += w2;
     }
-    if den < 1e-7 { 1.0 } else { num / den }
+
+    let num = vaddvq_f64(sum_01) + sum_2;
+    let den = vaddvq_f64(wsum_01) + wsum_2;
+    if den < 1e-15 { 0.0 } else { (num / den).clamp(0.0, 1.0) }
 }
 
 /// Piecewise-linear interpolation: Kalman-direct replacement for T-S1 evaluations.
@@ -225,11 +191,33 @@ fn kalman_interp(x: f64, c0: f64, c1: f64, c2: f64) -> f64 {
     }
 }
 
-/// Variance-damped Kalman estimate: reduces trust when variance is high.
+const VARIANCE_DAMP_BASE: [f64; 5] = [0.60, 0.50, 0.30, 0.30, 0.65];
+
 #[inline(always)]
-fn variance_damp(estimate: f64, variance: f64) -> f64 {
+fn compute_regime_mod(model_probs: &[f64; 3]) -> f64 {
+    let base = model_probs[0] * 0.7 + model_probs[1] * 1.0 + model_probs[2] * 1.3;
+
+    let entropy: f64 = model_probs.iter()
+        .filter(|&&p| p > 1e-10)
+        .map(|&p| -p * p.ln())
+        .sum();
+    let max_entropy = (3.0f64).ln();
+    let normalized_entropy = entropy / max_entropy;
+
+    (base * (1.0 + 0.2 * normalized_entropy)).clamp(0.5, 1.8)
+}
+
+#[inline(always)]
+fn adaptive_variance_damp(
+    estimate: f64,
+    variance: f64,
+    dim: usize,
+    model_probs: [f64; 3],
+) -> f64 {
+    let regime_mod = compute_regime_mod(&model_probs);
+    let coeff = (VARIANCE_DAMP_BASE[dim] * regime_mod).clamp(0.15, 0.85);
     let sigma = variance.sqrt().min(1.0);
-    (estimate * (1.0 - 0.5 * sigma)).clamp(0.0, 1.0)
+    (estimate * (1.0 - coeff * sigma)).clamp(0.0, 1.0)
 }
 
 pub fn fuzzy_observation_converged(
@@ -259,22 +247,25 @@ fn modulation(certainty: &PolicyCertainty) -> f64 {
 /// Kalman-direct trust: weighted average of semantic + coverage estimates,
 /// damped by variance and modulated by stability/edit_success/richness.
 pub fn fuzzy_trust_semantic_rewrite(certainty: &PolicyCertainty) -> f64 {
-    let sem = variance_damp(certainty.semantic, certainty.semantic_variance);
-    let cov = variance_damp(certainty.coverage, certainty.coverage_variance);
+    let mp = certainty.model_probs();
+    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp);
+    let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp);
     let base = (sem * cov).sqrt().clamp(0.0, 1.0);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
 
 /// Kalman-direct trust: structural estimate damped by variance.
 pub fn fuzzy_trust_structural(certainty: &PolicyCertainty) -> f64 {
-    let base = variance_damp(certainty.structural, certainty.structural_variance);
+    let mp = certainty.model_probs();
+    let base = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
 
 /// Kalman-direct trust: average of semantic + structural, damped by variance.
 pub fn fuzzy_trust_general(certainty: &PolicyCertainty) -> f64 {
-    let sem = variance_damp(certainty.semantic, certainty.semantic_variance);
-    let str_val = variance_damp(certainty.structural, certainty.structural_variance);
+    let mp = certainty.model_probs();
+    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp);
+    let str_val = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp);
     let base = (sem * 0.5 + str_val * 0.5).clamp(0.0, 1.0);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
@@ -426,8 +417,9 @@ pub fn fuzzy_semantic_fidelity(
         None => return context_base * 0.5,
     };
 
-    let sem = variance_damp(certainty.semantic, certainty.semantic_variance);
-    let cov = variance_damp(certainty.coverage, certainty.coverage_variance);
+    let mp = certainty.model_probs();
+    let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp);
+    let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp);
     let kalman_fidelity = (sem * cov).sqrt().clamp(0.0, 1.0);
 
     (context_base * 0.4 + kalman_fidelity * 0.6).clamp(0.0, 1.0)
@@ -584,13 +576,22 @@ const FAILURE_SEVERITY_BASE: [TsRule2; 9] = [
     TsRule2 { term0: 2, term1: 2, consequent: 1.00 },
 ];
 
-fn failure_severity(obs: &PostEditObservation) -> f64 {
+fn failure_severity_adaptive(
+    obs: &PostEditObservation,
+    adaptive: Option<&AdaptiveTSRuleBase>,
+) -> (f64, [f64; 9]) {
     let (parse_damage, semantic_damage) = failure_severity_inputs(obs);
-    const DAMAGE_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.15, 0.35), TrapezoidalMF::new(0.20, 0.35, 0.55, 0.70), TrapezoidalMF::new(0.55, 0.65, 1.0, 1.0));
+    const DAMAGE_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.20), GaussianMF::new(0.45, 0.18), GaussianMF::new(1.0, 0.24));
     let damage_var = DAMAGE_VAR;
     let parse_m = damage_var.memberships(parse_damage);
     let semantic_m = damage_var.memberships(semantic_damage);
-    evaluate_ts2(&parse_m, &semantic_m, &FAILURE_SEVERITY_BASE).clamp(0.0, 1.0)
+    let firing = compute_firing_weights(&parse_m, &semantic_m);
+    let value = if let Some(base) = adaptive {
+        evaluate_adaptive(&firing, base)
+    } else {
+        evaluate_ts2(&parse_m, &semantic_m, &FAILURE_SEVERITY_BASE)
+    };
+    (value.clamp(0.0, 1.0), firing)
 }
 
 fn fuzzy_context_reliability(context_kind: SemanticCompdbContextKind) -> f64 {
@@ -628,18 +629,22 @@ const CONTEXT_MOD: [TsRule1; 3] = [
     TsRule1 { term: 2, consequent: 1.10 },
 ];
 
-pub fn fuzzy_edit_acceptance(
+pub fn fuzzy_edit_acceptance_adaptive(
     observation: &PostEditObservation,
     certainty: Option<&PolicyCertainty>,
     context_kind: SemanticCompdbContextKind,
-) -> f64 {
+    adaptive: Option<&AdaptiveRuleBases>,
+) -> (f64, Option<AdaptiveFiringRecord>) {
     if observation.tree_error_regressed && observation.exact_compdb && observation.has_semantic_rewrite_edits {
         let trust = certainty.map(|c| c.trust_for_general()).unwrap_or(DEFAULT_TRUST);
-        return (0.001 + 0.009 * trust).clamp(0.001, 0.01);
+        return ((0.001 + 0.009 * trust).clamp(0.001, 0.01), None);
     }
-    let severity = failure_severity(observation);
-    if severity < 1e-9 {
-        return 1.0;
+    let (severity, sev_firing) = failure_severity_adaptive(
+        observation,
+        adaptive.map(|a| &a.failure_severity),
+    );
+    if severity < 0.05 {
+        return (1.0, None);
     }
 
     let trust = if let Some(c) = certainty {
@@ -652,12 +657,12 @@ pub fn fuzzy_edit_acceptance(
         0.5
     };
 
-    const SEVERITY_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.25, 0.45), TrapezoidalMF::new(0.25, 0.45, 0.65, 0.85), TrapezoidalMF::new(0.65, 0.80, 1.0, 1.0));
+    const SEVERITY_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.24), GaussianMF::new(0.55, 0.21), GaussianMF::new(1.0, 0.21));
     let severity_var = SEVERITY_VAR;
     let trust_var = ci_variable();
-    const LOCALITY_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.30, 0.50), TrapezoidalMF::new(0.30, 0.50, 0.70, 0.90), TrapezoidalMF::new(0.70, 0.90, 1.0, 1.0));
+    const LOCALITY_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.28), GaussianMF::new(0.60, 0.19), GaussianMF::new(1.0, 0.19));
     let locality_var = LOCALITY_VAR;
-    const CONTEXT_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.20, 0.40), TrapezoidalMF::new(0.20, 0.50, 0.70, 0.90), TrapezoidalMF::new(0.70, 0.90, 1.0, 1.0));
+    const CONTEXT_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.28), GaussianMF::new(0.60, 0.19), GaussianMF::new(1.0, 0.19));
     let context_var = CONTEXT_VAR;
 
     let sev_m = severity_var.memberships(severity);
@@ -665,11 +670,25 @@ pub fn fuzzy_edit_acceptance(
     let loc_m = locality_var.memberships(observation.culprit_locality_ratio);
     let ctx_m = context_var.memberships(fuzzy_context_reliability(context_kind));
 
-    let base = evaluate_ts2(&sev_m, &trust_m, &EDIT_ACCEPTANCE_BASE);
+    let acc_firing = compute_firing_weights(&sev_m, &trust_m);
+    let base = if let Some(a) = adaptive {
+        evaluate_adaptive(&acc_firing, &a.edit_acceptance)
+    } else {
+        evaluate_ts2(&sev_m, &trust_m, &EDIT_ACCEPTANCE_BASE)
+    };
     let loc_mod = evaluate_ts1(&loc_m, &LOCALITY_MOD);
     let ctx_mod = evaluate_ts1(&ctx_m, &CONTEXT_MOD);
 
-    (base * loc_mod * ctx_mod).clamp(0.0, 1.0)
+    let combined_mod = (loc_mod * ctx_mod).sqrt();
+    let value = (base * combined_mod).clamp(0.0, 1.0);
+    let record = adaptive.map(|_| AdaptiveFiringRecord {
+        severity_firing: sev_firing,
+        acceptance_firing: acc_firing,
+        outcome_firing: [0.0; 9],
+        severity_value: severity,
+        acceptance_value: value,
+    });
+    (value, record)
 }
 
 // Rule base: stability (term0) × uncertainty (term1) → normalized [0,1] consequent
@@ -698,7 +717,7 @@ pub fn fuzzy_impact_radius_cap(
     reliability_lower: f64,
 ) -> Option<usize> {
     let stab_var = stability_variable();
-    const UNCERT_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.15, 0.35), TrapezoidalMF::new(0.20, 0.35, 0.50, 0.65), TrapezoidalMF::new(0.40, 0.55, 1.0, 1.0));
+    const UNCERT_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.19), GaussianMF::new(0.425, 0.17), GaussianMF::new(1.0, 0.25));
     let uncert_var = UNCERT_VAR;
     let rel_var = ci_variable();
 
@@ -710,7 +729,7 @@ pub fn fuzzy_impact_radius_cap(
     let rel_mod = evaluate_ts1(&rel_m, &RELIABILITY_MOD);
     let raw = (base * rel_mod).clamp(0.0, 1.0);
 
-    const CAP_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.20, 0.35), TrapezoidalMF::new(0.25, 0.40, 0.55, 0.65), TrapezoidalMF::new(0.50, 0.65, 1.0, 1.0));
+    const CAP_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.21), GaussianMF::new(0.475, 0.18), GaussianMF::new(1.0, 0.23));
     let cap_var = CAP_VAR;
     let cap_m = cap_var.memberships(raw);
     let cap_rules: [TsRule1; 3] = [
@@ -719,7 +738,7 @@ pub fn fuzzy_impact_radius_cap(
         TsRule1 { term: 2, consequent: 1.0 },
     ];
     let cap_score = evaluate_ts1(&cap_m, &cap_rules).clamp(0.0, 1.0);
-    const CAP_VAR2: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.15, 0.30), TrapezoidalMF::new(0.20, 0.30, 0.50, 0.65), TrapezoidalMF::new(0.55, 0.65, 1.0, 1.0));
+    const CAP_VAR2: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.18), GaussianMF::new(0.40, 0.16), GaussianMF::new(1.0, 0.26));
     let cap_var2 = CAP_VAR2;
     let cap_m2 = cap_var2.memberships(cap_score);
     let cap_rules2 = [
@@ -752,7 +771,7 @@ pub fn fuzzy_identity_migration_tolerance(
         .unwrap_or(0.5);
     let edit_volume = (edit_count.min(200) as f64 / 200.0).clamp(0.0, 1.0);
 
-    const VOL_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.10, 0.30), TrapezoidalMF::new(0.15, 0.35, 0.55, 0.75), TrapezoidalMF::new(0.50, 0.70, 1.0, 1.0));
+    const VOL_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.20), GaussianMF::new(0.45, 0.18), GaussianMF::new(1.0, 0.24));
     let vol_var = VOL_VAR;
     let trust_var = ci_variable();
 
@@ -785,7 +804,7 @@ pub fn fuzzy_identity_migration_tolerance(
 }
 
 pub fn fuzzy_trust_deficit_penalty(trust: f64) -> f64 {
-    let low_trust = TrapezoidalMF::new(0.0, 0.0, 0.08, 0.20);
+    let low_trust = GaussianMF::new(0.0, 0.07);
     low_trust.membership(trust) * 0.075
 }
 
@@ -835,9 +854,9 @@ pub fn fuzzy_raw_semantic_observation(
     }
 
     let usr_var = ci_variable();
-    const ERROR_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.10, 0.30), TrapezoidalMF::new(0.15, 0.35, 0.55, 0.75), TrapezoidalMF::new(0.50, 0.70, 1.0, 1.0));
+    const ERROR_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.20), GaussianMF::new(0.45, 0.18), GaussianMF::new(1.0, 0.24));
     let error_var = ERROR_VAR;
-    const PARSER_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.25, 0.45), TrapezoidalMF::new(0.30, 0.50, 0.75, 0.90), TrapezoidalMF::new(0.70, 0.85, 1.0, 1.0));
+    const PARSER_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.27), GaussianMF::new(0.625, 0.17), GaussianMF::new(1.0, 0.17));
     let parser_var = PARSER_VAR;
 
     let error_normalized = (error_count.min(8) as f64 / 8.0).clamp(0.0, 1.0);
@@ -927,26 +946,25 @@ const PASS_MOD: [TsRule1; 3] = [
     TsRule1 { term: 2, consequent: 1.00 },   // first pass → full outcome
 ];
 
-pub fn fuzzy_edit_outcome(
+pub fn fuzzy_edit_outcome_adaptive(
     pass_number: usize,
     accepted: bool,
     acceptance_score: f64,
     trust: f64,
-) -> f64 {
+    adaptive: Option<&AdaptiveTSRuleBase>,
+) -> (f64, [f64; 9]) {
     if !accepted {
-        // Rejected: map acceptance_score to [0.05, 0.25]
         let rejection_severity = (1.0 - acceptance_score.clamp(0.0, 1.0)) * 0.20 + 0.05;
-        return rejection_severity.clamp(0.05, 0.25);
+        return (rejection_severity.clamp(0.05, 0.25), [0.0; 9]);
     }
 
     let quality_var = ci_variable();
     let trust_var = ci_variable();
-    const PASS_VAR: FuzzyVariable = FuzzyVariable::new(TrapezoidalMF::new(0.0, 0.0, 0.30, 0.50), TrapezoidalMF::new(0.30, 0.50, 0.70, 0.90), TrapezoidalMF::new(0.60, 0.80, 1.0, 1.0));
+    const PASS_VAR: FuzzyVariable = FuzzyVariable::new(GaussianMF::new(0.0, 0.26), GaussianMF::new(0.60, 0.18), GaussianMF::new(1.0, 0.18));
     let pass_var = PASS_VAR;
 
     let quality_m = quality_var.memberships(acceptance_score.clamp(0.0, 1.0));
     let trust_m = trust_var.memberships(trust.clamp(0.0, 1.0));
-    // Map pass_number: 0 → 1.0 (best), 1 → 0.5, 2+ → 0.0
     let pass_signal = match pass_number {
         0 => 1.0,
         1 => 0.5,
@@ -954,10 +972,15 @@ pub fn fuzzy_edit_outcome(
     };
     let pass_m = pass_var.memberships(pass_signal);
 
-    let base = evaluate_ts2(&quality_m, &trust_m, &EDIT_OUTCOME_BASE);
+    let firing = compute_firing_weights(&quality_m, &trust_m);
+    let base = if let Some(ab) = adaptive {
+        evaluate_adaptive(&firing, ab)
+    } else {
+        evaluate_ts2(&quality_m, &trust_m, &EDIT_OUTCOME_BASE)
+    };
     let pass_mod = evaluate_ts1(&pass_m, &PASS_MOD);
 
-    (base * pass_mod).clamp(0.05, 0.95)
+    ((base * pass_mod).clamp(0.05, 0.95), firing)
 }
 
 // --- Part 5: Constraint penalty ---
@@ -1120,55 +1143,55 @@ mod tests {
     ];
 
     #[test]
-    fn trapezoid_full_membership_between_b_and_c() {
-        let mf = TrapezoidalMF::new(0.0, 0.2, 0.8, 1.0);
+    fn gaussian_peaks_at_center() {
+        let mf = GaussianMF::new(0.5, 0.20);
         assert!((mf.membership(0.5) - 1.0).abs() < 1e-9);
-        assert!((mf.membership(0.2) - 1.0).abs() < 1e-9);
-        assert!((mf.membership(0.8) - 1.0).abs() < 1e-9);
+        assert!(mf.membership(0.3) > 0.3);
+        assert!(mf.membership(0.7) > 0.3);
     }
 
     #[test]
-    fn trapezoid_zero_outside_bounds() {
-        let mf = TrapezoidalMF::new(0.2, 0.4, 0.6, 0.8);
-        assert!((mf.membership(0.0)).abs() < 1e-9);
-        assert!((mf.membership(0.1)).abs() < 1e-9);
-        assert!((mf.membership(0.9)).abs() < 1e-9);
-        assert!((mf.membership(1.0)).abs() < 1e-9);
+    fn gaussian_near_zero_far_from_center() {
+        let mf = GaussianMF::new(0.5, 0.15);
+        assert!(mf.membership(0.0) < 0.01);
+        assert!(mf.membership(1.0) < 0.01);
     }
 
     #[test]
-    fn trapezoid_linear_ramp() {
-        let mf = TrapezoidalMF::new(0.0, 1.0, 1.0, 2.0);
-        assert!((mf.membership(0.5) - 0.5).abs() < 1e-9);
-        assert!((mf.membership(0.25) - 0.25).abs() < 1e-9);
-        assert!((mf.membership(1.5) - 0.5).abs() < 1e-9);
+    fn gaussian_symmetric_decay() {
+        let mf = GaussianMF::new(0.5, 0.20);
+        let left = mf.membership(0.3);
+        let right = mf.membership(0.7);
+        assert!((left - right).abs() < 1e-9);
+        assert!(left < 1.0);
+        assert!(left > 0.0);
     }
 
     #[test]
     fn ci_variable_low_coverage() {
         let var = ci_variable();
         let m = var.memberships(0.05);
-        assert!(m[0] > 0.9, "low membership should be high at 0.05");
-        assert!(m[1] < 0.01, "medium should be ~0 at 0.05");
-        assert!(m[2] < 0.01, "high should be ~0 at 0.05");
+        assert!(m[0] > 0.9, "low membership should be high at 0.05, got {}", m[0]);
+        assert!(m[1] < 0.10, "medium should be small at 0.05, got {}", m[1]);
+        assert!(m[2] < 0.01, "high should be ~0 at 0.05, got {}", m[2]);
     }
 
     #[test]
     fn ci_variable_high_coverage() {
         let var = ci_variable();
         let m = var.memberships(0.90);
-        assert!(m[0] < 0.01);
-        assert!(m[1] < 0.01);
-        assert!(m[2] > 0.5);
+        assert!(m[0] < 0.01, "low should be ~0 at 0.90, got {}", m[0]);
+        assert!(m[1] < 0.15, "medium should be small at 0.90, got {}", m[1]);
+        assert!(m[2] > 0.5, "high should be dominant at 0.90, got {}", m[2]);
     }
 
     #[test]
     fn ci_variable_medium_coverage() {
         let var = ci_variable();
         let m = var.memberships(0.50);
-        assert!(m[0] < 0.01);
-        assert!(m[1] > 0.9);
-        assert!(m[2] < 0.01);
+        assert!(m[0] < 0.10, "low should be small at 0.50, got {}", m[0]);
+        assert!(m[1] > 0.9, "medium should be high at 0.50, got {}", m[1]);
+        assert!(m[2] < 0.10, "high should be small at 0.50, got {}", m[2]);
     }
 
     #[test]
@@ -1331,7 +1354,7 @@ mod tests {
     #[test]
     fn fuzzy_edit_acceptance_no_failures_returns_one() {
         let obs = default_observation();
-        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!((score - 1.0).abs() < 1e-9, "no failures should yield 1.0, got {score}");
     }
 
@@ -1343,7 +1366,7 @@ mod tests {
             has_semantic_rewrite_edits: true,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!(score < 0.02, "tree error + exact compdb + semantic rewrite should yield near-zero, got {score}");
     }
 
@@ -1355,7 +1378,7 @@ mod tests {
             has_semantic_rewrite_edits: false,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!(score > 0.0, "tree error + exact compdb without semantic rewrites should not hard-block, got {score}");
     }
 
@@ -1382,7 +1405,7 @@ mod tests {
             culprit_locality_ratio: 0.95,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance(&obs, Some(&c), SemanticCompdbContextKind::Exact);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, Some(&c), SemanticCompdbContextKind::Exact, None).0;
         assert!(score < 1.0, "high identity severity + clang_diag should reduce score, got {score}");
     }
 
@@ -1408,7 +1431,7 @@ mod tests {
             culprit_locality_ratio: 0.8,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance(&obs, Some(&c), SemanticCompdbContextKind::Exact);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, Some(&c), SemanticCompdbContextKind::Exact, None).0;
         assert!(score < 0.80, "high severity should reduce score even with high trust, got {score}");
     }
 
@@ -1420,7 +1443,7 @@ mod tests {
             culprit_locality_ratio: 0.7,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance(&obs, Some(&c), SemanticCompdbContextKind::PairedSourceHeuristic);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, Some(&c), SemanticCompdbContextKind::PairedSourceHeuristic, None).0;
         assert!(score >= 0.50, "moderate scope severity with medium trust should accept, got {score}");
     }
 
@@ -1433,7 +1456,7 @@ mod tests {
             culprit_locality_ratio: 0.5,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact);
+        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!(score >= 0.50, "whitespace-safe edits should accept, got {score}");
     }
 
@@ -1450,8 +1473,8 @@ mod tests {
             culprit_locality_ratio: 0.1,
             ..default_observation()
         };
-        let high_score = fuzzy_edit_acceptance(&high_loc, Some(&c), SemanticCompdbContextKind::Exact);
-        let low_score = fuzzy_edit_acceptance(&low_loc, Some(&c), SemanticCompdbContextKind::Exact);
+        let high_score = fuzzy_edit_acceptance_adaptive(&high_loc, Some(&c), SemanticCompdbContextKind::Exact, None).0;
+        let low_score = fuzzy_edit_acceptance_adaptive(&low_loc, Some(&c), SemanticCompdbContextKind::Exact, None).0;
         assert!(high_score > low_score,
             "higher locality should yield higher acceptance ({high_score} vs {low_score})");
     }
@@ -1510,7 +1533,7 @@ mod tests {
     #[test]
     fn trust_deficit_penalty_high_trust_no_penalty() {
         let p = fuzzy_trust_deficit_penalty(0.50);
-        assert!(p.abs() < 1e-9, "high trust should give zero penalty, got {p}");
+        assert!(p < 1e-6, "high trust should give negligible penalty, got {p}");
     }
 
     #[test]
@@ -1518,7 +1541,8 @@ mod tests {
         let p_at_015 = fuzzy_trust_deficit_penalty(0.15);
         let p_at_020 = fuzzy_trust_deficit_penalty(0.20);
         assert!(p_at_015 > 0.0, "trust=0.15 should still have some penalty, got {p_at_015}");
-        assert!(p_at_020.abs() < 1e-9, "trust=0.20 should have zero penalty, got {p_at_020}");
+        assert!(p_at_020 < 0.005, "trust=0.20 should have near-zero penalty, got {p_at_020}");
+        assert!(p_at_015 > p_at_020, "penalty should decrease as trust increases");
     }
 
     // --- Part 2 tests: raw semantic observation ---
@@ -1569,27 +1593,27 @@ mod tests {
 
     #[test]
     fn edit_outcome_accepted_pass0_high_trust() {
-        let outcome = fuzzy_edit_outcome(0, true, 0.95, 0.9);
+        let outcome = fuzzy_edit_outcome_adaptive(0, true, 0.95, 0.9, None).0;
         assert!(outcome > 0.85, "accepted pass 0 high trust → high outcome, got {outcome}");
     }
 
     #[test]
     fn edit_outcome_accepted_pass2_lower() {
-        let pass0 = fuzzy_edit_outcome(0, true, 0.8, 0.7);
-        let pass2 = fuzzy_edit_outcome(2, true, 0.8, 0.7);
+        let pass0 = fuzzy_edit_outcome_adaptive(0, true, 0.8, 0.7, None).0;
+        let pass2 = fuzzy_edit_outcome_adaptive(2, true, 0.8, 0.7, None).0;
         assert!(pass0 > pass2, "pass 0 outcome > pass 2: {pass0} vs {pass2}");
     }
 
     #[test]
     fn edit_outcome_rejected_low_range() {
-        let outcome = fuzzy_edit_outcome(0, false, 0.3, 0.5);
+        let outcome = fuzzy_edit_outcome_adaptive(0, false, 0.3, 0.5, None).0;
         assert!(outcome >= 0.05 && outcome <= 0.25, "rejected → [0.05,0.25], got {outcome}");
     }
 
     #[test]
     fn edit_outcome_marginal_acceptance_lower_than_clean() {
-        let clean = fuzzy_edit_outcome(0, true, 0.95, 0.8);
-        let marginal = fuzzy_edit_outcome(0, true, 0.51, 0.8);
+        let clean = fuzzy_edit_outcome_adaptive(0, true, 0.95, 0.8, None).0;
+        let marginal = fuzzy_edit_outcome_adaptive(0, true, 0.51, 0.8, None).0;
         assert!(clean > marginal, "clean acceptance > marginal: {clean} vs {marginal}");
     }
 
@@ -1622,7 +1646,7 @@ mod tests {
             clang_diagnostics_increased: false,
             ..default_observation()
         };
-        let severity = failure_severity(&obs);
+        let severity = failure_severity_adaptive(&obs, None).0;
         assert!(severity >= 0.30 && severity <= 0.65,
             "tree error without semantic edits should have moderate severity ~0.4-0.6, got {severity}");
     }
@@ -1634,9 +1658,9 @@ mod tests {
             has_semantic_rewrite_edits: true,
             ..default_observation()
         };
-        let severity = failure_severity(&obs);
-        assert!(severity >= 0.85,
-            "tree error with semantic edits should have high severity >=0.85, got {severity}");
+        let severity = failure_severity_adaptive(&obs, None).0;
+        assert!(severity >= 0.70,
+            "tree error with semantic edits should have high severity >=0.70, got {severity}");
     }
 
     #[test]
@@ -1647,9 +1671,9 @@ mod tests {
             clang_diagnostics_increased: true,
             ..default_observation()
         };
-        let severity = failure_severity(&obs);
-        assert!(severity >= 0.85,
-            "tree error with clang diagnostics should have high severity >=0.85, got {severity}");
+        let severity = failure_severity_adaptive(&obs, None).0;
+        assert!(severity >= 0.80,
+            "tree error with clang diagnostics should have high severity >=0.80, got {severity}");
     }
 
     #[test]
@@ -1706,5 +1730,143 @@ mod tests {
     fn parser_cross_validation_zero_staleness_no_change() {
         let agreement = fuzzy_parser_cross_validation(10, 10, 0.0, 0, 0);
         assert!(agreement > 0.9, "zero staleness + matching counts should yield near-1.0 agreement, got {agreement}");
+    }
+
+    fn eval_severity_raw(parse_damage: f64, semantic_damage: f64) -> f64 {
+        let var = FuzzyVariable::new(GaussianMF::new(0.0, 0.20), GaussianMF::new(0.45, 0.18), GaussianMF::new(1.0, 0.24));
+        let m0 = var.memberships(parse_damage);
+        let m1 = var.memberships(semantic_damage);
+        evaluate_ts2(&m0, &m1, &FAILURE_SEVERITY_BASE)
+    }
+
+    fn eval_acceptance_raw(severity: f64, trust: f64) -> f64 {
+        let sev_var = FuzzyVariable::new(GaussianMF::new(0.0, 0.24), GaussianMF::new(0.55, 0.21), GaussianMF::new(1.0, 0.21));
+        let trust_var = ci_variable();
+        let m0 = sev_var.memberships(severity);
+        let m1 = trust_var.memberships(trust);
+        evaluate_ts2(&m0, &m1, &EDIT_ACCEPTANCE_BASE)
+    }
+
+    fn eval_outcome_raw(quality: f64, trust: f64) -> f64 {
+        let var = ci_variable();
+        let m0 = var.memberships(quality);
+        let m1 = var.memberships(trust);
+        evaluate_ts2(&m0, &m1, &EDIT_OUTCOME_BASE)
+    }
+
+    #[test]
+    fn severity_monotonic_in_parse_damage() {
+        for sem in [0.0, 0.3, 0.5, 0.7, 1.0] {
+            let mut prev = -0.01;
+            for pd in (0..=20).map(|i| i as f64 / 20.0) {
+                let sev = eval_severity_raw(pd, sem);
+                assert!(sev >= prev - 0.02,
+                    "severity not monotonic: parse_damage={pd}, semantic={sem}, sev={sev} < prev={prev}");
+                prev = sev;
+            }
+        }
+    }
+
+    #[test]
+    fn severity_monotonic_in_semantic_damage() {
+        for pd in [0.0, 0.3, 0.5, 0.7, 1.0] {
+            let mut prev = -0.01;
+            for sem in (0..=20).map(|i| i as f64 / 20.0) {
+                let sev = eval_severity_raw(pd, sem);
+                assert!(sev >= prev - 0.02,
+                    "severity not monotonic: parse_damage={pd}, semantic={sem}, sev={sev} < prev={prev}");
+                prev = sev;
+            }
+        }
+    }
+
+    #[test]
+    fn acceptance_decreases_with_severity() {
+        for trust in [0.2, 0.5, 0.8] {
+            let mut prev = 1.1;
+            for sev in (0..=20).map(|i| i as f64 / 20.0) {
+                let acc = eval_acceptance_raw(sev, trust);
+                assert!(acc <= prev + 0.02,
+                    "acceptance not decreasing: sev={sev}, trust={trust}, acc={acc} > prev={prev}");
+                prev = acc;
+            }
+        }
+    }
+
+    #[test]
+    fn acceptance_increases_with_trust() {
+        for sev in [0.2, 0.5, 0.8] {
+            let mut prev = -0.01;
+            for trust in (0..=20).map(|i| i as f64 / 20.0) {
+                let acc = eval_acceptance_raw(sev, trust);
+                assert!(acc >= prev - 0.02,
+                    "acceptance not increasing: sev={sev}, trust={trust}, acc={acc} < prev={prev}");
+                prev = acc;
+            }
+        }
+    }
+
+    #[test]
+    fn outcome_increases_with_quality() {
+        for trust in [0.2, 0.5, 0.8] {
+            let mut prev = -0.01;
+            for q in (0..=20).map(|i| i as f64 / 20.0) {
+                let out = eval_outcome_raw(q, trust);
+                assert!(out >= prev - 0.02,
+                    "outcome not increasing with quality: q={q}, trust={trust}, out={out} < prev={prev}");
+                prev = out;
+            }
+        }
+    }
+
+    #[test]
+    fn outcome_increases_with_trust() {
+        for q in [0.2, 0.5, 0.8] {
+            let mut prev = -0.01;
+            for trust in (0..=20).map(|i| i as f64 / 20.0) {
+                let out = eval_outcome_raw(q, trust);
+                assert!(out >= prev - 0.02,
+                    "outcome not increasing with trust: q={q}, trust={trust}, out={out} < prev={prev}");
+                prev = out;
+            }
+        }
+    }
+
+    #[test]
+    fn entropy_regime_mod_uniform_is_higher() {
+        let dominant = compute_regime_mod(&[0.90, 0.05, 0.05]);
+        let uniform = compute_regime_mod(&[0.34, 0.33, 0.33]);
+        assert!(uniform > dominant,
+            "uniform model probs should yield higher regime mod (more damping): uniform={uniform}, dominant={dominant}");
+    }
+
+    #[test]
+    fn entropy_regime_mod_stable_dominant_is_low() {
+        let stable = compute_regime_mod(&[0.95, 0.03, 0.02]);
+        assert!(stable < 0.85,
+            "stable-dominant should have low regime mod, got {stable}");
+    }
+
+    #[test]
+    fn geometric_mean_modulation_less_harsh() {
+        let loc_mod: f64 = 0.50;
+        let ctx_mod: f64 = 0.70;
+        let multiplicative = loc_mod * ctx_mod;
+        let geometric = (loc_mod * ctx_mod).sqrt();
+        assert!(geometric > multiplicative,
+            "geometric mean should be gentler: geo={geometric}, mult={multiplicative}");
+        assert!(geometric < 1.0, "geometric mean should still penalize");
+    }
+
+    #[test]
+    fn neon_f64_matches_scalar() {
+        let m0 = [0.3, 0.5, 0.2];
+        let m1 = [0.1, 0.6, 0.3];
+        let cons = [0.1, 0.3, 0.5, 0.2, 0.4, 0.6, 0.3, 0.5, 0.8];
+
+        let scalar = evaluate_ts2_f64_scalar(&m0, &m1, &cons);
+        let neon_result = evaluate_ts2_f64(&m0, &m1, &cons);
+        assert!((scalar - neon_result).abs() < 1e-12,
+            "f64 NEON should match scalar: scalar={scalar}, neon={neon_result}");
     }
 }

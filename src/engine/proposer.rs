@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::engine::convergence::ConvergencePolicySignal;
 use crate::engine::catalog::{PolicyCapabilities, PolicyCertainty};
 use crate::engine::edit_candidate::PolicyEditCandidate;
 use crate::engine::zone::PolicyZone;
-use crate::engine::semantic_contract::{SemanticContract, SemanticInvariantClause};
+use crate::engine::semantic_contract::{SemanticContract, SemanticInvariantClause, ALL_CLAUSES};
 use crate::model::policy_result::PolicyResult;
 use crate::model::project_query::ProjectContextQuery;
 use crate::parser::file_context::SemanticScopeKind;
@@ -38,24 +39,24 @@ impl ProposerController {
         confidence: f64,
         certainty: &PolicyCertainty,
     ) -> Vec<PolicyEditCandidate> {
-        let mut candidates = Vec::<PolicyEditCandidate>::new();
+        let mut candidates = Vec::<PolicyEditCandidate>::with_capacity(result.edits.len());
         for edit in &result.edits {
             if edit.line == 0 || edit.before == edit.after {
                 continue;
             }
             let zone = Self::zone_for_line(edit.line, project_query, comment_lines);
-            let mut hard_constraints_touched = BTreeSet::<SemanticInvariantClause>::new();
+            let mut hard_constraints_touched: u16 = 0;
             if project_query.is_macro_region(edit.line, 1) {
-                hard_constraints_touched.insert(SemanticInvariantClause::MacroRegionSafety);
+                hard_constraints_touched |= SemanticInvariantClause::MacroRegionSafety.bit();
             }
             if !project_query.is_safe_edit(edit.line, 1) {
-                hard_constraints_touched.insert(SemanticInvariantClause::EditSafety);
+                hard_constraints_touched |= SemanticInvariantClause::EditSafety.bit();
             }
             if !project_query.is_available() {
-                hard_constraints_touched.insert(SemanticInvariantClause::ParserAvailability);
+                hard_constraints_touched |= SemanticInvariantClause::ParserAvailability.bit();
             }
             if !capability.allows_zone(zone) {
-                hard_constraints_touched.insert(SemanticInvariantClause::TouchContract);
+                hard_constraints_touched |= SemanticInvariantClause::TouchContract.bit();
             }
             let trust_deficit_penalty = if capability.semantic_rewrite {
                 let trust = capability.policy_trust(certainty);
@@ -94,7 +95,7 @@ impl ProposerController {
                 .unwrap_or_else(|| vec![(edit.line, edit.line)]);
             let trust_for_penalty = certainty.trust_for_general();
             let confidence_penalty = crate::engine::fuzzy_inference::fuzzy_constraint_penalty(
-                hard_constraints_touched.len(), trust_for_penalty,
+                hard_constraints_touched.count_ones() as usize, trust_for_penalty,
             );
             let mut resolved_confidence =
                 (confidence - confidence_penalty - trust_deficit_penalty).clamp(0.0, 1.0);
@@ -111,7 +112,7 @@ impl ProposerController {
                 (certainty.richness_lower_ci() * richness_multiplier).round().clamp(1.0, 3.0) as usize;
             impact_radius = impact_radius.max(richness_radius);
             if let Some(signal) = project_signal {
-                let consensus_weakness = crate::engine::fuzzy_inference::TrapezoidalMF::new(0.0, 0.0, 0.65, 0.85)
+                let consensus_weakness = crate::engine::fuzzy_inference::GaussianMF::new(0.0, 0.40)
                     .membership(signal.consensus_score);
                 let deficit = certainty.semantic_variance.sqrt().clamp(0.0, 0.5);
                 let trust = capability.policy_trust(certainty);
@@ -122,13 +123,13 @@ impl ProposerController {
                 resolved_confidence = (resolved_confidence - penalty).clamp(0.0, 1.0);
             }
             candidates.push(PolicyEditCandidate {
-                policy: policy_name.into(),
+                policy: Arc::from(policy_name),
                 line: edit.line,
                 confidence: resolved_confidence,
                 risk_tier: capability.risk_tier,
                 impact_radius,
-                symbol_footprint,
-                range_footprint,
+                symbol_footprint: symbol_footprint.into(),
+                range_footprint: range_footprint.into(),
                 hard_constraints_touched,
                 zone,
                 after_fingerprint: Self::text_fingerprint(edit.after.as_str()),
@@ -157,15 +158,17 @@ impl ProposerController {
                     continue;
                 }
             }
-            let has_hard_constraint = candidate.hard_constraints_touched.iter().any(|clause| {
-                let spec_hard = SemanticContract::invariant_spec(*clause)
-                    .map(|spec| spec.hard)
-                    .unwrap_or(true);
-                if !spec_hard {
-                    return false;
-                }
-                !crate::engine::fuzzy_inference::fuzzy_hard_constraint_override(certainty, *clause)
-            });
+            let has_hard_constraint = ALL_CLAUSES.iter()
+                .filter(|&&clause| (candidate.hard_constraints_touched & clause.bit()) != 0)
+                .any(|&clause| {
+                    let spec_hard = SemanticContract::invariant_spec(clause)
+                        .map(|spec| spec.hard)
+                        .unwrap_or(true);
+                    if !spec_hard {
+                        return false;
+                    }
+                    !crate::engine::fuzzy_inference::fuzzy_hard_constraint_override(certainty, clause)
+                });
             if has_hard_constraint {
                 blocked_hard_constraint_lines.insert(candidate.line);
                 continue;

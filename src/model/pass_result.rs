@@ -29,4 +29,5 @@ pub struct FormatPassResult {
     pub accuracy_gate: Option<AccuracyGateDecision>,
     pub metrics: FormatPassMetrics,
     pub policy_certainty: Option<PolicyCertainty>,
+    pub rollback_count: usize,
 }

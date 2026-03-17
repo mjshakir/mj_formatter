@@ -1,9 +1,8 @@
-use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::engine::zone::PolicyZone;
-use crate::engine::semantic_contract::SemanticInvariantClause;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum CandidateRiskTier {
@@ -62,15 +61,15 @@ impl<'de> Deserialize<'de> for CandidateRiskTier {
 
 #[derive(Clone, Debug)]
 pub struct PolicyEditCandidate {
-    pub policy: String,
+    pub policy: Arc<str>,
     pub line: usize,
     pub confidence: f64,
     pub style_gain: f64,
     pub risk_tier: CandidateRiskTier,
     pub impact_radius: usize,
-    pub symbol_footprint: Vec<u64>,
-    pub range_footprint: Vec<(usize, usize)>,
-    pub hard_constraints_touched: BTreeSet<SemanticInvariantClause>,
+    pub symbol_footprint: Arc<[u64]>,
+    pub range_footprint: Arc<[(usize, usize)]>,
+    pub hard_constraints_touched: u16,
     pub zone: PolicyZone,
     pub after_fingerprint: u64,
 }

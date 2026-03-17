@@ -175,13 +175,13 @@ impl PolicyTelemetry {
         state().clear();
     }
 
-    pub fn record_batch(samples: Vec<PolicyExecutionSample>) {
+    pub fn record_batch(samples: &[PolicyExecutionSample]) {
         if samples.is_empty() {
             return;
         }
         let map = state();
         for sample in samples {
-            let mut entry = map.entry(sample.policy).or_default();
+            let mut entry = map.entry(sample.policy.clone()).or_default();
             entry.runs = entry.runs.saturating_add(1);
             entry.total_elapsed_ns = entry
                 .total_elapsed_ns
@@ -200,7 +200,7 @@ impl PolicyTelemetry {
             if sample.blocked {
                 entry.blocked = entry.blocked.saturating_add(1);
             }
-            if let Some(confidence) = sample.confidence {
+            if let Some(confidence) = &sample.confidence {
                 entry.confidence_decisions = entry.confidence_decisions.saturating_add(1);
                 match confidence.outcome {
                     PolicyDecisionOutcome::Apply => {
@@ -368,7 +368,7 @@ mod tests {
         let policy_a = format!("policy_a_records_and_sorts_{suffix}");
         let policy_b = format!("policy_b_records_and_sorts_{suffix}");
         PolicyTelemetry::reset();
-        PolicyTelemetry::record_batch(vec![
+        PolicyTelemetry::record_batch(&vec![
             PolicyExecutionSample::success(policy_a.as_str(), Duration::from_millis(8), 3, 1),
             PolicyExecutionSample::success(policy_a.as_str(), Duration::from_millis(2), 1, 0)
                 .with_confidence(PolicyConfidenceSample::from_reason_codes(
