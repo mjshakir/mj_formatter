@@ -425,7 +425,6 @@ impl NamingConventionsPolicy {
         clang_parse: &ClangParseResult,
         plans: &[RenamePlan],
         semantic_query: &SemanticContextQuery<'_>,
-        _tree: Option<&tree_sitter::Tree>,
         warnings: &mut Vec<String>,
         strict_issues: &mut StrictIssues,
     ) -> Vec<Replacement> {
@@ -687,14 +686,12 @@ impl NamingConventionsPolicy {
         filtered
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_semantic_renames(
         &self,
         text: &str,
         clang_parse: &ClangParseResult,
         plans: &[RenamePlan],
         semantic_query: &SemanticContextQuery<'_>,
-        tree: Option<&tree_sitter::Tree>,
         warnings: &mut Vec<String>,
         strict_issues: &mut StrictIssues,
     ) -> (String, Vec<Edit>) {
@@ -703,7 +700,6 @@ impl NamingConventionsPolicy {
             clang_parse,
             plans,
             semantic_query,
-            tree,
             warnings,
             strict_issues,
         );
@@ -1419,7 +1415,6 @@ impl Policy for NamingConventionsPolicy {
                     parse,
                     &trust_filtered_plans,
                     &semantic_query,
-                    context.tree_sitter_tree,
                     &mut warnings,
                     &mut strict_issues,
                 )

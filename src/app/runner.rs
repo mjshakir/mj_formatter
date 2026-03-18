@@ -383,14 +383,25 @@ impl App {
                 info!("warm start available — limiting observation to 1 iteration");
             }
             for iteration in 0..obs_max {
-                let obs_results = Self::run_processing_pass(
-                    &obs_config,
-                    files.clone(),
-                    project_graph_runtime.clone(),
-                    false,
-                    false,
-                    prev_population.clone(),
-                )?;
+                let obs_results = if multi_process_enabled {
+                    Self::run_multiprocess_pass(
+                        &args,
+                        &obs_config,
+                        files.clone(),
+                        effective_processes,
+                        false,
+                        prev_population.clone(),
+                    )?
+                } else {
+                    Self::run_processing_pass(
+                        &obs_config,
+                        files.clone(),
+                        project_graph_runtime.clone(),
+                        false,
+                        false,
+                        prev_population.clone(),
+                    )?
+                };
                 let certainties: Vec<&crate::engine::catalog::PolicyCertainty> = obs_results
                     .iter()
                     .filter_map(|r| r.policy_certainty.as_ref())

@@ -447,12 +447,11 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-pub(crate) fn count_identifier_occurrences_excluding_non_code(
+pub(crate) fn count_identifier_occurrences_with_exclusions(
     text: &str,
     name: &str,
-    tree: &tree_sitter::Tree,
+    excluded: &[(usize, usize)],
 ) -> usize {
-    let excluded = collect_non_code_byte_ranges(tree);
     let name_bytes = name.as_bytes();
     let text_bytes = text.as_bytes();
     let len = name_bytes.len();
@@ -466,7 +465,7 @@ pub(crate) fn count_identifier_occurrences_excluding_non_code(
         if text_bytes[pos..pos + len] == *name_bytes {
             let before_ok = pos == 0 || !is_ident_byte(text_bytes[pos - 1]);
             let after_ok = pos + len >= text_bytes.len() || !is_ident_byte(text_bytes[pos + len]);
-            if before_ok && after_ok && !is_in_excluded_range(&excluded, pos) {
+            if before_ok && after_ok && !is_in_excluded_range(excluded, pos) {
                 count += 1;
             }
         }
@@ -474,7 +473,7 @@ pub(crate) fn count_identifier_occurrences_excluding_non_code(
     count
 }
 
-fn collect_non_code_byte_ranges(tree: &tree_sitter::Tree) -> Vec<(usize, usize)> {
+pub(crate) fn collect_non_code_byte_ranges(tree: &tree_sitter::Tree) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut cursor = tree.walk();
     collect_non_code_ranges_recursive(&mut cursor, &mut ranges);
@@ -517,32 +516,11 @@ fn is_in_excluded_range(ranges: &[(usize, usize)], pos: usize) -> bool {
         .is_ok()
 }
 
-pub(crate) fn count_identifier_occurrences(text: &str, name: &str) -> usize {
-    let name_bytes = name.as_bytes();
-    let text_bytes = text.as_bytes();
-    let len = name_bytes.len();
-    if len == 0 || text_bytes.len() < len {
-        return 0;
-    }
-    let mut count = 0usize;
-    let last = text_bytes.len() - len;
-    let first_byte = name_bytes[0];
-    for pos in memchr::memchr_iter(first_byte, &text_bytes[..=last]) {
-        if text_bytes[pos..pos + len] == *name_bytes {
-            let before_ok = pos == 0 || !is_ident_byte(text_bytes[pos - 1]);
-            let after_ok = pos + len >= text_bytes.len() || !is_ident_byte(text_bytes[pos + len]);
-            if before_ok && after_ok {
-                count += 1;
-            }
-        }
-    }
-    count
-}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_subslice, count_byte, count_identifier_occurrences, find_subslice_from,
+        contains_subslice, count_byte, find_subslice_from,
         line_starts, split_lines_as_slices, split_lines_keepends, subslice_match_indices,
         TEXT_SCAN,
     };
@@ -730,35 +708,4 @@ mod tests {
         assert!(!TEXT_SCAN.slices_equal(a.as_bytes(), b.as_bytes()));
     }
 
-    // -- count_identifier_occurrences tests --
-
-    #[test]
-    fn count_identifier_occurrences_basic() {
-        let text = "Initialization(value); other Initialization; last";
-        assert_eq!(count_identifier_occurrences(text, "Initialization"), 2);
-    }
-
-    #[test]
-    fn count_identifier_occurrences_boundary_check() {
-        let text = "myInitialization foo Initialization InitializationX";
-        assert_eq!(count_identifier_occurrences(text, "Initialization"), 1);
-    }
-
-    #[test]
-    fn count_identifier_occurrences_empty() {
-        assert_eq!(count_identifier_occurrences("hello", ""), 0);
-        assert_eq!(count_identifier_occurrences("", "foo"), 0);
-    }
-
-    #[test]
-    fn count_identifier_occurrences_at_boundaries() {
-        let text = "foo bar foo";
-        assert_eq!(count_identifier_occurrences(text, "foo"), 2);
-    }
-
-    #[test]
-    fn count_identifier_occurrences_underscore_boundary() {
-        let text = "my_foo foo_bar foo";
-        assert_eq!(count_identifier_occurrences(text, "foo"), 1);
-    }
 }

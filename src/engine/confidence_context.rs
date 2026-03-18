@@ -49,6 +49,7 @@ impl ConfidenceContext {
             }
 
             if let Some(ts) = ts_tree {
+                let excluded_ranges = crate::text_scan::collect_non_code_byte_ranges(ts);
                 let mut ref_counts: HashMap<&str, usize> = HashMap::new();
                 for reference in &semantic_context.references {
                     *ref_counts.entry(reference.stable_id.as_str()).or_insert(0) += 1;
@@ -61,8 +62,8 @@ impl ConfidenceContext {
                         continue;
                     }
                     checked += 1;
-                    let text_count = crate::text_scan::count_identifier_occurrences_excluding_non_code(
-                        text, &decl.name, ts,
+                    let text_count = crate::text_scan::count_identifier_occurrences_with_exclusions(
+                        text, &decl.name, &excluded_ranges,
                     );
                     if text_count <= semantic_count + 1 {
                         agreed += 1;
