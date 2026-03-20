@@ -451,7 +451,9 @@ impl App {
                     );
                 }
                 prev_population = Some(ctx.clone());
-                final_population = Some(ctx);
+                let mut final_ctx = ctx;
+                final_ctx.prior_observation_count = obs_median;
+                final_population = Some(final_ctx);
                 if converged {
                     break;
                 }
@@ -467,6 +469,11 @@ impl App {
             );
         }
 
+        let population_edit_success = population_context
+            .as_ref()
+            .filter(|ctx| ctx.file_count >= 3)
+            .map(|ctx| ctx.prior_estimates[4].clamp(0.0, 1.0))
+            .unwrap_or(0.5);
         let started = Instant::now();
         let mut results = if multi_process_enabled {
             Self::run_multiprocess_pass(&args, &config, files, effective_processes, false, population_context)?
@@ -491,6 +498,7 @@ impl App {
                 &parser_manager,
                 &mut results,
                 parallel_pool.as_ref(),
+                population_edit_success,
             );
             Self::apply_write_phase(&file_io, &mut results, parallel_pool.as_ref());
             BackupManifest::write(&config, results.as_slice()).with_context(|| {
@@ -554,7 +562,7 @@ impl App {
                 result.changed,
                 result.violations.len(),
                 result.error.is_some(),
-                result.warnings.len(),
+                result.warnings.iter().filter(|w| !w.starts_with("internal:")).count(),
             );
             total_edits += result.edits.len();
             if result.backup_path.is_some() {
@@ -566,6 +574,9 @@ impl App {
                     error!(path = %result.path.display(), error = %error, "file failed");
                 }
                 for warning in &result.warnings {
+                    if warning.starts_with("internal:") {
+                        continue;
+                    }
                     warn!(path = %result.path.display(), warning = %warning, "file warning");
                 }
                 for violation in &result.violations {

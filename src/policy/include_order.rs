@@ -401,9 +401,7 @@ impl Policy for IncludeOrderPolicy {
                 continue;
             }
 
-            items.sort_by(|left, right| {
-                left.header.to_lowercase().cmp(&right.header.to_lowercase())
-            });
+            items.sort_by_cached_key(|item| item.header.to_lowercase());
             if self.emit_group_comments {
                 if emitted_group {
                     ordered_block.push(String::new());

@@ -33,10 +33,11 @@ struct RenamePlan {
 
 impl RenamePlan {
     fn rename_confidence(&self) -> f64 {
-        let usr_backed = self.stable_id.is_some();
-        let has_refs = self.expected_occurrences > 0;
-        let all_safe = self.minimum_required_occurrences >= self.expected_occurrences;
-        match (usr_backed, has_refs, all_safe) {
+        match (
+            self.stable_id.is_some(),
+            self.expected_occurrences > 0,
+            self.minimum_required_occurrences >= self.expected_occurrences,
+        ) {
             (true, true, true) => 1.0,
             (true, true, false) => 0.8,
             (true, false, _) => 0.6,
@@ -50,8 +51,8 @@ struct Replacement {
     start: usize,
     end: usize,
     line: usize,
-    old_name: String,
-    new_name: String,
+    old_name: std::sync::Arc<str>,
+    new_name: std::sync::Arc<str>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -132,14 +133,18 @@ fn find_uppercase_positions_impl(bytes: &[u8]) -> Vec<usize> {
             let is_upper = vcleq_u8(shifted, range);
             let mask_lo = vgetq_lane_u64(vreinterpretq_u64_u8(is_upper), 0);
             let mask_hi = vgetq_lane_u64(vreinterpretq_u64_u8(is_upper), 1);
-            for bit in 0..8 {
-                if (mask_lo >> (bit * 8)) & 0xFF != 0 {
-                    positions.push(offset + bit);
+            if mask_lo != 0 {
+                for bit in 0..8 {
+                    if (mask_lo >> (bit * 8)) & 0xFF != 0 {
+                        positions.push(offset + bit);
+                    }
                 }
             }
-            for bit in 0..8 {
-                if (mask_hi >> (bit * 8)) & 0xFF != 0 {
-                    positions.push(offset + 8 + bit);
+            if mask_hi != 0 {
+                for bit in 0..8 {
+                    if (mask_hi >> (bit * 8)) & 0xFF != 0 {
+                        positions.push(offset + 8 + bit);
+                    }
                 }
             }
         }
@@ -531,6 +536,8 @@ impl NamingConventionsPolicy {
                             None
                         }
                     });
+            let plan_old: std::sync::Arc<str> = std::sync::Arc::from(plan.old_name.as_str());
+            let plan_new: std::sync::Arc<str> = std::sync::Arc::from(plan.new_name.as_str());
             let mut plan_replacements = Vec::<Replacement>::new();
             for offset in offsets {
                 let end = offset.saturating_add(plan.old_name.len());
@@ -577,8 +584,8 @@ impl NamingConventionsPolicy {
                     start: offset,
                     end,
                     line,
-                    old_name: plan.old_name.clone(),
-                    new_name: plan.new_name.clone(),
+                    old_name: std::sync::Arc::clone(&plan_old),
+                    new_name: std::sync::Arc::clone(&plan_new),
                 };
                 plan_replacements.push(replacement);
             }
@@ -717,13 +724,13 @@ impl NamingConventionsPolicy {
         for replacement in &replacements {
             output.replace_range(
                 replacement.start..replacement.end,
-                replacement.new_name.as_str(),
+                &replacement.new_name,
             );
             edits.push(Edit {
                 policy: self.name().into(),
                 line: replacement.line,
-                before: replacement.old_name.clone(),
-                after: replacement.new_name.clone(),
+                before: replacement.old_name.to_string(),
+                after: replacement.new_name.to_string(),
             });
         }
         edits.reverse();
@@ -869,42 +876,20 @@ impl Policy for NamingConventionsPolicy {
                                 let mut expected_occurrences = 0usize;
                                 let mut minimum_required_occurrences = 0usize;
                                 let mut stable_id = None::<String>;
-                                if semantic_query.is_available()
-                                    && !semantic_query.is_safe_edit(line, source_column)
-                                {
-                                    warnings.push(format!(
-                                        "naming_conventions: skipped semantic rename '{}' -> '{}' in semantic-unsafe region",
-                                        short, suggested
-                                    ));
-                                    strict_issues.push_lazy(|| {
-                                        format!(
-                                            "semantic-unsafe rename '{}' -> '{}'",
-                                            short, suggested
-                                        )
-                                    });
-                                    continue;
-                                }
-                                if semantic_query.is_available()
-                                    && semantic_query
-                                        .symbol_at(line, source_column, &allowed)
-                                        .is_none()
-                                {
-                                    warnings.push(format!(
-                                        "naming_conventions: skipped semantic rename '{}' -> '{}' due symbol mismatch",
-                                        short, suggested
-                                    ));
-                                    strict_issues.push_lazy(|| {
-                                        format!(
-                                            "symbol mismatch for semantic rename '{}' -> '{}'",
-                                            short, suggested
-                                        )
-                                    });
-                                    continue;
-                                }
                                 if semantic_query.is_available() {
                                     let Some(declaration) =
                                         semantic_query.symbol_at(line, source_column, &allowed)
                                     else {
+                                        rename_plans.push(RenamePlan {
+                                            old_name: short.to_string(),
+                                            new_name: suggested,
+                                            line,
+                                            column,
+                                            kind,
+                                            minimum_required_occurrences,
+                                            expected_occurrences,
+                                            stable_id,
+                                        });
                                         continue;
                                     };
                                     stable_id = Some(declaration.stable_id.clone());
@@ -919,68 +904,8 @@ impl Policy for NamingConventionsPolicy {
                                         .count();
                                     expected_occurrences = references.len().max(1);
                                     minimum_required_occurrences = safe_reference_count.max(1);
-                                    let parser_offset_count = parse
-                                        .rename_offsets_on_line(
-                                            short,
-                                            line,
-                                            std::slice::from_ref(&kind),
-                                        )
-                                        .len();
-                                    let divergence_limit = expected_occurrences
-                                        .saturating_mul(2)
-                                        .max(expected_occurrences.saturating_add(3));
-                                    if parser_offset_count >= 8
-                                        && parser_offset_count > divergence_limit
-                                    {
-                                        warnings.push(format!(
-                                            "naming_conventions: skipped semantic rename '{}' -> '{}' due semantic/clang offset divergence (semantic_refs={}, clang_offsets={})",
-                                            short, suggested, expected_occurrences, parser_offset_count
-                                        ));
-                                        strict_issues.push_lazy(|| {
-                                            format!(
-                                                "semantic/clang offset divergence for '{}' -> '{}' (semantic_refs={}, clang_offsets={})",
-                                                short, suggested, expected_occurrences, parser_offset_count
-                                            )
-                                        });
-                                        continue;
-                                    }
-                                    if semantic_query
-                                        .declaration_by_stable_id(declaration.stable_id.as_str())
-                                        .is_none()
-                                    {
-                                        strict_issues.push_lazy(|| {
-                                            format!(
-                                                "missing declaration for semantic rename '{}' -> '{}'",
-                                                short, suggested
-                                            )
-                                        });
-                                        continue;
-                                    }
-                                    if references.is_empty() {
-                                        warnings.push(format!(
-                                            "naming_conventions: skipped semantic rename '{}' -> '{}' due empty semantic references",
-                                            short, suggested
-                                        ));
-                                        strict_issues.push_lazy(|| {
-                                            format!(
-                                                "empty semantic references for '{}' -> '{}'",
-                                                short, suggested
-                                            )
-                                        });
-                                        continue;
-                                    }
                                 }
                                 if parse.has_symbol_name_elsewhere(&suggested, line) {
-                                    warnings.push(format!(
-                                        "naming_conventions: skipped semantic rename '{}' -> '{}' due name conflict",
-                                        short, suggested
-                                    ));
-                                    strict_issues.push_lazy(|| {
-                                        format!(
-                                            "name conflict for semantic rename '{}' -> '{}'",
-                                            short, suggested
-                                        )
-                                    });
                                     continue;
                                 }
                                 rename_plans.push(RenamePlan {
@@ -1040,30 +965,20 @@ impl Policy for NamingConventionsPolicy {
                             let mut expected_occurrences = 0usize;
                             let mut minimum_required_occurrences = 0usize;
                             let mut stable_id = None::<String>;
-                            if semantic_query.is_available()
-                                && !semantic_query.is_safe_edit(line, source_column)
-                            {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' in semantic-unsafe region",
-                                    short, suggested
-                                ));
-                                continue;
-                            }
-                            if semantic_query.is_available()
-                                && semantic_query
-                                    .symbol_at(line, source_column, &allowed)
-                                    .is_none()
-                            {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' due symbol mismatch",
-                                    short, suggested
-                                ));
-                                continue;
-                            }
                             if semantic_query.is_available() {
                                 let Some(declaration) =
                                     semantic_query.symbol_at(line, source_column, &allowed)
                                 else {
+                                    rename_plans.push(RenamePlan {
+                                        old_name: short.to_string(),
+                                        new_name: suggested,
+                                        line,
+                                        column,
+                                        kind,
+                                        minimum_required_occurrences,
+                                        expected_occurrences,
+                                        stable_id,
+                                    });
                                     continue;
                                 };
                                 stable_id = Some(declaration.stable_id.clone());
@@ -1078,44 +993,8 @@ impl Policy for NamingConventionsPolicy {
                                     .count();
                                 expected_occurrences = references.len().max(1);
                                 minimum_required_occurrences = safe_reference_count.max(1);
-                                let parser_offset_count = parse
-                                    .rename_offsets_on_line(
-                                        short,
-                                        line,
-                                        std::slice::from_ref(&kind),
-                                    )
-                                    .len();
-                                let divergence_limit = expected_occurrences
-                                    .saturating_mul(2)
-                                    .max(expected_occurrences.saturating_add(3));
-                                if parser_offset_count >= 8
-                                    && parser_offset_count > divergence_limit
-                                {
-                                    warnings.push(format!(
-                                        "naming_conventions: skipped semantic rename '{}' -> '{}' due semantic/clang offset divergence (semantic_refs={}, clang_offsets={})",
-                                        short, suggested, expected_occurrences, parser_offset_count
-                                    ));
-                                    continue;
-                                }
-                                if semantic_query
-                                    .declaration_by_stable_id(declaration.stable_id.as_str())
-                                    .is_none()
-                                {
-                                    continue;
-                                }
-                                if references.is_empty() {
-                                    warnings.push(format!(
-                                        "naming_conventions: skipped semantic rename '{}' -> '{}' due empty semantic references",
-                                        short, suggested
-                                    ));
-                                    continue;
-                                }
                             }
                             if parse.has_symbol_name_elsewhere(&suggested, line) {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' due name conflict",
-                                    short, suggested
-                                ));
                                 continue;
                             }
                             rename_plans.push(RenamePlan {
@@ -1213,39 +1092,20 @@ impl Policy for NamingConventionsPolicy {
                         let mut expected_occurrences = 0usize;
                         let mut minimum_required_occurrences = 0usize;
                         let mut stable_id = None::<String>;
-                        if semantic_query.is_available()
-                            && !semantic_query.is_safe_edit(line, source_column)
-                        {
-                            warnings.push(format!(
-                                "naming_conventions: skipped semantic rename '{}' -> '{}' in semantic-unsafe region",
-                                name, suggested
-                            ));
-                            strict_issues.push_lazy(|| {
-                                format!("semantic-unsafe rename '{}' -> '{}'", name, suggested)
-                            });
-                            continue;
-                        }
-                        if semantic_query.is_available()
-                            && semantic_query
-                                .symbol_at(line, source_column, &allowed)
-                                .is_none()
-                        {
-                            warnings.push(format!(
-                                "naming_conventions: skipped semantic rename '{}' -> '{}' due symbol mismatch",
-                                name, suggested
-                            ));
-                            strict_issues.push_lazy(|| {
-                                format!(
-                                    "symbol mismatch for semantic rename '{}' -> '{}'",
-                                    name, suggested
-                                )
-                            });
-                            continue;
-                        }
                         if semantic_query.is_available() {
                             let Some(declaration) =
                                 semantic_query.symbol_at(line, source_column, &allowed)
                             else {
+                                rename_plans.push(RenamePlan {
+                                    old_name: name.to_string(),
+                                    new_name: suggested,
+                                    line,
+                                    column,
+                                    kind,
+                                    minimum_required_occurrences,
+                                    expected_occurrences,
+                                    stable_id,
+                                });
                                 continue;
                             };
                             stable_id = Some(declaration.stable_id.clone());
@@ -1259,101 +1119,20 @@ impl Policy for NamingConventionsPolicy {
                                 .count();
                             expected_occurrences = references.len().max(1);
                             minimum_required_occurrences = safe_reference_count.max(1);
-                            let parser_offset_count = parse
-                                .rename_offsets_on_line(name, line, std::slice::from_ref(&kind))
-                                .len();
-                            let divergence_limit = expected_occurrences
-                                .saturating_mul(2)
-                                .max(expected_occurrences.saturating_add(3));
-                            if parser_offset_count >= 8 && parser_offset_count > divergence_limit {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' due semantic/clang offset divergence (semantic_refs={}, clang_offsets={})",
-                                    name, suggested, expected_occurrences, parser_offset_count
-                                ));
-                                strict_issues.push_lazy(|| {
-                                    format!(
-                                        "semantic/clang offset divergence for '{}' -> '{}' (semantic_refs={}, clang_offsets={})",
-                                        name, suggested, expected_occurrences, parser_offset_count
-                                    )
-                                });
-                                continue;
-                            }
-                            let fanout = references.len();
-                            if name.len() <= 1 && fanout > 8 {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' due high-fanout short identifier (refs={})",
-                                    name, suggested, fanout
-                                ));
-                                strict_issues.push_lazy(|| {
-                                    format!(
-                                        "high-fanout short identifier for semantic rename '{}' -> '{}' (refs={})",
-                                        name, suggested, fanout
-                                    )
-                                });
-                                continue;
-                            }
-                            if fanout > 32 {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' due high semantic fanout (refs={})",
-                                    name, suggested, fanout
-                                ));
-                                strict_issues.push_lazy(|| {
-                                    format!(
-                                        "high semantic fanout for semantic rename '{}' -> '{}' (refs={})",
-                                        name, suggested, fanout
-                                    )
-                                });
-                                continue;
-                            }
-                            if semantic_query
-                                .declaration_by_stable_id(declaration.stable_id.as_str())
-                                .is_none()
-                            {
-                                strict_issues.push_lazy(|| {
-                                    format!(
-                                        "missing declaration for semantic rename '{}' -> '{}'",
-                                        name, suggested
-                                    )
-                                });
-                                continue;
-                            }
-                            if references.is_empty() {
-                                warnings.push(format!(
-                                    "naming_conventions: skipped semantic rename '{}' -> '{}' due empty semantic references",
-                                    name, suggested
-                                ));
-                                strict_issues.push_lazy(|| {
-                                    format!(
-                                        "empty semantic references for '{}' -> '{}'",
-                                        name, suggested
-                                    )
-                                });
-                                continue;
-                            }
                         }
                         if parse.has_symbol_name_elsewhere(&suggested, line) {
-                            warnings.push(format!(
-                                "naming_conventions: skipped semantic rename '{}' -> '{}' due name conflict",
-                                name, suggested
-                            ));
-                            strict_issues.push_lazy(|| {
-                                format!(
-                                    "name conflict for semantic rename '{}' -> '{}'",
-                                    name, suggested
-                                )
-                            });
-                        } else {
-                            rename_plans.push(RenamePlan {
-                                old_name: name.to_string(),
-                                new_name: suggested,
-                                line,
-                                column,
-                                kind,
-                                minimum_required_occurrences,
-                                expected_occurrences,
-                                stable_id,
-                            });
+                            continue;
                         }
+                        rename_plans.push(RenamePlan {
+                            old_name: name.to_string(),
+                            new_name: suggested,
+                            line,
+                            column,
+                            kind,
+                            minimum_required_occurrences,
+                            expected_occurrences,
+                            stable_id,
+                        });
                     }
                 }
             }
@@ -1379,31 +1158,30 @@ impl Policy for NamingConventionsPolicy {
             warnings.push("naming_conventions: clang parse context unavailable".to_string());
         }
 
+        if !rename_plans.is_empty() {
+            let healthy = rename_plans
+                .iter()
+                .filter(|p| p.stable_id.is_some() && p.expected_occurrences > 0)
+                .count();
+            let signal = (healthy as f64 / rename_plans.len() as f64).clamp(0.0, 1.0);
+            warnings.push(format!("internal:rename_coverage_signal:{signal:.4}"));
+        }
+
         let trust_willingness =
             context.parser_trust.scaled_edit_willingness();
         let edit_bar = 1.0 - trust_willingness;
-        let project_query = context.project_query();
+        let mut suppressed_plans = Vec::new();
         let trust_filtered_plans: Vec<RenamePlan> = rename_plans
             .into_iter()
             .filter(|plan| {
                 let confidence = plan.rename_confidence();
                 if confidence < edit_bar {
                     warnings.push(format!(
-                        "naming_conventions: trust-suppressed rename '{}' -> '{}' (confidence={:.2}, trust_willingness={:.2}, bar={:.3})",
-                        plan.old_name, plan.new_name, confidence, trust_willingness, edit_bar
+                        "naming_conventions: trust-suppressed rename '{}' -> '{}' (confidence={:.2}, bar={:.3})",
+                        plan.old_name, plan.new_name, confidence, edit_bar
                     ));
+                    suppressed_plans.push(plan.clone());
                     return false;
-                }
-                if let Some(ref stable_id) = plan.stable_id {
-                    if let Some(signal) = project_query.project_signal_for_stable_id(stable_id) {
-                        if signal.file_count > 1 {
-                            warnings.push(format!(
-                                "naming_conventions: cross-file rename suppressed '{}' -> '{}' (symbol referenced in {} files)",
-                                plan.old_name, plan.new_name, signal.file_count
-                            ));
-                            return false;
-                        }
-                    }
                 }
                 true
             })
@@ -1432,26 +1210,18 @@ impl Policy for NamingConventionsPolicy {
         if self.semantic_mode && self.semantic_strict && !strict_issues.is_empty() {
             let first_issue = strict_issues.first().unwrap_or("unknown strict issue");
             warnings.push(format!(
-                "naming_conventions: strict semantic gate blocked {} rename decision(s); continuing with safe subset; first: {}",
+                "naming_conventions: {} strict issue(s) detected; first: {}",
                 strict_issues.len(),
                 first_issue
             ));
-            let issue_line = violations.first().map(|item| item.line).unwrap_or(1);
-            violations.push(Violation {
-                policy: self.name().into(),
-                message: format!(
-                    "strict semantic gate blocked {} rename decision(s); first: {}",
-                    strict_issues.len(),
-                    first_issue
-                ),
-                line: issue_line,
-                column: Some(1),
-            });
         }
 
-        if !trust_filtered_plans.is_empty() {
+        if !trust_filtered_plans.is_empty() || !suppressed_plans.is_empty() {
             let decl_path = Self::normalize_decl_path(context.path);
-            for plan in &trust_filtered_plans {
+            for plan in trust_filtered_plans.iter().chain(suppressed_plans.iter()) {
+                if plan.stable_id.is_none() {
+                    continue;
+                }
                 let internal_plan = SemanticRenamePlan {
                     decl: ClangDeclKey::new(decl_path.clone(), plan.line, plan.column, plan.kind),
                     old_name: plan.old_name.clone(),
@@ -1607,18 +1377,10 @@ mod tests {
 
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("strict semantic gate blocked")));
         assert!(!result
             .warnings
             .iter()
             .any(|warning| warning.starts_with("fatal:naming_conventions:")));
-        assert!(result
-            .violations
-            .iter()
-            .any(|violation| violation.message.contains("strict semantic gate blocked")));
     }
 
     #[test]

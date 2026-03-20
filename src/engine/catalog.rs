@@ -411,7 +411,7 @@ impl PolicyCatalog {
             keeps_non_local_conflict_batch: matches!(policy_id, PolicyId::ClangFormat),
             advisory_on_semantic_retry: matches!(policy_id, PolicyId::ClangFormat),
             hard_invariant_by_default: false,
-            bypasses_line_conflict: matches!(policy_id, PolicyId::NumericLiteralSuffix),
+            bypasses_line_conflict: matches!(policy_id, PolicyId::NumericLiteralSuffix | PolicyId::ClangFormat),
             execution_priority: match policy_id {
                 PolicyId::NamingConventions => 10,
                 PolicyId::SnakeCase
@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_zero_coverage_yields_near_zero() {
+    fn trust_zero_coverage_reduces_but_not_kills() {
         use super::PolicyCertainty;
         let certainty = PolicyCertainty {
             semantic: 0.90,
@@ -564,7 +564,9 @@ mod tests {
             edit_success_variance: 0.002,
             ..Default::default()
         };
-        assert!(certainty.trust_for_semantic_rewrite() < 0.15);
+        let trust = certainty.trust_for_semantic_rewrite();
+        assert!(trust > 0.25 && trust < 0.65,
+            "zero coverage should reduce trust but not kill it, got {trust}");
     }
 
     #[test]

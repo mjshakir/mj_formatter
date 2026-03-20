@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use serde::{Deserialize, Serialize};
 use crate::engine::mat5::*;
 
@@ -206,7 +208,7 @@ impl CertaintyFilterState {
         }
     }
 
-    pub fn new_with_prior(prior_estimates: [f64; NUM_DIMS], prior_variances: [f64; NUM_DIMS]) -> Self {
+    pub fn new_with_prior(prior_estimates: [f64; NUM_DIMS], prior_variances: [f64; NUM_DIMS], prior_observation_count: u32) -> Self {
         let prior_cov = mat5_diagonal(&prior_variances);
         Self {
             models: [
@@ -233,7 +235,7 @@ impl CertaintyFilterState {
                 },
             ],
             model_probs: INITIAL_MODEL_PROBS,
-            observation_count: 0,
+            observation_count: prior_observation_count,
             content_hash: 0,
             last_edit_outcome: None,
             transition_counts: default_transition_counts(),
@@ -247,7 +249,7 @@ impl CertaintyFilterState {
         content_hash: u64,
     ) -> CertaintyFilterResult {
         if content_hash != self.content_hash {
-            if self.observation_count > 0 {
+            if self.observation_count > 0 && self.content_hash != 0 {
                 *self = Self::new();
             }
             self.content_hash = content_hash;
@@ -691,5 +693,17 @@ mod tests {
             .flat_map(|row| row.iter())
             .sum();
         assert!(total > 0.0, "transition counts should be non-zero after observations");
+    }
+
+    #[test]
+    fn prior_observation_count_preserved() {
+        let est = [0.90, 0.80, 0.70, 0.50, 0.65];
+        let var = [0.01; NUM_DIMS];
+        let mut state = CertaintyFilterState::new_with_prior(est, var, 5);
+        assert_eq!(state.observation_count, 5, "prior obs count should be set");
+        let result = state.observe([0.92, 0.82, 0.72, 0.52, 0.70], 42);
+        assert_eq!(result.observation_count, 6, "obs count should increment after observe");
+        assert!(result.structural() > 0.88 && result.structural() < 0.95,
+            "structural should blend prior and measurement, got {}", result.structural());
     }
 }

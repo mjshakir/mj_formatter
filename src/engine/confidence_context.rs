@@ -12,6 +12,7 @@ pub struct ConfidenceContext {
     pub clang_success: bool,
     pub semantic_usr_ratio: f64,
     pub text_scan_agreement: f64,
+    pub rename_coverage_signal: Option<f64>,
 }
 
 impl ConfidenceContext {
@@ -29,7 +30,7 @@ impl ConfidenceContext {
 
         let mut clang_success = clang.is_some_and(|parse| parse.success);
         let mut semantic_usr_ratio = 0.0f64;
-        let mut text_scan_agreement = 1.0f64;
+        let mut text_scan_agreement = 0.5f64;
 
         if let Some(semantic_context) = semantic {
             clang_success = clang_success || semantic_context.clang_success;
@@ -54,7 +55,7 @@ impl ConfidenceContext {
                 for reference in &semantic_context.references {
                     *ref_counts.entry(reference.stable_id.as_str()).or_insert(0) += 1;
                 }
-                let mut agreed = 0usize;
+                let mut total_agreement = 0.0f64;
                 let mut checked = 0usize;
                 for decl in &semantic_context.declarations {
                     let semantic_count = ref_counts.get(decl.stable_id.as_str()).copied().unwrap_or(0);
@@ -65,12 +66,15 @@ impl ConfidenceContext {
                     let text_count = crate::text_scan::count_identifier_occurrences_with_exclusions(
                         text, &decl.name, &excluded_ranges,
                     );
-                    if text_count <= semantic_count + 1 {
-                        agreed += 1;
-                    }
+                    let agreement = if text_count <= semantic_count + 1 {
+                        1.0
+                    } else {
+                        ((semantic_count + 1) as f64 / text_count as f64).clamp(0.1, 1.0)
+                    };
+                    total_agreement += agreement;
                 }
                 if checked > 0 {
-                    text_scan_agreement = (agreed as f64 / checked as f64).clamp(0.0, 1.0);
+                    text_scan_agreement = (total_agreement / checked as f64).clamp(0.0, 1.0);
                 }
             }
         }
@@ -81,6 +85,7 @@ impl ConfidenceContext {
             clang_success,
             semantic_usr_ratio,
             text_scan_agreement,
+            rename_coverage_signal: None,
         }
     }
 
@@ -231,6 +236,106 @@ mod tests {
         assert!(
             context.text_scan_agreement < 1.0,
             "expected low agreement when text has 5 occurrences but semantic has 1 ref, got {}",
+            context.text_scan_agreement
+        );
+        // With continuous agreement: semantic=1, text=5 → (1+1)/5 = 0.4
+        assert!(
+            context.text_scan_agreement > 0.3 && context.text_scan_agreement < 0.5,
+            "expected continuous partial credit ~0.4, got {}",
+            context.text_scan_agreement
+        );
+    }
+
+    #[test]
+    fn text_scan_agreement_partial_credit_for_moderate_excess() {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("cpp language");
+        // semantic=2 refs, text will find 4 occurrences → (2+1)/4 = 0.75
+        let code = "int foo = 0;\nint a = foo;\nint b = foo;\nint c = foo;\n";
+        let tree = parser.parse(code, None).expect("parse tree");
+
+        let semantic = SemanticFileContext {
+            canonical_path: "test.cpp".to_string(),
+            clang_success: true,
+            tree_has_error: false,
+            diagnostic_summary: crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            diagnostic_entries: Vec::new(),
+            declarations: vec![SemanticDeclaration {
+                stable_id: "usr:foo".to_string(),
+                provenance: SemanticIdProvenance::Usr,
+                name: "foo".to_string(),
+                kind: ClangSymbolKind::Variable,
+                line: 1,
+                column: 5,
+                usr: Some("usr:foo".to_string()),
+                scope_usr: None,
+            }],
+            references: vec![
+                SemanticReference {
+                    stable_id: "usr:foo".to_string(),
+                    provenance: SemanticIdProvenance::Usr,
+                    decl_path: "test.cpp".to_string(),
+                    decl_kind: ClangSymbolKind::Variable,
+                    offset: 17,
+                    line: 2,
+                    column: 9,
+                },
+                SemanticReference {
+                    stable_id: "usr:foo".to_string(),
+                    provenance: SemanticIdProvenance::Usr,
+                    decl_path: "test.cpp".to_string(),
+                    decl_kind: ClangSymbolKind::Variable,
+                    offset: 29,
+                    line: 3,
+                    column: 9,
+                },
+            ],
+            scopes: Vec::new(),
+            regions: Vec::new(),
+        };
+
+        let context = ConfidenceContext::from_parsers_and_semantic(
+            Some(&tree), None, Some(&semantic), code, Some(&tree),
+        );
+        // semantic=2, text=4 → (2+1)/4 = 0.75
+        assert!(
+            context.text_scan_agreement > 0.6 && context.text_scan_agreement < 0.85,
+            "expected partial credit ~0.75, got {}",
+            context.text_scan_agreement
+        );
+    }
+
+    #[test]
+    fn text_scan_agreement_neutral_when_no_refs_checked() {
+        let semantic = SemanticFileContext {
+            canonical_path: "test.cpp".to_string(),
+            clang_success: true,
+            tree_has_error: false,
+            diagnostic_summary: crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            diagnostic_entries: Vec::new(),
+            declarations: vec![SemanticDeclaration {
+                stable_id: "usr:demo".to_string(),
+                provenance: SemanticIdProvenance::Usr,
+                name: "DemoFn".to_string(),
+                kind: ClangSymbolKind::Function,
+                line: 1,
+                column: 1,
+                usr: Some("usr:demo".to_string()),
+                scope_usr: None,
+            }],
+            references: Vec::new(), // No references → checked will be 0
+            scopes: Vec::new(),
+            regions: Vec::new(),
+        };
+
+        let context = ConfidenceContext::from_parsers_and_semantic(
+            None, None, Some(&semantic), "void DemoFn() {}", None,
+        );
+        assert!(
+            (context.text_scan_agreement - 0.5).abs() < 0.01,
+            "expected neutral 0.5 when no refs checked, got {}",
             context.text_scan_agreement
         );
     }

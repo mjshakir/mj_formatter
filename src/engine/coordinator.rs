@@ -483,7 +483,18 @@ impl FormatterEngine {
         context_kind: SemanticCompdbContextKind,
         certainty: Option<&PolicyCertainty>,
     ) -> Option<(f64, Option<crate::engine::fuzzy_inference::AdaptiveFiringRecord>)> {
-        warnings.extend(check.messages.iter().cloned());
+        let has_semantic_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
+            PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
+        });
+        if has_semantic_rewrite_edits {
+            warnings.extend(
+                check.messages.iter()
+                    .filter(|m| !m.contains("semantic identity signature changed"))
+                    .cloned()
+            );
+        } else {
+            warnings.extend(check.messages.iter().cloned());
+        }
         if check.accepted || check.failure_kinds.is_empty() {
             return Some((1.0, None));
         }
@@ -494,9 +505,6 @@ impl FormatterEngine {
             context_kind = ?context_kind,
             "post-edit accept_pass_result: computing acceptance score (informational)"
         );
-        let has_semantic_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
-            PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
-        });
         let all_edits_whitespace_safe = !pass.policy_result.edits.is_empty()
             && pass.policy_result.edits.iter().all(|edit| {
                 !PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite

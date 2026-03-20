@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::engine::fuzzy_inference;
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
@@ -153,6 +154,10 @@ impl ClangFormatPolicy {
             return after.to_string();
         }
 
+        let after_keys: Vec<String> = after_lines
+            .iter()
+            .map(|l| Self::normalize_line_for_match(l.as_str()))
+            .collect();
         let mut consumed = vec![false; after_lines.len()];
         for source in &before_lines {
             if !Self::is_delete_default_function_line(source) && !Self::is_end_comment_line(source)
@@ -167,7 +172,7 @@ impl ClangFormatPolicy {
                 if consumed[idx] {
                     continue;
                 }
-                if Self::normalize_line_for_match(after_lines[idx].as_str()) != key {
+                if after_keys[idx] != key {
                     if Self::is_end_comment_line(source) {
                         let trimmed = after_lines[idx].trim_start();
                         if trimmed.contains("} // end ") {
@@ -210,6 +215,73 @@ impl ClangFormatPolicy {
     }
 }
 
+impl ClangFormatPolicy {
+    fn run_clang_format(
+        &self,
+        text: &str,
+        filename: &str,
+        region: Option<(usize, usize)>,
+    ) -> Result<String, String> {
+        let mut cmd = Command::new(&self.command);
+        cmd.arg(format!("-style={}", self.style))
+            .arg(format!("-assume-filename={}", filename));
+        if let Some((start, end)) = region {
+            cmd.arg(format!("--lines={}:{}", start, end));
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("clang_format unavailable: {e}"))?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|_| "clang_format failed to send stdin".to_string())?;
+        }
+        drop(child.stdin.take());
+
+        let timeout = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+        let output = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => match child.wait_with_output() {
+                    Ok(value) => break value,
+                    Err(err) => return Err(format!("clang_format execution failed: {err}")),
+                },
+                Ok(None) if start.elapsed() > timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("clang_format timed out after 30s".to_string());
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(err) => return Err(format!("clang_format execution failed: {err}")),
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("clang_format non-zero exit: {stderr}"));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn compute_line_regions(total_lines: usize, batch_size: usize) -> Vec<(usize, usize)> {
+        if batch_size >= total_lines {
+            return vec![(1, total_lines)];
+        }
+        let mut regions = Vec::new();
+        let mut start = 1usize;
+        while start <= total_lines {
+            let end = (start + batch_size - 1).min(total_lines);
+            regions.push((start, end));
+            start = end + 1;
+        }
+        regions
+    }
+}
+
 impl Policy for ClangFormatPolicy {
     fn name(&self) -> &str {
         "clang_format"
@@ -242,134 +314,119 @@ impl Policy for ClangFormatPolicy {
             };
         }
 
-        let mut child = match Command::new(&self.command)
-            .arg(format!("-style={}", self.style))
-            .arg(format!("-assume-filename={}", context.path_str()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(process) => process,
-            Err(err) => {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: vec![format!("clang_format unavailable: {err}")],
-                }
-            }
-        };
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            if stdin.write_all(context.text.as_bytes()).is_err() {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: vec!["clang_format failed to send stdin".to_string()],
-                };
-            }
-        }
-
-        drop(child.stdin.take());
-        let output = {
-            let timeout = std::time::Duration::from_secs(30);
-            let start = std::time::Instant::now();
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => match child.wait_with_output() {
-                        Ok(value) => break value,
-                        Err(err) => {
-                            return PolicyResult {
-                                text: context.text.to_string(),
-                                violations: Vec::new(),
-                                edits: Vec::new(),
-                                warnings: vec![format!("clang_format execution failed: {err}")],
-                            };
-                        }
-                    },
-                    Ok(None) if start.elapsed() > timeout => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return PolicyResult {
-                            text: context.text.to_string(),
-                            violations: Vec::new(),
-                            edits: Vec::new(),
-                            warnings: vec!["clang_format timed out after 30s".to_string()],
-                        };
-                    }
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                    Err(err) => {
-                        return PolicyResult {
-                            text: context.text.to_string(),
-                            violations: Vec::new(),
-                            edits: Vec::new(),
-                            warnings: vec![format!("clang_format execution failed: {err}")],
-                        };
-                    }
-                }
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![format!("clang_format non-zero exit: {stderr}")],
-            };
-        }
-
-        let formatted = String::from_utf8_lossy(&output.stdout).to_string();
-        let updated = Self::preserve_sensitive_lines(context.text, formatted.as_str());
-        if updated == context.text {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
-        }
-
-        let edits = self.diff_lines(context.text, &updated);
-        let skipped_semantic_unsafe = 0usize;
-        if skipped_semantic_unsafe > 0 {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![format!(
-                    "clang_format: skipped {} semantic-unsafe changed line(s)",
-                    skipped_semantic_unsafe
-                )],
-            };
-        }
         let before_error_count = context
             .tree_sitter_tree
             .map(|t| ts_traversal::tree_error_stats(t).error_nodes)
             .unwrap_or(0);
-        let (validated_text, validated_edits, warnings) =
-            self.self_validate_tree_sitter(context.text, &updated, before_error_count, edits);
-        if validated_edits.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings,
+
+        let line_count = context.text.lines().count();
+        let batch_size = context
+            .policy_certainty
+            .as_ref()
+            .map(|c| fuzzy_inference::fuzzy_region_batch_lines(c, before_error_count))
+            .unwrap_or(usize::MAX);
+        let regions = Self::compute_line_regions(line_count, batch_size);
+
+        if regions.len() <= 1 {
+            // Fast path: whole-file formatting (original behavior)
+            let formatted = match self.run_clang_format(context.text, context.path_str(), None) {
+                Ok(f) => f,
+                Err(warning) => {
+                    return PolicyResult {
+                        text: context.text.to_string(),
+                        violations: Vec::new(),
+                        edits: Vec::new(),
+                        warnings: vec![warning],
+                    };
+                }
             };
-        }
-        PolicyResult {
-            text: validated_text,
-            violations: vec![Violation {
-                policy: self.name().into(),
-                message: "clang-format adjusted formatting".to_string(),
-                line: validated_edits.first().map(|item| item.line).unwrap_or(1),
-                column: Some(1),
-            }],
-            edits: validated_edits,
-            warnings,
+
+            let updated = Self::preserve_sensitive_lines(context.text, formatted.as_str());
+            if updated == context.text {
+                return PolicyResult {
+                    text: context.text.to_string(),
+                    violations: Vec::new(),
+                    edits: Vec::new(),
+                    warnings: Vec::new(),
+                };
+            }
+
+            let edits = self.diff_lines(context.text, &updated);
+            let (validated_text, validated_edits, warnings) =
+                self.self_validate_tree_sitter(context.text, &updated, before_error_count, edits);
+            if validated_edits.is_empty() {
+                return PolicyResult {
+                    text: context.text.to_string(),
+                    violations: Vec::new(),
+                    edits: Vec::new(),
+                    warnings,
+                };
+            }
+            PolicyResult {
+                text: validated_text,
+                violations: vec![Violation {
+                    policy: self.name().into(),
+                    message: "clang-format adjusted formatting".to_string(),
+                    line: validated_edits.first().map(|item| item.line).unwrap_or(1),
+                    column: Some(1),
+                }],
+                edits: validated_edits,
+                warnings,
+            }
+        } else {
+            // Region path: format each region via --lines, self-validate per region
+            let mut current_text = context.text.to_string();
+            let mut all_edits = Vec::new();
+            let mut all_warnings = Vec::new();
+            let filename = context.path_str();
+
+            for (start, end) in &regions {
+                let formatted = match self.run_clang_format(&current_text, filename, Some((*start, *end))) {
+                    Ok(f) => f,
+                    Err(warning) => {
+                        all_warnings.push(warning);
+                        continue;
+                    }
+                };
+
+                let updated = Self::preserve_sensitive_lines(&current_text, formatted.as_str());
+                if updated == current_text {
+                    continue;
+                }
+
+                let region_edits = self.diff_lines(&current_text, &updated);
+                let current_error_count = ts_traversal::quick_error_stats_cpp(&current_text)
+                    .map(|s| s.error_nodes)
+                    .unwrap_or(before_error_count);
+                let (validated_text, validated_edits, warnings) =
+                    self.self_validate_tree_sitter(&current_text, &updated, current_error_count, region_edits);
+
+                if !validated_edits.is_empty() {
+                    current_text = validated_text;
+                    all_edits.extend(validated_edits);
+                }
+                all_warnings.extend(warnings);
+            }
+
+            if all_edits.is_empty() {
+                return PolicyResult {
+                    text: context.text.to_string(),
+                    violations: Vec::new(),
+                    edits: Vec::new(),
+                    warnings: all_warnings,
+                };
+            }
+            PolicyResult {
+                text: current_text,
+                violations: vec![Violation {
+                    policy: self.name().into(),
+                    message: "clang-format adjusted formatting".to_string(),
+                    line: all_edits.first().map(|item| item.line).unwrap_or(1),
+                    column: Some(1),
+                }],
+                edits: all_edits,
+                warnings: all_warnings,
+            }
         }
     }
 }

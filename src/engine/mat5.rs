@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use serde::{Deserialize, Serialize};
 
 pub const N: usize = 5;
@@ -72,38 +74,101 @@ pub fn mat5_diagonal(diag: &[f64; N]) -> Mat5 {
 
 // ── Element-wise arithmetic ────────────────────────────────────────────────
 
+#[cfg(target_arch = "aarch64")]
+pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
+    unsafe {
+        use core::arch::aarch64::*;
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            vst1q_f64(r[i].as_mut_ptr(),       vaddq_f64(vld1q_f64(a[i].as_ptr()),       vld1q_f64(b[i].as_ptr())));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vaddq_f64(vld1q_f64(a[i].as_ptr().add(2)), vld1q_f64(b[i].as_ptr().add(2))));
+            r[i][4] = a[i][4] + b[i][4];
+        }
+        r
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
-        for j in 0..N {
-            r[i][j] = a[i][j] + b[i][j];
-        }
+        for j in 0..N { r[i][j] = a[i][j] + b[i][j]; }
     }
     r
 }
 
+#[cfg(target_arch = "aarch64")]
+pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
+    unsafe {
+        use core::arch::aarch64::*;
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            vst1q_f64(r[i].as_mut_ptr(),       vsubq_f64(vld1q_f64(a[i].as_ptr()),       vld1q_f64(b[i].as_ptr())));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vsubq_f64(vld1q_f64(a[i].as_ptr().add(2)), vld1q_f64(b[i].as_ptr().add(2))));
+            r[i][4] = a[i][4] - b[i][4];
+        }
+        r
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
-        for j in 0..N {
-            r[i][j] = a[i][j] - b[i][j];
-        }
+        for j in 0..N { r[i][j] = a[i][j] - b[i][j]; }
     }
     r
 }
 
+#[cfg(target_arch = "aarch64")]
+pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
+    unsafe {
+        use core::arch::aarch64::*;
+        let vs = vdupq_n_f64(s);
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            vst1q_f64(r[i].as_mut_ptr(),       vmulq_f64(vld1q_f64(a[i].as_ptr()),       vs));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vmulq_f64(vld1q_f64(a[i].as_ptr().add(2)), vs));
+            r[i][4] = a[i][4] * s;
+        }
+        r
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
-        for j in 0..N {
-            r[i][j] = a[i][j] * s;
-        }
+        for j in 0..N { r[i][j] = a[i][j] * s; }
     }
     r
 }
 
 // ── Matrix multiplication ──────────────────────────────────────────────────
 
+#[cfg(target_arch = "aarch64")]
+pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
+    unsafe {
+        use core::arch::aarch64::*;
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in (0..4).step_by(2) {
+                let mut acc = vdupq_n_f64(0.0);
+                for k in 0..N {
+                    let aik = vdupq_n_f64(a[i][k]);
+                    let bk = vld1q_f64(b[k].as_ptr().add(j));
+                    acc = vfmaq_f64(acc, aik, bk);
+                }
+                vst1q_f64(r[i].as_mut_ptr().add(j), acc);
+            }
+            r[i][4] = a[i][0] * b[0][4] + a[i][1] * b[1][4] + a[i][2] * b[2][4]
+                    + a[i][3] * b[3][4] + a[i][4] * b[4][4];
+        }
+        r
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
     let bt = mat5_transpose(b);
     let mut r = [[0.0; N]; N];
@@ -140,6 +205,24 @@ pub fn mat5_matvec(a: &Mat5, v: &[f64; N]) -> [f64; N] {
 
 // ── Outer product ──────────────────────────────────────────────────────────
 
+#[cfg(target_arch = "aarch64")]
+pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
+    unsafe {
+        use core::arch::aarch64::*;
+        let mut r = [[0.0f64; N]; N];
+        let v01 = vld1q_f64(v.as_ptr());
+        let v23 = vld1q_f64(v.as_ptr().add(2));
+        for i in 0..N {
+            let vi = vdupq_n_f64(v[i]);
+            vst1q_f64(r[i].as_mut_ptr(), vmulq_f64(vi, v01));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vmulq_f64(vi, v23));
+            r[i][4] = v[i] * v[4];
+        }
+        r
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
     let mut r = [[0.0; N]; N];
     for i in 0..N {

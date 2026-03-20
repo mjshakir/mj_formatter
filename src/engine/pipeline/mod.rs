@@ -111,11 +111,13 @@ pub(super) struct PolicyPipelineRunState<'a> {
     semantic_compdb_context_for_file: bool,
     semantic_fidelity_score: f64,
     cached_certainty: Option<PolicyCertainty>,
+    cached_tree_error_lines: Option<BTreeSet<usize>>,
     content_hash: u64,
     clang_structural_edits_since_parse: usize,
     context_modifiers: [f32; 24],
     block_context_modifiers: [[f32; 24]; 6],
     rollback_count: usize,
+    rename_coverage_signal: Option<f64>,
 }
 
 impl<'a> PolicyPipelineRunState<'a> {
@@ -123,8 +125,21 @@ impl<'a> PolicyPipelineRunState<'a> {
         self.semantic_summary.unwrap_or_default()
     }
 
+    fn tree_error_lines_cached(&mut self) -> &BTreeSet<usize> {
+        if self.cached_tree_error_lines.is_none() {
+            self.cached_tree_error_lines = Some(
+                self.tree_for_text
+                    .as_ref()
+                    .map(|t| ts_traversal::tree_error_stats(t).error_lines)
+                    .unwrap_or_default(),
+            );
+        }
+        self.cached_tree_error_lines.as_ref().unwrap()
+    }
+
     fn invalidate_semantic_state(&mut self, is_semantic_rewrite: bool) {
         self.tree_for_text = None;
+        self.cached_tree_error_lines = None;
         if is_semantic_rewrite {
             self.clang_for_text = None;
             self.clang_structural_edits_since_parse = 0;
@@ -329,13 +344,14 @@ impl PolicyPipeline {
             self.ensure_policy_parse_stage(&mut state, first_policy.as_ref(), first_policy.name(), boot)?;
         }
         if state.cached_certainty.is_none() {
-            let confidence = ConfidenceContext::from_parsers_and_semantic(
+            let mut confidence = ConfidenceContext::from_parsers_and_semantic(
                 state.tree_for_text.as_ref(),
                 state.clang_for_text.as_deref(),
                 state.semantic_for_text.as_ref(),
                 &state.current,
                 state.tree_for_text.as_ref(),
             );
+            confidence.rename_coverage_signal = state.rename_coverage_signal;
             let measurement = Self::extract_raw_observation(
                 &confidence,
                 state.semantic_summary,
@@ -439,11 +455,13 @@ impl PolicyPipeline {
                 None,
             ),
             cached_certainty: None,
+            cached_tree_error_lines: None,
             content_hash: crc32fast::hash(text.as_bytes()) as u64,
             clang_structural_edits_since_parse: 0,
             context_modifiers: self.batch_context_modifiers(path),
             block_context_modifiers: self.batch_block_context_modifiers(),
             rollback_count: 0,
+            rename_coverage_signal: None,
         }
     }
 
@@ -504,11 +522,11 @@ impl PolicyPipeline {
     }
 
     fn record_initial_fidelity_warnings(&self, state: &mut PolicyPipelineRunState<'_>) {
-        state.all_warnings.push(format!(
-            "semantic fidelity: {:.2} for {}",
-            state.semantic_fidelity_score,
-            state.path.display()
-        ));
+        debug!(
+            fidelity = state.semantic_fidelity_score,
+            path = %state.path.display(),
+            "semantic fidelity"
+        );
         if state.exact_compdb_for_file {
             return;
         }
@@ -524,11 +542,11 @@ impl PolicyPipeline {
                 "using compdb-derived semantic context"
             }
         };
-        state.all_warnings.push(format!(
-            "semantic fidelity lock: no exact compile_commands entry for {}; {}",
-            state.path.display(),
-            detail
-        ));
+        debug!(
+            path = %state.path.display(),
+            context = detail,
+            "semantic fidelity lock: no exact compile_commands entry"
+        );
     }
 
     fn run_policy_stage(
@@ -613,6 +631,7 @@ impl PolicyPipeline {
                     0,
                 ));
                 state.current = Arc::from(recovered_text.as_str());
+                state.cached_tree_error_lines = None;
                 state.all_edits.extend(recovered_edits);
                 if let Some(tree) = validated_tree {
                     state.tree_for_text = Some(tree);
@@ -767,13 +786,14 @@ impl PolicyPipeline {
         let policy_certainty = if let Some(cached) = state.cached_certainty {
             cached
         } else {
-            let confidence = ConfidenceContext::from_parsers_and_semantic(
+            let mut confidence = ConfidenceContext::from_parsers_and_semantic(
                 state.tree_for_text.as_ref(),
                 state.clang_for_text.as_deref(),
                 state.semantic_for_text.as_ref(),
                 &state.current,
                 state.tree_for_text.as_ref(),
             );
+            confidence.rename_coverage_signal = state.rename_coverage_signal;
             let measurement = Self::extract_raw_observation(
                 &confidence,
                 state.semantic_summary,
@@ -815,16 +835,21 @@ impl PolicyPipeline {
         let parser_trust = ParserTrust {
             semantic_rewrite: prepared.policy_certainty.trust_for_semantic_rewrite(),
         };
+        let tree_error_lines = state.tree_error_lines_cached().clone();
         let context = PolicyContext::new(&state.current, state.path)
             .with_tree_sitter_tree(state.tree_for_text.as_ref())
             .with_clang_parse_result(state.clang_for_text.as_deref())
             .with_semantic_file_context(state.semantic_for_text.as_ref())
             .with_project_graph_snapshot(state.options.project_graph_snapshot.as_deref())
             .with_parser_trust(parser_trust)
+            .with_policy_certainty(Some(prepared.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
         let semantic_query = context.semantic_query();
         let project_query = context.project_query();
         let mut result = policy.apply(&context);
+        if let Some(sig) = result.rename_coverage_signal() {
+            state.rename_coverage_signal = Some(sig);
+        }
         let disabled_lines = PolicySuppression::disabled_lines(&state.current, policy_name);
         if !disabled_lines.is_empty() {
             result = Self::apply_line_suppression(&state.current, result, &disabled_lines);
@@ -886,9 +911,7 @@ impl PolicyPipeline {
                     .map(|s| s.regions.as_slice())
                     .unwrap_or(&[]);
                 let mut exc = Self::semantic_error_lines(regions);
-                if let Some(tree) = state.tree_for_text.as_ref() {
-                    exc.extend(ts_traversal::tree_error_stats(tree).error_lines);
-                }
+                exc.extend(tree_error_lines.iter().copied());
                 exc
             } else if prepared.capability.structural_safe {
                 // Structural-safe policies cannot break code structure by definition.
@@ -898,18 +921,11 @@ impl PolicyPipeline {
                 BTreeSet::new()
             } else {
                 // Other syntactic policies: exclude tree-sitter error lines
-                state
-                    .tree_for_text
-                    .as_ref()
-                    .map(|t| ts_traversal::tree_error_stats(t).error_lines)
-                    .unwrap_or_default()
+                tree_error_lines
             };
             if !excluded.is_empty() {
                 let before_count = result.edits.len();
-                result.edits = result.edits.iter()
-                    .filter(|e| e.line == 0 || !excluded.contains(&e.line))
-                    .cloned()
-                    .collect();
+                result.edits.retain(|e| e.line == 0 || !excluded.contains(&e.line));
                 let dropped = before_count.saturating_sub(result.edits.len());
                 if dropped > 0 {
                     result.warnings.push(format!(
@@ -1074,6 +1090,7 @@ impl PolicyPipeline {
             .with_semantic_file_context(state.semantic_for_text.as_ref())
             .with_project_graph_snapshot(state.options.project_graph_snapshot.as_deref())
             .with_parser_trust(parser_trust)
+            .with_policy_certainty(Some(executed.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
         let project_query = context.project_query();
         let edit_block_kind = Self::dominant_block_kind_for_edits(state, &executed.result.edits);
@@ -1695,26 +1712,28 @@ impl PolicyPipeline {
                 .or_insert((reference.line, reference.line));
         }
 
+        let mut scopes_by_width: Vec<(usize, usize, usize)> = semantic
+            .scopes
+            .iter()
+            .map(|s| {
+                let start = s.start_line.max(1);
+                let end = s.end_line.max(1);
+                (end.saturating_sub(start), start, end)
+            })
+            .filter(|(_, start, end)| start <= end)
+            .collect();
+        scopes_by_width.sort_unstable();
+
         for line in edit_lines {
             let mut ranges = Vec::<(usize, usize)>::new();
-            let mut containing = semantic
-                .scopes
-                .iter()
-                .filter(|scope| line >= scope.start_line && line <= scope.end_line)
-                .map(|scope| (scope.start_line.max(1), scope.end_line.max(1)))
-                .filter(|(start, end)| start <= end)
-                .collect::<Vec<_>>();
-            containing.sort_by(|left, right| {
-                let left_width = left.1.saturating_sub(left.0);
-                let right_width = right.1.saturating_sub(right.0);
-                left_width.cmp(&right_width).then(left.0.cmp(&right.0))
-            });
-            for range in containing {
-                let width = range.1.saturating_sub(range.0).saturating_add(1);
-                if width > scope_cap {
+            for &(width, start, end) in &scopes_by_width {
+                if width.saturating_add(1) > scope_cap {
+                    break;
+                }
+                if start > line || end < line {
                     continue;
                 }
-                ranges.push(range);
+                ranges.push((start, end));
                 if ranges.len() >= CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE {
                     break;
                 }
@@ -2234,49 +2253,51 @@ impl PolicyPipeline {
         if edits.is_empty() {
             return Some(before_text.to_string());
         }
-        let mut lines: Vec<Cow<'_, str>> = text_scan::TEXT_SCAN
-            .split_lines_as_slices(before_text, true)
-            .into_iter()
-            .map(Cow::Borrowed)
-            .collect();
+        let lines = text_scan::TEXT_SCAN.split_lines_as_slices(before_text, true);
         let mut ordered = edits
             .iter()
             .filter(|edit| edit.line > 0)
             .collect::<Vec<_>>();
         ordered.sort_by_key(|edit| edit.line);
-        let mut offset = 0isize;
+        let mut result = String::with_capacity(before_text.len());
+        let mut src = 0usize;
         for edit in ordered {
-            let base_index = edit.line.saturating_sub(1) as isize + offset;
-            if base_index < 0 {
+            let idx = edit.line.saturating_sub(1);
+            if idx < src {
                 return None;
             }
-            let index = base_index as usize;
+            while src < idx {
+                if src >= lines.len() {
+                    return None;
+                }
+                result.push_str(lines[src]);
+                src += 1;
+            }
             let insertion = edit.before.is_empty() && !edit.after.is_empty();
             let deletion = !edit.before.is_empty() && edit.after.is_empty();
             if insertion {
-                if index > lines.len() {
+                if idx > lines.len() {
                     return None;
                 }
-                lines.insert(index, Cow::Owned(edit.after.clone()));
-                offset = offset.saturating_add(1);
-                continue;
-            }
-            if index >= lines.len() {
-                return None;
-            }
-            if lines[index] != edit.before {
-                return None;
-            }
-            if deletion {
-                lines.remove(index);
-                offset = offset.saturating_sub(1);
+                result.push_str(&edit.after);
             } else {
-                lines[index] = Cow::Owned(edit.after.clone());
+                if src >= lines.len() {
+                    return None;
+                }
+                if lines[src] != edit.before {
+                    return None;
+                }
+                if deletion {
+                    src += 1;
+                } else {
+                    result.push_str(&edit.after);
+                    src += 1;
+                }
             }
         }
-        let mut result = String::with_capacity(before_text.len());
-        for line in &lines {
-            result.push_str(line);
+        while src < lines.len() {
+            result.push_str(lines[src]);
+            src += 1;
         }
         Some(result)
     }
@@ -2395,8 +2416,15 @@ impl PolicyPipeline {
             error_count,
         );
 
-        let coverage = (confidence.semantic_usr_ratio * 0.6 + confidence.text_scan_agreement * 0.4)
-            .clamp(0.0, 1.0);
+        let coverage = if let Some(rename_sig) = confidence.rename_coverage_signal {
+            (confidence.semantic_usr_ratio * 0.5
+                + confidence.text_scan_agreement * 0.3
+                + rename_sig * 0.2)
+                .clamp(0.0, 1.0)
+        } else {
+            (confidence.semantic_usr_ratio * 0.6 + confidence.text_scan_agreement * 0.4)
+                .clamp(0.0, 1.0)
+        };
 
         let richness = if let Some(summary) = semantic_summary {
             let combined = (summary.scope_count + summary.reference_count) as f64;

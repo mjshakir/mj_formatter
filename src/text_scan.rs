@@ -461,12 +461,18 @@ pub(crate) fn count_identifier_occurrences_with_exclusions(
     let mut count = 0usize;
     let last = text_bytes.len() - len;
     let first_byte = name_bytes[0];
+    let mut excl_cursor = 0usize;
     for pos in memchr::memchr_iter(first_byte, &text_bytes[..=last]) {
         if text_bytes[pos..pos + len] == *name_bytes {
             let before_ok = pos == 0 || !is_ident_byte(text_bytes[pos - 1]);
             let after_ok = pos + len >= text_bytes.len() || !is_ident_byte(text_bytes[pos + len]);
-            if before_ok && after_ok && !is_in_excluded_range(excluded, pos) {
-                count += 1;
+            if before_ok && after_ok {
+                while excl_cursor < excluded.len() && excluded[excl_cursor].1 <= pos {
+                    excl_cursor += 1;
+                }
+                if excl_cursor >= excluded.len() || excluded[excl_cursor].0 > pos {
+                    count += 1;
+                }
             }
         }
     }
@@ -502,19 +508,6 @@ fn collect_non_code_ranges_recursive(
     }
 }
 
-fn is_in_excluded_range(ranges: &[(usize, usize)], pos: usize) -> bool {
-    ranges
-        .binary_search_by(|&(start, end)| {
-            if pos < start {
-                std::cmp::Ordering::Greater
-            } else if pos >= end {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
-}
 
 
 #[cfg(test)]

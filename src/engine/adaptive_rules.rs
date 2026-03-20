@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 
 const NUM_RULES: usize = 9;
 

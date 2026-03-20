@@ -8,7 +8,6 @@ use crate::engine::coordinator::FormatterEngine;
 use crate::files::file_io::FileIo;
 use crate::model::file_result::FileResult;
 use crate::model::rename_plan::SemanticRenamePlan;
-use crate::policy::id::PolicyId;
 use crate::runtime::result_cache::CheckResultCache;
 use crate::runtime::scheduler::{DispatchObservation, ProcessedFileOutcome};
 
@@ -142,30 +141,14 @@ impl FileProcessor {
         let retry_effort_units = pass_result.metrics.retry_effort_units();
         let policy_result = pass_result.policy_result;
         let changed = !crate::text_scan::TEXT_SCAN.strings_equal(&policy_result.text, &original);
-        let semantic_rename_policy = PolicyId::NamingConventions;
-        let naming_edits_applied = policy_result.edits.iter().any(|edit| {
-            PolicyId::from_str_lossy(edit.policy.as_str()) == PolicyId::NamingConventions
-        });
         let mut semantic_rename_plans = Vec::new();
         let mut warnings = Vec::new();
-        let mut dropped_propagation_plans = 0usize;
         for warning in policy_result.warnings {
             if let Some(plan) = SemanticRenamePlan::from_internal_warning(warning.as_str()) {
-                if naming_edits_applied {
-                    semantic_rename_plans.push(plan);
-                } else {
-                    dropped_propagation_plans = dropped_propagation_plans.saturating_add(1);
-                }
+                semantic_rename_plans.push(plan);
             } else {
                 warnings.push(warning);
             }
-        }
-        if dropped_propagation_plans > 0 {
-            warnings.push(format!(
-                "{}: skipped {} semantic propagation plan(s) because local rename edits were not applied",
-                semantic_rename_policy.as_str(),
-                dropped_propagation_plans
-            ));
         }
 
         let total_elapsed = total_started.elapsed();

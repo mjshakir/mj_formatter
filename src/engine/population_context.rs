@@ -25,6 +25,8 @@ pub struct PopulationContext {
     pub prior_estimates: [f64; 5],
     pub prior_variances: [f64; 5],
     pub file_count: usize,
+    #[serde(default)]
+    pub prior_observation_count: u32,
     coverage_sorted: Vec<f64>,
     richness_sorted: Vec<f64>,
 }
@@ -43,6 +45,7 @@ impl Default for PopulationContext {
             prior_estimates: [0.85, 0.50, 0.50, 0.50, 0.85],
             prior_variances: [0.06, 0.11, 0.11, 0.11, 0.06],
             file_count: 0,
+            prior_observation_count: 0,
             coverage_sorted: Vec::new(),
             richness_sorted: Vec::new(),
         }
@@ -109,6 +112,7 @@ impl PopulationContext {
             prior_estimates,
             prior_variances,
             file_count: measurements.len(),
+            prior_observation_count: 0,
             coverage_sorted,
             richness_sorted,
         }

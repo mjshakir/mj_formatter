@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -48,7 +50,7 @@ impl ProjectFilter {
         self.observation_count += 1;
     }
 
-    pub fn prior_for_new_file(&self) -> Option<([f64; NUM_DIMS], [f64; NUM_DIMS])> {
+    pub fn prior_for_new_file(&self) -> Option<([f64; NUM_DIMS], [f64; NUM_DIMS], u32)> {
         if self.observation_count < 3 {
             return None;
         }
@@ -60,13 +62,13 @@ impl ProjectFilter {
             widened[3][3],
             widened[4][4],
         ];
-        Some((self.estimate, variances))
+        Some((self.estimate, variances, (self.observation_count as u32).min(5)))
     }
 }
 
 pub struct CertaintyFilterStore {
     entries: DashMap<String, CertaintyFilterState>,
-    population_priors: ArcSwap<Option<([f64; NUM_DIMS], [f64; NUM_DIMS])>>,
+    population_priors: ArcSwap<Option<([f64; NUM_DIMS], [f64; NUM_DIMS], u32)>>,
     project_filter: Mutex<ProjectFilter>,
     adaptive_rules: Mutex<AdaptiveRuleBases>,
 }
@@ -76,7 +78,7 @@ impl CertaintyFilterStore {
         population_context: Option<&crate::engine::population_context::PopulationContext>,
     ) -> Self {
         let population_priors = population_context.map(|ctx| {
-            (ctx.prior_estimates, ctx.prior_variances)
+            (ctx.prior_estimates, ctx.prior_variances, ctx.prior_observation_count)
         });
         Self {
             entries: DashMap::new(),
@@ -112,7 +114,7 @@ impl CertaintyFilterStore {
             return None;
         }
         let population_priors = population_context.map(|ctx| {
-            (ctx.prior_estimates, ctx.prior_variances)
+            (ctx.prior_estimates, ctx.prior_variances, ctx.prior_observation_count)
         });
         let entries = DashMap::new();
         for (k, v) in map {
@@ -170,10 +172,10 @@ impl CertaintyFilterStore {
             .entries
             .entry(file_path.to_string())
             .or_insert_with(|| {
-                if let Some((est, var)) = project_prior {
-                    CertaintyFilterState::new_with_prior(est, var)
-                } else if let Some((est, var)) = priors {
-                    CertaintyFilterState::new_with_prior(est, var)
+                if let Some((est, var, obs)) = project_prior {
+                    CertaintyFilterState::new_with_prior(est, var, obs)
+                } else if let Some((est, var, obs)) = priors {
+                    CertaintyFilterState::new_with_prior(est, var, obs)
                 } else {
                     CertaintyFilterState::new()
                 }
@@ -204,6 +206,22 @@ impl CertaintyFilterStore {
                 }
             })
             .unwrap_or(0.50)
+    }
+
+    #[allow(dead_code)]
+    pub fn population_edit_success(&self) -> f64 {
+        let priors = **self.population_priors.load();
+        if let Some((estimates, _variances, obs)) = priors {
+            if obs >= 3 {
+                return estimates[4].clamp(0.0, 1.0);
+            }
+        }
+        if let Some(pf) = self.project_filter.lock().ok() {
+            if let Some((est, _var, _obs)) = pf.prior_for_new_file() {
+                return est[4].clamp(0.0, 1.0);
+            }
+        }
+        0.5
     }
 
     pub fn record_edit_outcome(&self, file_path: &str, outcome: f64) {

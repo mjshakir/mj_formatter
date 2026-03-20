@@ -20,6 +20,7 @@ impl App {
         parser_manager: &ParserManager,
         results: &mut [FileResult],
         parallel_pool: Option<&rayon::ThreadPool>,
+        population_edit_success: f64,
     ) {
         let mut rename_by_decl: HashMap<ClangDeclKey, (String, String)> = HashMap::new();
         let mut plan_conflict = None::<String>;
@@ -56,6 +57,35 @@ impl App {
             }
             return;
         }
+        if rename_by_decl.is_empty() {
+            return;
+        }
+
+        // Population-level Kalman filtering: compute per-declaration agreement
+        // across files and filter renames that lack cross-file consensus weighted
+        // by population edit_success trust.
+        let willingness = 1.0 / (1.0 + (-5.0_f64 * (population_edit_success - 0.5)).exp());
+        let population_edit_bar = 1.0 - willingness;
+        let mut decl_proposer_count: HashMap<ClangDeclKey, usize> = HashMap::new();
+        for result in results.iter() {
+            if result.error.is_some() {
+                continue;
+            }
+            for plan in &result.semantic_rename_plans {
+                *decl_proposer_count.entry(plan.decl.clone()).or_insert(0) += 1;
+            }
+        }
+        let total_files_with_plans = results
+            .iter()
+            .filter(|r| r.error.is_none() && !r.semantic_rename_plans.is_empty())
+            .count()
+            .max(1);
+        rename_by_decl.retain(|decl, _| {
+            let proposers = decl_proposer_count.get(decl).copied().unwrap_or(0);
+            let agreement = proposers as f64 / total_files_with_plans as f64;
+            let score = agreement * population_edit_success;
+            score >= population_edit_bar
+        });
         if rename_by_decl.is_empty() {
             return;
         }

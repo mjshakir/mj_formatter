@@ -32,6 +32,25 @@ impl FuzzyVariable {
         Self { low, medium, high }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    pub fn memberships(&self, x: f64) -> [f64; 3] {
+        unsafe {
+            use core::arch::aarch64::*;
+            let x_vec   = vdupq_n_f64(x);
+            let centers = vld1q_f64([self.low.center, self.medium.center].as_ptr());
+            let sigmas  = vld1q_f64([self.low.sigma,  self.medium.sigma].as_ptr());
+            let z       = vdivq_f64(vsubq_f64(x_vec, centers), sigmas);
+            let exp_arg = vmulq_f64(vdupq_n_f64(-0.5), vmulq_f64(z, z));
+            let z2c = (x - self.high.center) / self.high.sigma;
+            [
+                vgetq_lane_f64(exp_arg, 0).exp(),
+                vgetq_lane_f64(exp_arg, 1).exp(),
+                (-0.5 * z2c * z2c).exp(),
+            ]
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     pub fn memberships(&self, x: f64) -> [f64; 3] {
         [
             self.low.membership(x),
@@ -182,7 +201,7 @@ unsafe fn evaluate_ts2_f64_neon(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64
 /// Piecewise-linear interpolation: Kalman-direct replacement for T-S1 evaluations.
 /// At x=0 → c0, x=0.5 → c1, x=1.0 → c2. Smooth two-segment linear.
 #[inline(always)]
-fn kalman_interp(x: f64, c0: f64, c1: f64, c2: f64) -> f64 {
+pub fn kalman_interp(x: f64, c0: f64, c1: f64, c2: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
     if x <= 0.5 {
         c0 + (c1 - c0) * (x * 2.0)
@@ -253,7 +272,7 @@ pub fn fuzzy_trust_semantic_rewrite(certainty: &PolicyCertainty) -> f64 {
     let oc = certainty.observation_count;
     let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp, oc);
     let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp, oc);
-    let base = (sem * cov).sqrt().clamp(0.0, 1.0);
+    let base = (0.65 * sem + 0.35 * cov).clamp(0.0, 1.0);
     (base * modulation(certainty)).clamp(0.0, 1.0)
 }
 
@@ -263,6 +282,25 @@ pub fn fuzzy_trust_structural(certainty: &PolicyCertainty) -> f64 {
     let oc = certainty.observation_count;
     let base = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp, oc);
     (base * modulation(certainty)).clamp(0.0, 1.0)
+}
+
+/// Kalman-direct region batch size for clang_format: uses the file's actual
+/// tree-sitter error node count to drive region splitting, modulated by Kalman
+/// structural trust. Files with zero errors use whole-file formatting. Files with
+/// errors get smaller regions to contain checkpoint blast radius.
+pub fn fuzzy_region_batch_lines(certainty: &PolicyCertainty, file_error_nodes: usize) -> usize {
+    if file_error_nodes == 0 {
+        return usize::MAX;
+    }
+    let error_pressure = (file_error_nodes as f64 / 5.0).clamp(0.0, 1.0);
+    let trust = if certainty.observation_count >= 3 {
+        fuzzy_trust_structural(certainty)
+    } else {
+        0.5
+    };
+    let combined = (1.0 - error_pressure) * trust;
+    let raw = kalman_interp(combined, 30.0, 200.0, 10_000.0);
+    (raw as usize).max(10)
 }
 
 /// Kalman-direct trust: average of semantic + structural, damped by variance.
@@ -426,9 +464,12 @@ pub fn fuzzy_semantic_fidelity(
     let oc = certainty.observation_count;
     let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp, oc);
     let cov = adaptive_variance_damp(certainty.coverage, certainty.coverage_variance, 2, mp, oc);
-    let kalman_fidelity = (sem * cov).sqrt().clamp(0.0, 1.0);
+    let kalman_fidelity = (0.65 * sem + 0.35 * cov).clamp(0.0, 1.0);
 
-    (context_base * 0.4 + kalman_fidelity * 0.6).clamp(0.0, 1.0)
+    let maturity = (oc as f64 / 10.0).clamp(0.0, 1.0);
+    let context_weight = 0.4 * (1.0 - 0.5 * maturity);
+    let kalman_weight = 1.0 - context_weight;
+    (context_base * context_weight + kalman_fidelity * kalman_weight).clamp(0.0, 1.0)
 }
 
 pub fn fuzzy_fidelity_deduction(fidelity_score: f64, trust: f64) -> u16 {
@@ -1246,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_trust_zero_coverage_near_zero() {
+    fn fuzzy_trust_zero_coverage_reduces_but_not_kills() {
         let c = PolicyCertainty {
             semantic: 0.90,
             coverage: 0.0,
@@ -1257,9 +1298,10 @@ mod tests {
             edit_success_variance: 0.002,
             ..default_certainty()
         };
-        assert!(fuzzy_trust_semantic_rewrite(&c) < 0.15,
-            "zero coverage should yield near-zero trust, got {}",
-            fuzzy_trust_semantic_rewrite(&c));
+        let trust = fuzzy_trust_semantic_rewrite(&c);
+        assert!(trust > 0.25 && trust < 0.65,
+            "zero coverage should reduce trust but not kill it, got {}",
+            trust);
     }
 
     #[test]
@@ -1874,5 +1916,81 @@ mod tests {
         let neon_result = evaluate_ts2_f64(&m0, &m1, &cons);
         assert!((scalar - neon_result).abs() < 1e-12,
             "f64 NEON should match scalar: scalar={scalar}, neon={neon_result}");
+    }
+
+    #[test]
+    fn fidelity_increases_with_observation_maturity() {
+        use crate::engine::catalog::PolicyCertainty;
+        use crate::parser::manager::SemanticCompdbContextKind;
+
+        let base = PolicyCertainty {
+            semantic: 0.90,
+            coverage: 0.80,
+            semantic_variance: 0.005,
+            coverage_variance: 0.005,
+            stable_model_prob: 0.60,
+            transitional_model_prob: 0.20,
+            noisy_model_prob: 0.20,
+            edit_success: 0.50,
+            edit_success_variance: 0.01,
+            ..Default::default()
+        };
+
+        let young = PolicyCertainty { observation_count: 1, ..base };
+        let mature = PolicyCertainty { observation_count: 10, ..base };
+
+        let fidelity_young = fuzzy_semantic_fidelity(
+            SemanticCompdbContextKind::PairedSourceHeuristic,
+            Some(&young),
+        );
+        let fidelity_mature = fuzzy_semantic_fidelity(
+            SemanticCompdbContextKind::PairedSourceHeuristic,
+            Some(&mature),
+        );
+        assert!(
+            fidelity_mature > fidelity_young,
+            "mature fidelity ({fidelity_mature:.4}) should exceed young ({fidelity_young:.4})"
+        );
+    }
+
+    #[test]
+    fn coverage_zero_reduces_but_not_kills_trust() {
+        let c = PolicyCertainty {
+            semantic: 0.85,
+            coverage: 0.0,
+            semantic_variance: 0.005,
+            coverage_variance: 0.005,
+            stable_model_prob: 0.60,
+            edit_success: 0.70,
+            edit_success_variance: 0.005,
+            observation_count: 5,
+            ..default_certainty()
+        };
+        let trust = fuzzy_trust_semantic_rewrite(&c);
+        assert!(trust > 0.25,
+            "zero coverage should not kill trust, got {trust}");
+    }
+
+    #[test]
+    fn high_prior_obs_count_gives_mature_damping() {
+        let low_obs = PolicyCertainty {
+            semantic: 0.80,
+            coverage: 0.70,
+            semantic_variance: 0.04,
+            coverage_variance: 0.04,
+            stable_model_prob: 0.50,
+            edit_success: 0.50,
+            edit_success_variance: 0.01,
+            observation_count: 1,
+            ..default_certainty()
+        };
+        let high_obs = PolicyCertainty {
+            observation_count: 5,
+            ..low_obs
+        };
+        let trust_low = fuzzy_trust_semantic_rewrite(&low_obs);
+        let trust_high = fuzzy_trust_semantic_rewrite(&high_obs);
+        assert!(trust_high < trust_low,
+            "higher obs_count with high variance should damp more: obs1={trust_low:.4}, obs5={trust_high:.4}");
     }
 }
