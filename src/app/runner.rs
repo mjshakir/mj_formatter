@@ -474,6 +474,10 @@ impl App {
             .filter(|ctx| ctx.file_count >= 3)
             .map(|ctx| ctx.prior_estimates[4].clamp(0.0, 1.0))
             .unwrap_or(0.5);
+        let population_observation_count = population_context
+            .as_ref()
+            .map(|ctx| ctx.prior_observation_count)
+            .unwrap_or(0);
         let started = Instant::now();
         let mut results = if multi_process_enabled {
             Self::run_multiprocess_pass(&args, &config, files, effective_processes, false, population_context)?
@@ -519,6 +523,7 @@ impl App {
                         &mut results,
                         parallel_pool.as_ref(),
                         false,
+                        population_observation_count,
                     )
                 } else {
                     None
@@ -532,6 +537,7 @@ impl App {
                     &mut results,
                     parallel_pool.as_ref(),
                     true,
+                    population_observation_count,
                 )
             }
         } else {
