@@ -38,6 +38,24 @@ impl PolicyPipeline {
                         validated_tree: Some(tree),
                     };
                 }
+                if let Some(before_clang) = state.clang_for_text.as_ref() {
+                    let before_clang_errors = before_clang.error_diagnostic_count();
+                    if let Ok(after_clang) = self.parser_manager.parse_clang(
+                        &coordinated.result.text,
+                        state.path,
+                    ) {
+                        if after_clang.error_diagnostic_count() <= before_clang_errors {
+                            return PolicyCheckpointResult::SensorDisagreementAccept {
+                                validated_tree: Some(tree),
+                                warning: format!(
+                                    "checkpoint: '{}' sensor disagreement — tree-sitter +{} error(s) but clang OK, accepting",
+                                    policy_name,
+                                    stats.error_nodes.saturating_sub(before_errors),
+                                ),
+                            };
+                        }
+                    }
+                }
                 let new_error_lines: BTreeSet<usize> = stats.error_lines;
                 let rollback_attempt = self.attempt_partial_rollback(
                     state,
