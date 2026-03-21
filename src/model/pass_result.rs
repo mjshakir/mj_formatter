@@ -30,4 +30,5 @@ pub struct FormatPassResult {
     pub metrics: FormatPassMetrics,
     pub policy_certainty: Option<PolicyCertainty>,
     pub rollback_count: usize,
+    pub sensor_disagreement_count: usize,
 }
