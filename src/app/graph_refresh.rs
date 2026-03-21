@@ -27,7 +27,13 @@ use crate::runtime::retry_telemetry::{
     RetryStrategySnapshotEntry,
 };
 
-const MAX_EAGER_PROJECT_GRAPH_PARSE_UPDATES: usize = 8;
+fn adaptive_eager_parse_cap(total_targets: usize, population_observation_count: u32) -> usize {
+    let base = (total_targets as f64).sqrt().ceil() as usize;
+    let maturity = 1.0 / (1.0 + (-3.0_f64 * (population_observation_count as f64 / 10.0 - 1.0)).exp());
+    let factor = 1.5 - maturity;
+    let cap = (base as f64 * factor).ceil() as usize;
+    cap.max(4)
+}
 
 impl App {
     pub(crate) fn open_project_graph_runtime(
@@ -379,6 +385,7 @@ impl App {
         results: &mut [FileResult],
         parallel_pool: Option<&rayon::ThreadPool>,
         include_parse_updates: bool,
+        population_observation_count: u32,
     ) -> Option<ProjectGraphPersistStats> {
         let convergence_pairs = Self::collect_convergence_pairs(results);
         let graph_snapshot = project_graph.snapshot();
@@ -501,15 +508,21 @@ impl App {
                 }
             }
         }
-        if Self::should_skip_project_graph_parse_updates(targets.len()) {
+        let cap = adaptive_eager_parse_cap(targets.len(), population_observation_count);
+        if targets.len() > cap {
+            targets.sort_by(|a, b| {
+                let edits_a = a.0.map(|i| results[i].edits.len()).unwrap_or(0);
+                let edits_b = b.0.map(|i| results[i].edits.len()).unwrap_or(0);
+                edits_b.cmp(&edits_a)
+            });
+            let deferred = targets.len() - cap;
+            targets.truncate(cap);
             if let Some(result) = results.iter_mut().find(|item| item.error.is_none()) {
                 result.warnings.push(format!(
-                    "project_graph: skipped parse refresh for {} file(s); batch exceeds eager update cap {}",
-                    targets.len(),
-                    MAX_EAGER_PROJECT_GRAPH_PARSE_UPDATES
+                    "project_graph: deferred parse refresh for {} lower-impact file(s) (cap={}, obs={})",
+                    deferred, cap, population_observation_count
                 ));
             }
-            targets.clear();
         }
         if targets.is_empty()
             && convergence_pairs.is_empty()
@@ -610,22 +623,23 @@ impl App {
         }
     }
 
-    fn should_skip_project_graph_parse_updates(target_count: usize) -> bool {
-        target_count > MAX_EAGER_PROJECT_GRAPH_PARSE_UPDATES
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{App, MAX_EAGER_PROJECT_GRAPH_PARSE_UPDATES};
+    use super::adaptive_eager_parse_cap;
 
     #[test]
-    fn project_graph_parse_refresh_skips_large_batches() {
-        assert!(!App::should_skip_project_graph_parse_updates(
-            MAX_EAGER_PROJECT_GRAPH_PARSE_UPDATES
-        ));
-        assert!(App::should_skip_project_graph_parse_updates(
-            MAX_EAGER_PROJECT_GRAPH_PARSE_UPDATES + 1
-        ));
+    fn adaptive_cap_scales_sublinearly() {
+        // Cold start (obs=0): sqrt(31)≈6 * 1.5 = 9
+        let cap = adaptive_eager_parse_cap(31, 0);
+        assert!(cap >= 4 && cap <= 12, "cold cap for 31: {cap}");
+        // Warm start (obs=20): sqrt(31)≈6 * ~0.5 = 3 → clamped to 4
+        let cap_warm = adaptive_eager_parse_cap(31, 20);
+        assert!(cap_warm >= 4, "warm cap for 31: {cap_warm}");
+        assert!(cap_warm <= cap, "warm should be <= cold: {cap_warm} vs {cap}");
+        // Small batch: always fits
+        let cap_small = adaptive_eager_parse_cap(4, 0);
+        assert!(cap_small >= 4, "small batch cap: {cap_small}");
     }
 }
