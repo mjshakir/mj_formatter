@@ -181,7 +181,7 @@ impl FormatterEngine {
             );
             self.record_success(0);
             let penalized = Self::rollback_penalized_outcome(0.50, pass_result.rollback_count);
-            let penalized = Self::sensor_disagreement_modulated_outcome(penalized, pass_result.sensor_disagreement_count);
+
             self.pipeline.record_edit_outcome(path, penalized);
             return Ok(pass_result);
         }
@@ -197,7 +197,7 @@ impl FormatterEngine {
                 );
             drop(adaptive_outcome_base);
             let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_result.rollback_count);
-            let penalized = Self::sensor_disagreement_modulated_outcome(penalized, pass_result.sensor_disagreement_count);
+
             self.pipeline.record_edit_outcome(path, penalized);
             pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
@@ -316,7 +316,7 @@ impl FormatterEngine {
                 );
             drop(adaptive_outcome_base);
             let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_result.rollback_count);
-            let penalized = Self::sensor_disagreement_modulated_outcome(penalized, pass_result.sensor_disagreement_count);
+
             self.pipeline.record_edit_outcome(path, penalized);
             if let Some(mut record) = firing_record_1 {
                 record.outcome_firing = outcome_firing;
@@ -354,7 +354,7 @@ impl FormatterEngine {
                 );
             drop(adaptive_outcome_base);
             let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_result.rollback_count);
-            let penalized = Self::sensor_disagreement_modulated_outcome(penalized, pass_result.sensor_disagreement_count);
+
             self.pipeline.record_edit_outcome(path, penalized);
             return self.reverted_result(path, text, pass_result, warnings, 1);
         }
@@ -449,7 +449,6 @@ impl FormatterEngine {
                 );
             drop(adaptive_outcome_base);
             let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_2.rollback_count);
-            let penalized = Self::sensor_disagreement_modulated_outcome(penalized, pass_2.sensor_disagreement_count);
             self.pipeline.record_edit_outcome(path, penalized);
             if let Some(mut record) = firing_record_2 {
                 record.outcome_firing = outcome_firing;
@@ -471,7 +470,6 @@ impl FormatterEngine {
             );
         drop(adaptive_outcome_base);
         let penalized = Self::rollback_penalized_outcome(edit_outcome, pass_2.rollback_count);
-        let penalized = Self::sensor_disagreement_modulated_outcome(penalized, pass_2.sensor_disagreement_count);
         self.pipeline.record_edit_outcome(path, penalized);
         self.reverted_result(path, text, pass_2, warnings, 2)
     }
@@ -565,16 +563,6 @@ impl FormatterEngine {
         }
     }
 
-    #[inline(always)]
-    fn sensor_disagreement_modulated_outcome(edit_outcome: f64, disagreement_count: usize) -> f64 {
-        if disagreement_count == 0 {
-            edit_outcome
-        } else {
-            let factor = (1.0 - 0.05 * disagreement_count as f64).max(0.85);
-            (edit_outcome * factor).clamp(0.0, 1.0)
-        }
-    }
-
     fn reverted_result(
         &self,
         path: &Path,
@@ -628,7 +616,6 @@ impl FormatterEngine {
             metrics: FormatPassMetrics::default(),
             policy_certainty: None,
             rollback_count: 0,
-            sensor_disagreement_count: 0,
         })
     }
 
