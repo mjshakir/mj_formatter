@@ -320,11 +320,13 @@ impl Policy for ClangFormatPolicy {
             .unwrap_or(0);
 
         let line_count = context.text.lines().count();
-        let batch_size = context
-            .policy_certainty
-            .as_ref()
-            .map(|c| fuzzy_inference::fuzzy_region_batch_lines(c, before_error_count))
-            .unwrap_or(usize::MAX);
+        let batch_size = context.forced_batch_size.unwrap_or_else(|| {
+            context
+                .policy_certainty
+                .as_ref()
+                .map(|c| fuzzy_inference::fuzzy_region_batch_lines(c, before_error_count))
+                .unwrap_or(usize::MAX)
+        });
         let regions = Self::compute_line_regions(line_count, batch_size);
 
         if regions.len() <= 1 {
