@@ -117,7 +117,6 @@ pub(super) struct PolicyPipelineRunState<'a> {
     context_modifiers: [f32; 24],
     block_context_modifiers: [[f32; 24]; 6],
     rollback_count: usize,
-    sensor_disagreement_count: usize,
     rename_coverage_signal: Option<f64>,
     checkpoint_retry_batch_size: Option<usize>,
 }
@@ -225,10 +224,6 @@ struct ExecutedPolicyStage {
 
 pub(super) enum PolicyCheckpointResult {
     Accept { validated_tree: Option<Tree> },
-    SensorDisagreementAccept {
-        validated_tree: Option<Tree>,
-        warning: String,
-    },
     PartialRollback {
         recovered_text: String,
         recovered_edits: Vec<Edit>,
@@ -407,7 +402,6 @@ impl PolicyPipeline {
             metrics: FormatPassMetrics::default(),
             policy_certainty: state.cached_certainty,
             rollback_count: state.rollback_count,
-            sensor_disagreement_count: state.sensor_disagreement_count,
         })
     }
 
@@ -468,7 +462,6 @@ impl PolicyPipeline {
             context_modifiers: self.batch_context_modifiers(path),
             block_context_modifiers: self.batch_block_context_modifiers(),
             rollback_count: 0,
-            sensor_disagreement_count: 0,
             rename_coverage_signal: None,
             checkpoint_retry_batch_size: None,
         }
@@ -611,16 +604,6 @@ impl PolicyPipeline {
                     state.tree_for_text = Some(tree);
                 }
             }
-            PolicyCheckpointResult::SensorDisagreementAccept { validated_tree, warning } => {
-                state.all_warnings.push(warning);
-                state.sensor_disagreement_count += 1;
-                self.commit_policy_stage(state, CommitPolicyInput {
-                    policy_name, policy_started, coordinated, is_semantic_rewrite,
-                });
-                if let Some(tree) = validated_tree {
-                    state.tree_for_text = Some(tree);
-                }
-            }
             PolicyCheckpointResult::PartialRollback {
                 recovered_text,
                 recovered_edits,
@@ -680,17 +663,6 @@ impl PolicyPipeline {
                             let retry_coordinated = self.coordinate_policy_stage(state, policy_name, retry_executed);
                             match self.checkpoint_policy_stage(state, &retry_coordinated, policy_name) {
                                 PolicyCheckpointResult::Accept { validated_tree } => {
-                                    self.commit_policy_stage(state, CommitPolicyInput {
-                                        policy_name, policy_started, coordinated: retry_coordinated, is_semantic_rewrite,
-                                    });
-                                    if let Some(tree) = validated_tree {
-                                        state.tree_for_text = Some(tree);
-                                    }
-                                    return Ok(());
-                                }
-                                PolicyCheckpointResult::SensorDisagreementAccept { validated_tree, warning } => {
-                                    state.all_warnings.push(warning);
-                                    state.sensor_disagreement_count += 1;
                                     self.commit_policy_stage(state, CommitPolicyInput {
                                         policy_name, policy_started, coordinated: retry_coordinated, is_semantic_rewrite,
                                     });
