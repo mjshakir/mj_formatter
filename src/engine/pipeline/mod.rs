@@ -118,6 +118,7 @@ pub(super) struct PolicyPipelineRunState<'a> {
     block_context_modifiers: [[f32; 24]; 6],
     rollback_count: usize,
     rename_coverage_signal: Option<f64>,
+    checkpoint_retry_batch_size: Option<usize>,
 }
 
 impl<'a> PolicyPipelineRunState<'a> {
@@ -229,7 +230,7 @@ pub(super) enum PolicyCheckpointResult {
         validated_tree: Option<Tree>,
         warning: String,
     },
-    Rollback { reason: String },
+    Rollback { reason: String, after_error_count: usize },
 }
 
 pub(super) struct CoordinatedPolicyStage {
@@ -462,6 +463,7 @@ impl PolicyPipeline {
             block_context_modifiers: self.batch_block_context_modifiers(),
             rollback_count: 0,
             rename_coverage_signal: None,
+            checkpoint_retry_batch_size: None,
         }
     }
 
@@ -640,8 +642,61 @@ impl PolicyPipeline {
                     state.invalidate_semantic_state(true);
                 }
             }
-            PolicyCheckpointResult::Rollback { reason } => {
-                state.all_warnings.push(reason);
+            PolicyCheckpointResult::Rollback { reason, after_error_count } => {
+                let mut retried = false;
+                if state.checkpoint_retry_batch_size.is_none() && after_error_count > 0 {
+                    let retry_batch = state.cached_certainty
+                        .as_ref()
+                        .map(|c| crate::engine::fuzzy_inference::fuzzy_region_batch_lines(c, after_error_count))
+                        .unwrap_or(50);
+                    if retry_batch < state.current.lines().count() {
+                        state.checkpoint_retry_batch_size = Some(retry_batch);
+                        self.ensure_policy_parse_stage(state, policy, policy_name, policy_started)?;
+                        let Some(prepared) = self.prepare_policy_stage(state, policy_name, policy_started) else {
+                            state.all_warnings.push(reason);
+                            state.rollback_count += 1;
+                            return Ok(());
+                        };
+                        let retry_executed = self.execute_policy_stage(state, policy, prepared, policy_started)?;
+                        if !text_scan::TEXT_SCAN.strings_equal(&retry_executed.result.text, &state.current) {
+                            retried = true;
+                            let retry_coordinated = self.coordinate_policy_stage(state, policy_name, retry_executed);
+                            match self.checkpoint_policy_stage(state, &retry_coordinated, policy_name) {
+                                PolicyCheckpointResult::Accept { validated_tree } => {
+                                    self.commit_policy_stage(state, CommitPolicyInput {
+                                        policy_name, policy_started, coordinated: retry_coordinated, is_semantic_rewrite,
+                                    });
+                                    if let Some(tree) = validated_tree {
+                                        state.tree_for_text = Some(tree);
+                                    }
+                                    return Ok(());
+                                }
+                                PolicyCheckpointResult::PartialRollback {
+                                    recovered_text, recovered_edits, validated_tree, warning,
+                                } => {
+                                    state.all_warnings.push(warning);
+                                    let edit_count = recovered_edits.len();
+                                    state.telemetry_samples.push(PolicyExecutionSample::success(
+                                        policy_name, policy_started.elapsed(), edit_count, 0,
+                                    ));
+                                    state.current = Arc::from(recovered_text.as_str());
+                                    state.cached_tree_error_lines = None;
+                                    state.all_edits.extend(recovered_edits);
+                                    if let Some(tree) = validated_tree {
+                                        state.tree_for_text = Some(tree);
+                                    }
+                                    return Ok(());
+                                }
+                                PolicyCheckpointResult::Rollback { reason: retry_reason, .. } => {
+                                    state.all_warnings.push(retry_reason);
+                                }
+                            }
+                        }
+                    }
+                }
+                if !retried {
+                    state.all_warnings.push(reason);
+                }
                 state.telemetry_samples.push(PolicyExecutionSample::failed(
                     policy_name,
                     policy_started.elapsed(),
@@ -836,7 +891,7 @@ impl PolicyPipeline {
             semantic_rewrite: prepared.policy_certainty.trust_for_semantic_rewrite(),
         };
         let tree_error_lines = state.tree_error_lines_cached().clone();
-        let context = PolicyContext::new(&state.current, state.path)
+        let mut context = PolicyContext::new(&state.current, state.path)
             .with_tree_sitter_tree(state.tree_for_text.as_ref())
             .with_clang_parse_result(state.clang_for_text.as_deref())
             .with_semantic_file_context(state.semantic_for_text.as_ref())
@@ -844,6 +899,7 @@ impl PolicyPipeline {
             .with_parser_trust(parser_trust)
             .with_policy_certainty(Some(prepared.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
+        context.forced_batch_size = state.checkpoint_retry_batch_size.take();
         let semantic_query = context.semantic_query();
         let project_query = context.project_query();
         let mut result = policy.apply(&context);
