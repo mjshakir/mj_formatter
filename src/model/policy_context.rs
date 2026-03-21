@@ -42,6 +42,7 @@ pub struct PolicyContext<'a> {
     pub parser_trust: ParserTrust,
     pub policy_certainty: Option<PolicyCertainty>,
     pub query_cache: Option<&'a TsQueryCache>,
+    pub forced_batch_size: Option<usize>,
 }
 
 impl<'a> PolicyContext<'a> {
@@ -56,6 +57,7 @@ impl<'a> PolicyContext<'a> {
             parser_trust: ParserTrust::default(),
             policy_certainty: None,
             query_cache: None,
+            forced_batch_size: None,
         }
     }
 
