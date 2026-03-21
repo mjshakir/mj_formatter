@@ -45,13 +45,13 @@ impl PolicyPipeline {
                         state.path,
                     ) {
                         if after_clang.error_diagnostic_count() <= before_clang_errors {
-                            return PolicyCheckpointResult::SensorDisagreementAccept {
+                            tracing::info!(
+                                "checkpoint: '{}' tree-sitter +{} error(s) but clang OK — accepting (tree-sitter false positive)",
+                                policy_name,
+                                stats.error_nodes.saturating_sub(before_errors),
+                            );
+                            return PolicyCheckpointResult::Accept {
                                 validated_tree: Some(tree),
-                                warning: format!(
-                                    "checkpoint: '{}' sensor disagreement — tree-sitter +{} error(s) but clang OK, accepting",
-                                    policy_name,
-                                    stats.error_nodes.saturating_sub(before_errors),
-                                ),
                             };
                         }
                     }
