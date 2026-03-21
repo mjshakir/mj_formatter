@@ -38,7 +38,7 @@ impl PolicyPipeline {
                         validated_tree: Some(tree),
                     };
                 }
-                if let Some(before_clang) = state.clang_for_text.as_ref() {
+                if let Ok(before_clang) = self.parser_manager.parse_clang(&state.current, state.path) {
                     let before_clang_errors = before_clang.error_diagnostic_count();
                     if let Ok(after_clang) = self.parser_manager.parse_clang(
                         &coordinated.result.text,
