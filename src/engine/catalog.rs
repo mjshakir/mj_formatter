@@ -265,12 +265,12 @@ impl PolicyCatalog {
             .unwrap_or(self.default_behavior)
     }
 
-    pub fn is_semantic_rewrite_policy_name(&self, policy_name: &str) -> bool {
-        self.capabilities_for_name(policy_name).semantic_rewrite
-    }
-
     pub fn bypasses_line_conflict(&self, policy_name: &str) -> bool {
         self.behavior_for_name(policy_name).bypasses_line_conflict
+    }
+
+    pub fn is_semantic_rewrite_policy_name(&self, policy_name: &str) -> bool {
+        self.capabilities_for_name(policy_name).semantic_rewrite
     }
 
     fn entry_for_known_policy(policy_id: PolicyId) -> PolicyCatalogEntry {
@@ -411,7 +411,10 @@ impl PolicyCatalog {
             keeps_non_local_conflict_batch: matches!(policy_id, PolicyId::ClangFormat),
             advisory_on_semantic_retry: matches!(policy_id, PolicyId::ClangFormat),
             hard_invariant_by_default: false,
-            bypasses_line_conflict: matches!(policy_id, PolicyId::NumericLiteralSuffix | PolicyId::ClangFormat),
+            bypasses_line_conflict: matches!(
+                policy_id,
+                PolicyId::NumericLiteralSuffix | PolicyId::ClangFormat
+            ),
             execution_priority: match policy_id {
                 PolicyId::NamingConventions => 10,
                 PolicyId::SnakeCase
