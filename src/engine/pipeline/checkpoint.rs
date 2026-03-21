@@ -57,6 +57,7 @@ impl PolicyPipeline {
                         policy_name,
                         stats.error_nodes.saturating_sub(before_errors),
                     ),
+                    after_error_count: stats.error_nodes,
                 }
             }
             Err(_) => {
