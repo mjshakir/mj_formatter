@@ -230,6 +230,7 @@ impl CheckResultCache {
             warnings: cached.warnings.clone(),
             elapsed_engine_ms: 0.0,
             elapsed_total_ms: 0.0,
+            boot_parse_ms: 0.0,
             policy_certainty: None,
         }
     }
