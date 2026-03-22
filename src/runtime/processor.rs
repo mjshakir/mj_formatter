@@ -55,6 +55,7 @@ impl FileProcessor {
                     warnings: Vec::new(),
                     elapsed_engine_ms: 0.0,
                     elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                    boot_parse_ms: 0.0,
                     policy_certainty: None,
                 };
                 let observation = DispatchObservation::from_processed_file(
@@ -121,6 +122,7 @@ impl FileProcessor {
                     warnings: Vec::new(),
                     elapsed_engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
                     elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                    boot_parse_ms: 0.0,
                     policy_certainty: None,
                 };
                 let observation = DispatchObservation::from_processed_file(
@@ -167,6 +169,7 @@ impl FileProcessor {
             warnings,
             elapsed_engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
             elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
+            boot_parse_ms: pass_result.boot_parse_ms,
             policy_certainty: pass_result.policy_certainty,
         };
         if self.check {
