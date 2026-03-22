@@ -91,6 +91,12 @@ pub struct PolicyExecutionTrace {
     #[serde(default)]
     pub elapsed_ms: f64,
     #[serde(default)]
+    pub parse_ms: f64,
+    #[serde(default)]
+    pub execute_ms: f64,
+    #[serde(default)]
+    pub checkpoint_ms: f64,
+    #[serde(default)]
     pub candidate_trace: Vec<PolicyCandidateTrace>,
 }
 
@@ -119,6 +125,9 @@ mod tests {
             confidence_threshold: Some(0.80),
             executor_scope: RetryScopeStage::Full,
             elapsed_ms: 0.0,
+            parse_ms: 0.0,
+            execute_ms: 0.0,
+            checkpoint_ms: 0.0,
             candidate_trace: vec![PolicyCandidateTrace {
                 line: 12,
                 confidence: 0.9,
