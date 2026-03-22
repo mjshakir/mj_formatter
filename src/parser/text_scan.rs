@@ -447,7 +447,7 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-pub(crate) fn count_identifier_occurrences_with_exclusions(
+pub(crate) fn count_id_excluded(
     text: &str,
     name: &str,
     excluded: &[(usize, usize)],
@@ -479,15 +479,15 @@ pub(crate) fn count_identifier_occurrences_with_exclusions(
     count
 }
 
-pub(crate) fn collect_non_code_byte_ranges(tree: &tree_sitter::Tree) -> Vec<(usize, usize)> {
+pub(crate) fn non_code_ranges(tree: &tree_sitter::Tree) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut cursor = tree.walk();
-    collect_non_code_ranges_recursive(&mut cursor, &mut ranges);
+    non_code_ranges_walk(&mut cursor, &mut ranges);
     ranges.sort_unstable_by_key(|r| r.0);
     ranges
 }
 
-fn collect_non_code_ranges_recursive(
+fn non_code_ranges_walk(
     cursor: &mut tree_sitter::TreeCursor,
     ranges: &mut Vec<(usize, usize)>,
 ) {
@@ -499,7 +499,7 @@ fn collect_non_code_ranges_recursive(
         {
             ranges.push((node.start_byte(), node.end_byte()));
         } else if cursor.goto_first_child() {
-            collect_non_code_ranges_recursive(cursor, ranges);
+            non_code_ranges_walk(cursor, ranges);
             cursor.goto_parent();
         }
         if !cursor.goto_next_sibling() {
@@ -519,21 +519,21 @@ mod tests {
     };
 
     #[test]
-    fn line_starts_excludes_terminal_start_when_requested() {
+    fn excludes_terminal_start() {
         assert_eq!(line_starts("a\nb\n", false), vec![0, 2]);
         assert_eq!(line_starts("a\nb", false), vec![0, 2]);
         assert_eq!(line_starts("", false), vec![0]);
     }
 
     #[test]
-    fn line_starts_includes_terminal_start_when_requested() {
+    fn includes_terminal_start() {
         assert_eq!(line_starts("a\nb\n", true), vec![0, 2, 4]);
         assert_eq!(line_starts("a\nb", true), vec![0, 2]);
         assert_eq!(line_starts("", true), vec![0]);
     }
 
     #[test]
-    fn split_lines_keepends_respects_empty_mode() {
+    fn keepends_respects_empty() {
         assert_eq!(split_lines_keepends("", false), Vec::<String>::new());
         assert_eq!(split_lines_keepends("", true), vec![String::new()]);
         assert_eq!(
@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn split_lines_as_slices_keepends() {
+    fn slices_with_keepends() {
         assert!(split_lines_as_slices("", true).is_empty());
         assert_eq!(split_lines_as_slices("a\nb\n", true), vec!["a\n", "b\n"]);
         assert_eq!(split_lines_as_slices("a\nb", true), vec!["a\n", "b"]);
@@ -555,26 +555,26 @@ mod tests {
     }
 
     #[test]
-    fn split_lines_as_slices_no_keepends() {
+    fn slices_no_keepends() {
         assert_eq!(split_lines_as_slices("a\nb\n", false), vec!["a", "b"]);
         assert_eq!(split_lines_as_slices("a\nb", false), vec!["a", "b"]);
     }
 
     #[test]
-    fn count_byte_matches_scalar_expectations() {
+    fn count_matches_scalar() {
         assert_eq!(count_byte("".as_bytes(), b'\n'), 0);
         assert_eq!(count_byte("x".as_bytes(), b'\n'), 0);
         assert_eq!(count_byte("x\n\nz".as_bytes(), b'\n'), 2);
     }
 
     #[test]
-    fn count_byte_large_buffer() {
+    fn count_large_buffer() {
         let buf = "x\n".repeat(500);
         assert_eq!(count_byte(buf.as_bytes(), b'\n'), 500);
     }
 
     #[test]
-    fn subslice_search_handles_basic_cases() {
+    fn subslice_basic_cases() {
         let bytes = b"alpha operator beta operator";
         assert!(contains_subslice(bytes, b"operator"));
         assert_eq!(find_subslice_from(bytes, b"operator", 0), Some(6));
@@ -583,13 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn subslice_match_iterator_reports_all_matches() {
+    fn subslice_all_matches() {
         let matches = subslice_match_indices(b"aaaa", b"aa").collect::<Vec<_>>();
         assert_eq!(matches, vec![0, 1, 2]);
     }
 
     #[test]
-    fn has_line_count_changed_detects_difference() {
+    fn line_count_detects() {
         assert!(!TEXT_SCAN.has_line_count_changed("a\nb\n", "x\ny\n"));
         assert!(TEXT_SCAN.has_line_count_changed("a\nb\n", "a\nb\nc\n"));
         assert!(!TEXT_SCAN.has_line_count_changed("", ""));
@@ -598,31 +598,31 @@ mod tests {
     // -- all_bytes_equal tests --
 
     #[test]
-    fn all_bytes_equal_empty() {
+    fn all_bytes_empty() {
         assert!(TEXT_SCAN.all_bytes_equal(b"", b'-'));
     }
 
     #[test]
-    fn all_bytes_equal_single() {
+    fn all_bytes_single() {
         assert!(TEXT_SCAN.all_bytes_equal(b"-", b'-'));
         assert!(!TEXT_SCAN.all_bytes_equal(b"x", b'-'));
     }
 
     #[test]
-    fn all_bytes_equal_all_match() {
+    fn all_bytes_match() {
         let dashes = "-".repeat(100);
         assert!(TEXT_SCAN.all_bytes_equal(dashes.as_bytes(), b'-'));
     }
 
     #[test]
-    fn all_bytes_equal_mismatch_at_end() {
+    fn mismatch_at_end() {
         let mut data = "-".repeat(99);
         data.push('x');
         assert!(!TEXT_SCAN.all_bytes_equal(data.as_bytes(), b'-'));
     }
 
     #[test]
-    fn all_bytes_equal_mismatch_at_start() {
+    fn mismatch_at_start() {
         let mut data = String::from("x");
         data.push_str(&"-".repeat(99));
         assert!(!TEXT_SCAN.all_bytes_equal(data.as_bytes(), b'-'));
@@ -631,29 +631,29 @@ mod tests {
     // -- leading_whitespace_byte_count tests --
 
     #[test]
-    fn leading_whitespace_byte_count_empty() {
+    fn leading_ws_empty() {
         assert_eq!(TEXT_SCAN.leading_whitespace_byte_count(b""), 0);
     }
 
     #[test]
-    fn leading_whitespace_byte_count_none() {
+    fn leading_ws_none() {
         assert_eq!(TEXT_SCAN.leading_whitespace_byte_count(b"hello"), 0);
     }
 
     #[test]
-    fn leading_whitespace_byte_count_spaces_and_tabs() {
+    fn leading_spaces_tabs() {
         assert_eq!(TEXT_SCAN.leading_whitespace_byte_count(b"    int a;"), 4);
         assert_eq!(TEXT_SCAN.leading_whitespace_byte_count(b"\t\tint a;"), 2);
         assert_eq!(TEXT_SCAN.leading_whitespace_byte_count(b"  \tint a;"), 3);
     }
 
     #[test]
-    fn leading_whitespace_byte_count_all_whitespace() {
+    fn leading_all_whitespace() {
         assert_eq!(TEXT_SCAN.leading_whitespace_byte_count(b"     "), 5);
     }
 
     #[test]
-    fn leading_whitespace_byte_count_large() {
+    fn leading_ws_large() {
         let input = format!("{}content", " ".repeat(200));
         assert_eq!(
             TEXT_SCAN.leading_whitespace_byte_count(input.as_bytes()),
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn slices_equal_different_lengths() {
+    fn slices_different_lengths() {
         assert!(!TEXT_SCAN.slices_equal(b"abc", b"abcd"));
     }
 
@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn slices_equal_differ_at_end() {
+    fn slices_differ_end() {
         assert!(!TEXT_SCAN.slices_equal(
             b"int main() { return 0; }",
             b"int main() { return 1; }"
@@ -688,13 +688,13 @@ mod tests {
     }
 
     #[test]
-    fn slices_equal_large_identical() {
+    fn slices_large_identical() {
         let data = "x".repeat(4096);
         assert!(TEXT_SCAN.slices_equal(data.as_bytes(), data.as_bytes()));
     }
 
     #[test]
-    fn slices_equal_large_differ() {
+    fn slices_large_differ() {
         let a = "x".repeat(4096);
         let mut b = "x".repeat(4095);
         b.push('y');
