@@ -587,6 +587,7 @@ impl DispatchScheduler {
             parallelism.saturating_mul(12)
         }
         .max(parallelism)
+        .max(ranked_units.len())
         .min(ranked_units.len().max(1));
         let lane_count = target_queue_depth
             .saturating_add(1)
@@ -601,7 +602,7 @@ impl DispatchScheduler {
         let target_batch_cost = (total_estimated_cost / target_queue_depth.max(1) as u128).max(1);
         let (batch_max_units, batch_max_paths) = match mode {
             DispatchMode::InProcess => (BATCH_MAX_UNITS, BATCH_MAX_PATHS),
-            DispatchMode::WorkerProcess => (4, 8),
+            DispatchMode::WorkerProcess => (1, 2),
         };
         WorkloadLeaseSizing {
             lane_count,
