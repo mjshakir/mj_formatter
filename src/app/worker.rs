@@ -79,7 +79,7 @@ enum PersistentWorkerResponse {
 
 struct PersistentWorkerProcess {
     child: Child,
-    stdin: ChildStdin,
+    stdin: io::BufWriter<ChildStdin>,
     responses: Receiver<Result<PersistentWorkerResponse>>,
 }
 
@@ -108,35 +108,29 @@ impl App {
         value: &T,
     ) -> Result<()> {
         let payload = Self::encode_worker_payload(value)?;
-        let payload_len = u32::try_from(payload.len())
-            .map_err(|_| anyhow!("worker payload exceeded u32 framing limit"))?;
-        writer
-            .write_all(payload_len.to_le_bytes().as_slice())
-            .context("failed writing worker payload length")?;
-        writer
-            .write_all(payload.as_slice())
-            .context("failed writing worker payload body")?;
+        crate::files::ecc_frame::write_frame(writer, &payload)
+            .context("failed writing ecc-framed worker payload")?;
         writer.flush().context("failed flushing worker payload")
     }
 
     fn read_framed_worker_payload<R: Read, T: DeserializeOwned>(
         reader: &mut R,
     ) -> Result<Option<T>> {
-        let mut length = [0u8; 4];
-        match reader.read_exact(length.as_mut_slice()) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(err) => return Err(err).context("failed reading worker payload length"),
+        match crate::files::ecc_frame::read_frame(reader)? {
+            Some(payload) => Ok(Some(Self::decode_worker_payload(&payload)?)),
+            None => Ok(None),
         }
-        let payload_len = u32::from_le_bytes(length) as usize;
-        let mut payload = vec![0u8; payload_len];
-        reader
-            .read_exact(payload.as_mut_slice())
-            .context("failed reading worker payload body")?;
-        Ok(Some(Self::decode_worker_payload(payload.as_slice())?))
     }
 
     pub(crate) fn run_worker_pool_entry(_args: &CliArgs, config: &AppConfig) -> Result<()> {
+        let config = if std::env::var_os("FMT_OBSERVATION_ONLY").is_some() {
+            let mut c = config.clone();
+            c.observation_only = true;
+            std::borrow::Cow::Owned(c)
+        } else {
+            std::borrow::Cow::Borrowed(config)
+        };
+        let config = config.as_ref();
         let project_graph_runtime = Self::open_project_graph_runtime(config)?;
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
         let population_context = std::env::var_os("FMT_POPULATION_PATH")
@@ -325,6 +319,7 @@ impl App {
     ) -> Result<ProcessingPassResult> {
         let effective_jobs = Self::resolve_effective_jobs(config.jobs);
         ClangParseService::configure(effective_jobs);
+        crate::policy::clang_format_service::ClangFormatService::configure(effective_jobs);
         if let Err(err) = ClangParseService::global() {
             warn!(error = %err, "failed to initialize clang parse service eagerly");
         }
@@ -362,6 +357,7 @@ impl App {
             }
             engine.set_context_tracker(tracker);
         }
+        engine.set_observation_only(config.observation_only);
         let engine = Arc::new(engine);
         let file_io = FileIo::new(config);
         let check_result_cache =
@@ -888,6 +884,9 @@ impl App {
         if let Some(pop_path) = population_measurements_path {
             command.env("FMT_POPULATION_PATH", pop_path.as_os_str());
         }
+        if config.observation_only {
+            command.env("FMT_OBSERVATION_ONLY", "1");
+        }
         command
             .arg("--processes")
             .arg("1")
@@ -899,10 +898,13 @@ impl App {
                 worker_slot + 1
             )
         })?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("persistent worker {} missing stdin", worker_slot + 1))?;
+        let stdin = io::BufWriter::with_capacity(
+            65536,
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("persistent worker {} missing stdin", worker_slot + 1))?,
+        );
         let stdout = child
             .stdout
             .take()
