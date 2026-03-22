@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::config::benchmark_config::AccuracyBenchmarkConfig;
-use crate::config::gate_config::AccuracyGateConfig;
 use crate::config::enums::BackupMode;
 use crate::config::enums::ClangArgsMode;
-use crate::config::confidence_config::ConfidenceConfig;
 use crate::config::policy_config::PolicyConfig;
-use crate::config::graph_config::ProjectGraphConfig;
-use crate::config::retry_config::RetryConfig;
-use crate::config::optimizer_config::RetryStrategyOptimizerConfig;
+use crate::config::types::AccuracyBenchmarkConfig;
+use crate::config::types::AccuracyGateConfig;
+use crate::config::types::ConfidenceConfig;
+use crate::config::types::ProjectGraphConfig;
+use crate::config::types::RetryConfig;
+use crate::config::types::RetryOptimizerConfig;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -26,10 +26,10 @@ pub struct AppConfig {
     pub backup_dir: PathBuf,
     pub run_journal_dir: PathBuf,
     pub report_path: PathBuf,
-    pub check_result_cache_enabled: bool,
-    pub check_result_cache_path: PathBuf,
-    pub check_result_cache_l1_size: usize,
-    pub policy_context_tracker_path: PathBuf,
+    pub cache_enabled: bool,
+    pub cache_path: PathBuf,
+    pub cache_l1_size: usize,
+    pub tracker_path: PathBuf,
     pub style_name: String,
     pub policy_settings: HashMap<String, PolicyConfig>,
     pub policy_order: Vec<String>,
@@ -39,15 +39,15 @@ pub struct AppConfig {
     pub clang_compdb_path: Option<PathBuf>,
     pub clang_args_mode: ClangArgsMode,
     pub semantic_require_compdb: bool,
-    pub semantic_disable_inferred_includes: bool,
-    pub worker_process_timeout_seconds: u64,
-    pub worker_process_kill_grace_seconds: u64,
+    pub semantic_no_inferred: bool,
+    pub worker_timeout_secs: u64,
+    pub worker_kill_secs: u64,
     pub worker_max_restarts: usize,
     pub clang_format_binary: String,
-    pub conflict_detection_enabled: bool,
+    pub conflict_enabled: bool,
     pub conflict_touch_threshold: usize,
     pub confidence: ConfidenceConfig,
-    pub retry_strategy_optimizer: RetryStrategyOptimizerConfig,
+    pub retry_strategy_optimizer: RetryOptimizerConfig,
     pub retry: RetryConfig,
     pub accuracy_gate: AccuracyGateConfig,
     pub accuracy_benchmark: AccuracyBenchmarkConfig,

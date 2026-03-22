@@ -32,7 +32,7 @@ mod tests {
     use crate::config::rollout_profile::AccuracyRolloutProfile;
 
     #[test]
-    fn parses_known_profile_variants() {
+    fn parses_profile_variants() {
         assert_eq!(
             AccuracyRolloutProfile::from_str(Some("strict")),
             AccuracyRolloutProfile::Strict
@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_balanced_for_unknown_or_missing_profile() {
+    fn defaults_to_balanced() {
         assert_eq!(
             AccuracyRolloutProfile::from_str(Some("unknown")),
             AccuracyRolloutProfile::Balanced

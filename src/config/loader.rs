@@ -6,19 +6,19 @@ use anyhow::{anyhow, Context, Result};
 use toml::Value;
 
 use crate::cli::args::CliArgs;
-use crate::config::benchmark_config::AccuracyBenchmarkConfig;
-use crate::config::gate_config::AccuracyGateConfig;
 use crate::config::rollout_profile::AccuracyRolloutProfile;
 use crate::config::app_config::AppConfig;
 use crate::config::enums::BackupMode;
 use crate::config::enums::ClangArgsMode;
-use crate::config::confidence_config::ConfidenceConfig;
 use crate::config::enums::Enforcement;
 use crate::config::policy_config::PolicyConfig;
-use crate::config::graph_config::ProjectGraphConfig;
 use crate::config::raw::{RawConfig, RawEnableFile};
-use crate::config::retry_config::RetryConfig;
-use crate::config::optimizer_config::RetryStrategyOptimizerConfig;
+use crate::config::types::AccuracyBenchmarkConfig;
+use crate::config::types::AccuracyGateConfig;
+use crate::config::types::ConfidenceConfig;
+use crate::config::types::ProjectGraphConfig;
+use crate::config::types::RetryConfig;
+use crate::config::types::RetryOptimizerConfig;
 
 /// Legacy: kept so worker_execution.rs can still pass the env var to subprocesses.
 /// The adaptive calibrator has been removed; workers no longer read this env var.
@@ -46,7 +46,7 @@ mod tests {
     use crate::config::loader::ConfigLoader;
 
     #[test]
-    fn strict_profile_defaults_require_ci_benchmark_and_fail_closed() {
+    fn strict_requires_benchmark() {
         let defaults = ConfigLoader::accuracy_profile_defaults(AccuracyRolloutProfile::Strict);
         assert!(defaults.gate_semantic_required);
         assert!(defaults.gate_fail_closed);
@@ -56,7 +56,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_profile_defaults_are_more_lenient_than_strict() {
+    fn adaptive_more_lenient() {
         let strict = ConfigLoader::accuracy_profile_defaults(AccuracyRolloutProfile::Strict);
         let adaptive = ConfigLoader::accuracy_profile_defaults(AccuracyRolloutProfile::Adaptive);
         assert!(strict.gate_min_precision > adaptive.gate_min_precision);
@@ -99,7 +99,7 @@ impl ConfigLoader {
         let style_root = project_root.join("styles").join(&style_name);
         let mut policy_settings = self.load_policy_settings(&style_root)?;
 
-        let (enable_set, disable_set) = self.load_style_enable_sets(&style_root)?;
+        let (enable_set, disable_set) = self.load_style_sets(&style_root)?;
         for policy in policy_settings.values_mut() {
             policy.enabled =
                 enable_set.contains(&policy.name) && !disable_set.contains(&policy.name);
@@ -203,21 +203,23 @@ impl ConfigLoader {
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("var/runs"));
-        let check_result_cache_enabled = raw.formatter.check_result_cache_enabled.unwrap_or(true);
-        let check_result_cache_path = raw
+        let cache_enabled = raw.formatter.cache.enabled.unwrap_or(true);
+        let cache_path = raw
             .formatter
-            .check_result_cache_path
+            .cache
+            .path
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("var/cache/check_results.bin"));
-        let check_result_cache_l1_size = raw
+        let cache_l1_size = raw
             .formatter
-            .check_result_cache_l1_size
+            .cache
+            .l1_size
             .unwrap_or(2048)
             .max(64);
-        let policy_context_tracker_path = raw
+        let tracker_path = raw
             .formatter
-            .policy_context_tracker_path
+            .tracker_path
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("var/cache/context_tracker.bin"));
@@ -240,7 +242,7 @@ impl ConfigLoader {
                 "phase-1 parse fidelity lock: semantic_require_compdb=false is unsupported"
             ));
         }
-        if raw.formatter.semantic_disable_inferred_includes == Some(false) {
+        if raw.formatter.semantic_no_inferred == Some(false) {
             return Err(anyhow!(
                 "phase-1 parse fidelity lock: semantic_disable_inferred_includes=false is unsupported"
             ));
@@ -265,7 +267,7 @@ impl ConfigLoader {
             .map(PathBuf::from)
             .or_else(|| Self::discover_compdb_path(root.as_path()));
         let clang_compdb_path =
-            Self::resolve_and_validate_compdb_path(root.as_path(), discovered_compdb_path)?;
+            Self::resolve_compdb(root.as_path(), discovered_compdb_path)?;
         let cpp_standard = raw
             .formatter
             .cpp_standard
@@ -273,21 +275,21 @@ impl ConfigLoader {
             .or_else(|| {
                 clang_compdb_path
                     .as_ref()
-                    .and_then(|path| Self::detect_cpp_standard_from_compdb(path))
+                    .and_then(|path| Self::detect_cpp_std(path))
             })
             .unwrap_or_else(|| "c++17".to_string());
 
         let clang_args_mode = ClangArgsMode::CompdbOnly;
         let semantic_require_compdb = true;
-        let semantic_disable_inferred_includes = true;
-        let worker_process_timeout_seconds = args
+        let semantic_no_inferred = true;
+        let worker_timeout_secs = args
             .worker_timeout
-            .or(raw.formatter.worker_process_timeout_seconds)
+            .or(raw.formatter.worker_timeout_secs)
             .unwrap_or(900)
             .max(10);
-        let worker_process_kill_grace_seconds = raw
+        let worker_kill_secs = raw
             .formatter
-            .worker_process_kill_grace_seconds
+            .worker_kill_secs
             .unwrap_or(5)
             .max(1);
         let worker_max_restarts = raw.formatter.worker_max_restarts.unwrap_or(1).min(8);
@@ -297,27 +299,28 @@ impl ConfigLoader {
             .clang_format_binary
             .clone()
             .unwrap_or_else(|| "clang-format".to_string());
-        let conflict_detection_enabled = raw.formatter.conflict_detection_enabled.unwrap_or(true);
+        let conflict_enabled = raw.formatter.conflict_enabled.unwrap_or(true);
         let conflict_touch_threshold = raw.formatter.conflict_touch_threshold.unwrap_or(3).max(2);
 
         let mut confidence = ConfidenceConfig::default();
         confidence.enabled = raw
             .formatter
-            .confidence_blocking_enabled
+            .confidence_enabled
             .unwrap_or(confidence.enabled);
         confidence.default_enforcement = raw
             .formatter
-            .confidence_default_enforcement
+            .confidence_enforcement
             .as_deref()
             .map(Enforcement::from_value)
             .unwrap_or(confidence.default_enforcement);
 
-        let mut retry_strategy_optimizer = RetryStrategyOptimizerConfig::default();
+        let mut retry_strategy_optimizer = RetryOptimizerConfig::default();
         retry_strategy_optimizer.enabled = raw
             .formatter
-            .retry_strategy_optimizer_enabled
+            .optimizer
+            .enabled
             .unwrap_or(retry_strategy_optimizer.enabled);
-        if let Some(path) = raw.formatter.retry_strategy_optimizer_path.as_ref() {
+        if let Some(path) = raw.formatter.optimizer.path.as_ref() {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 retry_strategy_optimizer.path = PathBuf::from(trimmed);
@@ -331,75 +334,90 @@ impl ConfigLoader {
         }
         retry_strategy_optimizer.ema_alpha = raw
             .formatter
-            .retry_strategy_optimizer_ema_alpha
+            .optimizer
+            .ema_alpha
             .unwrap_or(retry_strategy_optimizer.ema_alpha)
             .clamp(0.01, 1.0);
         retry_strategy_optimizer.context_weight = raw
             .formatter
-            .retry_strategy_optimizer_context_weight
+            .optimizer
+            .context_weight
             .unwrap_or(retry_strategy_optimizer.context_weight)
             .clamp(0.0, 1.0);
         retry_strategy_optimizer.min_samples = raw
             .formatter
-            .retry_strategy_optimizer_min_samples
+            .optimizer
+            .min_samples
             .unwrap_or(retry_strategy_optimizer.min_samples)
             .max(1);
         retry_strategy_optimizer.max_bonus = raw
             .formatter
-            .retry_strategy_optimizer_max_bonus
+            .optimizer
+            .max_bonus
             .unwrap_or(retry_strategy_optimizer.max_bonus)
             .clamp(0, 2_000);
         retry_strategy_optimizer.persist_every = raw
             .formatter
-            .retry_strategy_optimizer_persist_every
+            .optimizer
+            .persist_every
             .unwrap_or(retry_strategy_optimizer.persist_every)
             .max(1);
         retry_strategy_optimizer.canary_only = raw
             .formatter
-            .retry_strategy_optimizer_canary_only
+            .optimizer
+            .canary_only
             .unwrap_or(retry_strategy_optimizer.canary_only);
         retry_strategy_optimizer.auto_tune_enabled = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_enabled
+            .optimizer
+            .tune_enabled
             .unwrap_or(retry_strategy_optimizer.auto_tune_enabled);
         retry_strategy_optimizer.auto_tune_ema_alpha = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_ema_alpha
+            .optimizer
+            .tune_ema_alpha
             .unwrap_or(retry_strategy_optimizer.auto_tune_ema_alpha)
             .clamp(0.01, 1.0);
         retry_strategy_optimizer.auto_tune_target_retry_success_rate = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_target_retry_success_rate
+            .optimizer
+            .tune_target_rate
             .unwrap_or(retry_strategy_optimizer.auto_tune_target_retry_success_rate)
             .clamp(0.0, 1.0);
         retry_strategy_optimizer.auto_tune_deadband = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_deadband
+            .optimizer
+            .tune_deadband
             .unwrap_or(retry_strategy_optimizer.auto_tune_deadband)
             .clamp(0.0, 0.50);
         retry_strategy_optimizer.auto_tune_step = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_step
+            .optimizer
+            .tune_step
             .unwrap_or(retry_strategy_optimizer.auto_tune_step)
             .clamp(1, 1_000);
         retry_strategy_optimizer.auto_tune_adjust_every = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_adjust_every
+            .optimizer
+            .tune_adjust_every
             .unwrap_or(retry_strategy_optimizer.auto_tune_adjust_every)
             .max(1);
         retry_strategy_optimizer.auto_tune_min_samples = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_min_samples
+            .optimizer
+            .tune_min_samples
             .unwrap_or(retry_strategy_optimizer.auto_tune_min_samples)
             .max(1);
         retry_strategy_optimizer.auto_tune_min_bonus = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_min_bonus
+            .optimizer
+            .tune_min_bonus
             .unwrap_or(retry_strategy_optimizer.auto_tune_min_bonus)
             .clamp(0, 2_000);
         retry_strategy_optimizer.auto_tune_max_bonus_cap = raw
             .formatter
-            .retry_strategy_optimizer_auto_tune_max_bonus_cap
+            .optimizer
+            .tune_max_cap
             .unwrap_or(retry_strategy_optimizer.auto_tune_max_bonus_cap)
             .clamp(1, 4_000);
         retry_strategy_optimizer.auto_tune_max_bonus_cap = retry_strategy_optimizer
@@ -413,55 +431,66 @@ impl ConfigLoader {
         let mut retry = RetryConfig::default();
         retry.post_edit_check_enabled = raw
             .formatter
-            .post_edit_check_enabled
+            .post_edit
+            .check_enabled
             .unwrap_or(retry.post_edit_check_enabled);
         retry.post_edit_fail_on_parser_unavailable = raw
             .formatter
-            .post_edit_fail_on_parser_unavailable
+            .post_edit
+            .fail_no_parser
             .unwrap_or(retry.post_edit_fail_on_parser_unavailable);
         retry.post_edit_tree_error_ratio_tolerance = raw
             .formatter
-            .post_edit_tree_error_ratio_tolerance
+            .post_edit
+            .error_tolerance
             .unwrap_or(retry.post_edit_tree_error_ratio_tolerance)
             .clamp(0.0, 1.0);
         retry.post_edit_retry_enabled = raw
             .formatter
-            .post_edit_retry_enabled
+            .post_edit
+            .retry_enabled
             .unwrap_or(retry.post_edit_retry_enabled);
         retry.post_edit_retry_max_attempts = raw
             .formatter
-            .post_edit_retry_max_attempts
+            .post_edit
+            .max_attempts
             .unwrap_or(retry.post_edit_retry_max_attempts);
         retry.post_edit_retry_confidence_step = raw
             .formatter
-            .post_edit_retry_confidence_step
+            .post_edit
+            .confidence_step
             .unwrap_or(retry.post_edit_retry_confidence_step)
             .clamp(0.0, 1.0);
         retry.post_edit_retry_confidence_max = raw
             .formatter
-            .post_edit_retry_confidence_max
+            .post_edit
+            .confidence_max
             .unwrap_or(retry.post_edit_retry_confidence_max)
             .clamp(0.0, 1.0);
         retry.post_edit_retry_aggressive_step_multiplier = raw
             .formatter
-            .post_edit_retry_aggressive_step_multiplier
+            .post_edit
+            .aggressive_mult
             .unwrap_or(retry.post_edit_retry_aggressive_step_multiplier)
             .clamp(1.0, 4.0);
         retry.post_edit_retry_no_improve_limit = raw
             .formatter
-            .post_edit_retry_no_improve_limit
+            .post_edit
+            .no_improve_limit
             .unwrap_or(retry.post_edit_retry_no_improve_limit);
         retry.post_edit_retry_max_blocked_policies = raw
             .formatter
-            .post_edit_retry_max_blocked_policies
+            .post_edit
+            .max_blocked
             .unwrap_or(retry.post_edit_retry_max_blocked_policies);
         retry.retry_snapshot_cache_size = raw
             .formatter
-            .retry_snapshot_cache_size
+            .post_edit
+            .cache_size
             .unwrap_or(retry.retry_snapshot_cache_size);
 
         let accuracy_profile =
-            AccuracyRolloutProfile::from_str(raw.formatter.accuracy_profile.as_deref());
+            AccuracyRolloutProfile::from_str(raw.formatter.accuracy.profile.as_deref());
         let profile_defaults = Self::accuracy_profile_defaults(accuracy_profile);
         let mut accuracy_gate = AccuracyGateConfig {
             profile: accuracy_profile,
@@ -476,26 +505,31 @@ impl ConfigLoader {
         };
         accuracy_gate.enabled = raw
             .formatter
-            .accuracy_gate_enabled
+            .accuracy
+            .gate_enabled
             .unwrap_or(accuracy_gate.enabled);
         accuracy_gate.semantic_required = raw
             .formatter
+            .accuracy
             .semantic_required
             .unwrap_or(accuracy_gate.semantic_required);
         accuracy_gate.fail_closed = raw
             .formatter
+            .accuracy
             .fail_closed
             .unwrap_or(accuracy_gate.fail_closed);
         accuracy_gate.rollout_defer_fail_closed_until_stable = raw
             .formatter
-            .accuracy_rollout_defer_fail_closed_until_stable
+            .accuracy
+            .defer_fail_closed
             .unwrap_or(accuracy_gate.rollout_defer_fail_closed_until_stable);
         accuracy_gate.rollout_stable_passes_required = raw
             .formatter
-            .accuracy_rollout_stable_passes_required
+            .accuracy
+            .stable_passes
             .unwrap_or(accuracy_gate.rollout_stable_passes_required)
             .max(1);
-        if let Some(path) = raw.formatter.accuracy_rollout_state_path.as_ref() {
+        if let Some(path) = raw.formatter.accuracy.rollout_path.as_ref() {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 accuracy_gate.rollout_state_path = PathBuf::from(trimmed);
@@ -503,21 +537,25 @@ impl ConfigLoader {
         }
         accuracy_gate.ci_require_benchmark = raw
             .formatter
-            .accuracy_ci_require_benchmark
+            .accuracy
+            .ci_require_bench
             .unwrap_or(accuracy_gate.ci_require_benchmark);
         accuracy_gate.min_precision = raw
             .formatter
-            .accuracy_gate_min_precision
+            .accuracy
+            .gate_precision
             .unwrap_or(accuracy_gate.min_precision)
             .clamp(0.0, 1.0);
         accuracy_gate.min_recall = raw
             .formatter
-            .accuracy_gate_min_recall
+            .accuracy
+            .gate_recall
             .unwrap_or(accuracy_gate.min_recall)
             .clamp(0.0, 1.0);
         accuracy_gate.min_samples = raw
             .formatter
-            .accuracy_gate_min_samples
+            .accuracy
+            .gate_samples
             .unwrap_or(accuracy_gate.min_samples)
             .max(1);
         let mut accuracy_benchmark = AccuracyBenchmarkConfig {
@@ -530,15 +568,16 @@ impl ConfigLoader {
         };
         accuracy_benchmark.enabled = raw
             .formatter
-            .accuracy_benchmark_enabled
+            .benchmark
+            .enabled
             .unwrap_or(accuracy_benchmark.enabled);
-        if let Some(path) = raw.formatter.accuracy_benchmark_input_dir.as_ref() {
+        if let Some(path) = raw.formatter.benchmark.input_dir.as_ref() {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 accuracy_benchmark.input_dir = PathBuf::from(trimmed);
             }
         }
-        if let Some(path) = raw.formatter.accuracy_benchmark_expected_dir.as_ref() {
+        if let Some(path) = raw.formatter.benchmark.expected_dir.as_ref() {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 accuracy_benchmark.expected_dir = PathBuf::from(trimmed);
@@ -546,35 +585,41 @@ impl ConfigLoader {
         }
         accuracy_benchmark.min_precision = raw
             .formatter
-            .accuracy_benchmark_min_precision
+            .benchmark
+            .min_precision
             .unwrap_or(accuracy_benchmark.min_precision)
             .clamp(0.0, 1.0);
         accuracy_benchmark.min_recall = raw
             .formatter
-            .accuracy_benchmark_min_recall
+            .benchmark
+            .min_recall
             .unwrap_or(accuracy_benchmark.min_recall)
             .clamp(0.0, 1.0);
         accuracy_benchmark.min_match_ratio = raw
             .formatter
-            .accuracy_benchmark_min_match_ratio
+            .benchmark
+            .min_match_ratio
             .unwrap_or(accuracy_benchmark.min_match_ratio)
             .clamp(0.0, 1.0);
         accuracy_benchmark.min_samples = raw
             .formatter
-            .accuracy_benchmark_min_samples
+            .benchmark
+            .min_samples
             .unwrap_or(accuracy_benchmark.min_samples)
             .max(1);
         accuracy_benchmark.fail_closed = raw
             .formatter
-            .accuracy_benchmark_fail_closed
+            .benchmark
+            .fail_closed
             .unwrap_or(accuracy_benchmark.fail_closed);
 
         let mut project_graph = ProjectGraphConfig::default();
         project_graph.enabled = raw
             .formatter
-            .project_graph_enabled
+            .graph
+            .enabled
             .unwrap_or(project_graph.enabled);
-        if let Some(path) = raw.formatter.project_graph_path.as_ref() {
+        if let Some(path) = raw.formatter.graph.path.as_ref() {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 project_graph.path = PathBuf::from(trimmed);
@@ -582,63 +627,76 @@ impl ConfigLoader {
         }
         project_graph.prune_enabled = raw
             .formatter
-            .project_graph_prune_enabled
+            .graph
+            .prune_enabled
             .unwrap_or(project_graph.prune_enabled);
         project_graph.retention_days = raw
             .formatter
-            .project_graph_retention_days
+            .graph
+            .retention_days
             .unwrap_or(project_graph.retention_days)
             .max(1);
         project_graph.max_nodes = raw
             .formatter
-            .project_graph_max_nodes
+            .graph
+            .max_nodes
             .unwrap_or(project_graph.max_nodes)
             .max(1);
         project_graph.max_edges = raw
             .formatter
-            .project_graph_max_edges
+            .graph
+            .max_edges
             .unwrap_or(project_graph.max_edges)
             .max(1);
         project_graph.tombstone_enabled = raw
             .formatter
-            .project_graph_tombstone_enabled
+            .graph
+            .tombstone_enabled
             .unwrap_or(project_graph.tombstone_enabled);
         project_graph.tombstone_retention_days = raw
             .formatter
-            .project_graph_tombstone_retention_days
+            .graph
+            .tombstone_retention
             .unwrap_or(project_graph.tombstone_retention_days)
             .max(1);
         project_graph.tombstone_decay_days = raw
             .formatter
-            .project_graph_tombstone_decay_days
+            .graph
+            .tombstone_decay
             .unwrap_or(project_graph.tombstone_decay_days)
             .max(1);
         project_graph.convergence_decay_enabled = raw
             .formatter
-            .project_graph_convergence_decay_enabled
+            .graph
+            .decay_enabled
             .unwrap_or(project_graph.convergence_decay_enabled);
         project_graph.convergence_decay_half_life_days = raw
             .formatter
-            .project_graph_convergence_decay_half_life_days
+            .graph
+            .decay_half_life
             .unwrap_or(project_graph.convergence_decay_half_life_days)
             .max(1);
         project_graph.convergence_decay_min_count = raw
             .formatter
-            .project_graph_convergence_decay_min_count
+            .graph
+            .decay_min_count
             .unwrap_or(project_graph.convergence_decay_min_count)
             .max(1);
         project_graph.incremental_neighborhood_enabled = raw
             .formatter
-            .project_graph_incremental_neighborhood_enabled
+            .graph
+            .neighborhood_enabled
             .unwrap_or(project_graph.incremental_neighborhood_enabled);
         project_graph.incremental_neighborhood_hops = raw
             .formatter
-            .project_graph_incremental_neighborhood_hops
+            .graph
+            .neighborhood_hops
             .unwrap_or(project_graph.incremental_neighborhood_hops)
             .max(1);
         project_graph.incremental_neighborhood_max_files = raw
             .formatter
-            .project_graph_incremental_neighborhood_max_files
+            .graph
+            .neighborhood_max
             .unwrap_or(project_graph.incremental_neighborhood_max_files)
             .max(1);
         let convergence_learn_on_check = raw.formatter.convergence_learn_on_check.unwrap_or(false);
@@ -657,10 +715,10 @@ impl ConfigLoader {
             backup_dir,
             run_journal_dir,
             report_path,
-            check_result_cache_enabled,
-            check_result_cache_path,
-            check_result_cache_l1_size,
-            policy_context_tracker_path,
+            cache_enabled,
+            cache_path,
+            cache_l1_size,
+            tracker_path,
             style_name,
             policy_settings,
             policy_order,
@@ -670,12 +728,12 @@ impl ConfigLoader {
             clang_compdb_path,
             clang_args_mode,
             semantic_require_compdb,
-            semantic_disable_inferred_includes,
-            worker_process_timeout_seconds,
-            worker_process_kill_grace_seconds,
+            semantic_no_inferred,
+            worker_timeout_secs,
+            worker_kill_secs,
             worker_max_restarts,
             clang_format_binary,
-            conflict_detection_enabled,
+            conflict_enabled,
             conflict_touch_threshold,
             confidence,
             retry_strategy_optimizer,
@@ -774,7 +832,7 @@ impl ConfigLoader {
         Ok(result)
     }
 
-    fn load_style_enable_sets(
+    fn load_style_sets(
         &self,
         style_root: &Path,
     ) -> Result<(HashSet<String>, HashSet<String>)> {
@@ -816,7 +874,7 @@ impl ConfigLoader {
         result
     }
 
-    fn detect_cpp_standard_from_compdb(compdb_path: &Path) -> Option<String> {
+    fn detect_cpp_std(compdb_path: &Path) -> Option<String> {
         let content = fs::read_to_string(compdb_path).ok()?;
         let parsed = serde_json::from_str::<serde_json::Value>(&content).ok()?;
         let entries = parsed.as_array()?;
@@ -878,7 +936,7 @@ impl ConfigLoader {
         None
     }
 
-    fn resolve_and_validate_compdb_path(
+    fn resolve_compdb(
         root: &Path,
         compdb_path: Option<PathBuf>,
     ) -> Result<Option<PathBuf>> {
