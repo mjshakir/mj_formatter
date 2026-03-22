@@ -684,6 +684,7 @@ impl ConfigLoader {
             accuracy_benchmark,
             project_graph,
             convergence_learn_on_check,
+            observation_only: false,
         })
     }
 
