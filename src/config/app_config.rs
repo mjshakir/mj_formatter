@@ -53,6 +53,7 @@ pub struct AppConfig {
     pub accuracy_benchmark: AccuracyBenchmarkConfig,
     pub project_graph: ProjectGraphConfig,
     pub convergence_learn_on_check: bool,
+    pub observation_only: bool,
 }
 
 impl AppConfig {
