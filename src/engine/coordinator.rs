@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -45,6 +46,7 @@ pub struct FormatterEngine {
     retry: RetryConfig,
     accuracy_gate: AccuracyGateConfig,
     project_graph: Option<Arc<ProjectGraphRuntime>>,
+    observation_only: AtomicBool,
 }
 
 impl FormatterEngine {
@@ -72,7 +74,12 @@ impl FormatterEngine {
             retry,
             accuracy_gate,
             project_graph,
+            observation_only: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_observation_only(&self, value: bool) {
+        self.observation_only.store(value, Ordering::Relaxed);
     }
 
     pub fn save_certainty_state(&self, path: &Path) -> anyhow::Result<()> {
@@ -149,8 +156,10 @@ impl FormatterEngine {
             .as_ref()
             .map(|runtime| runtime.snapshot());
         // Pass 1: full pipeline run
+        let obs_only = self.observation_only.load(Ordering::Relaxed);
         let options_1 = PolicyRunOptions {
             project_graph_snapshot: project_graph_snapshot.clone(),
+            observation_only: obs_only,
             ..Default::default()
         };
         let mut pass_result = self.pipeline.run_with_options(text, path, &options_1)?;
@@ -359,9 +368,14 @@ impl FormatterEngine {
             return self.reverted_result(path, text, pass_result, warnings, 1);
         }
 
-        // Pass 2: block culprit policies and re-run
+        // Pass 2: block culprit policies and skip policies that produced zero edits in Pass 1
+        let zero_edit_policies: std::collections::HashSet<String> = pass_result.policy_traces.iter()
+            .filter(|t| t.candidate_line_count == 0 && !culprit_policies.contains(t.policy.as_str()))
+            .map(|t| t.policy.as_str().to_string())
+            .collect();
         let options_2 = PolicyRunOptions {
             blocked_policies: culprit_policies,
+            skip_zero_edit_policies: if zero_edit_policies.is_empty() { None } else { Some(zero_edit_policies) },
             project_graph_snapshot,
             ..Default::default()
         };
@@ -616,6 +630,7 @@ impl FormatterEngine {
             metrics: FormatPassMetrics::default(),
             policy_certainty: None,
             rollback_count: 0,
+            boot_parse_ms: 0.0,
         })
     }
 
