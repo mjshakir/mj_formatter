@@ -90,11 +90,12 @@ impl ClangParseService {
                     request.arguments.as_slice(),
                 ),
             };
-            Self::write_payload(&mut writer, &response)
-                .map_err(|err| anyhow!("failed writing clang helper response: {err}"))?;
-            writer
-                .flush()
-                .map_err(|err| anyhow!("failed flushing clang helper stdout: {err}"))?;
+            if let Err(_) = Self::write_payload(&mut writer, &response) {
+                return Ok(()); // Broken pipe at shutdown — parent dropped the pipe.
+            }
+            if let Err(_) = writer.flush() {
+                return Ok(());
+            }
         }
         Ok(())
     }
