@@ -88,8 +88,8 @@ impl From<&FileResult> for ReportRecord {
         use crate::engine::fuzzy_inference;
         use crate::model::exec_trace::PolicyCandidateOutcome;
 
-        let certainty = result.policy_certainty.as_ref().map(|cert| {
-            let trust_semantic_rewrite = fuzzy_inference::fuzzy_trust_semantic_rewrite(cert);
+        let certainty = result.outcome.certainty.as_ref().map(|cert| {
+            let trust_semantic_rewrite = fuzzy_inference::fuzzy_trust_rewrite(cert);
             let trust_structural = fuzzy_inference::fuzzy_trust_structural(cert);
             let trust_general = fuzzy_inference::fuzzy_trust_general(cert);
             let (model_prob_transitional, model_prob_noisy) =
@@ -117,10 +117,11 @@ impl From<&FileResult> for ReportRecord {
             }
         });
 
-        let mut policies = Vec::with_capacity(result.policy_traces.len());
-        for trace in &result.policy_traces {
+        let mut policies = Vec::with_capacity(result.traces.len());
+        for trace in &result.traces {
             let policy_name = trace.policy.as_str().to_string();
             let edits: Vec<EditReport> = result
+                .outcome
                 .edits
                 .iter()
                 .filter(|edit| edit.policy.as_str() == trace.policy.as_str())
@@ -142,6 +143,7 @@ impl From<&FileResult> for ReportRecord {
                 .collect();
 
             let mut violations_for_policy: Vec<BlockedLineReport> = result
+                .outcome
                 .violations
                 .iter()
                 .filter(|v| v.policy.as_str() == trace.policy.as_str())
@@ -176,13 +178,13 @@ impl From<&FileResult> for ReportRecord {
         }
 
         Self {
-            path: result.path.clone(),
-            changed: result.changed,
+            path: result.meta.path.clone(),
+            changed: result.outcome.changed,
             error: result.error.clone(),
             warnings: result.warnings.clone(),
-            elapsed_engine_ms: result.elapsed_engine_ms,
-            elapsed_total_ms: result.elapsed_total_ms,
-            boot_parse_ms: result.boot_parse_ms,
+            elapsed_engine_ms: result.meta.engine_ms,
+            elapsed_total_ms: result.meta.total_ms,
+            boot_parse_ms: result.meta.boot_parse_ms,
             certainty,
             policies,
         }

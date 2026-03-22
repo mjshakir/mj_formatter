@@ -50,7 +50,7 @@ pub struct SemanticContextQuery<'a> {
 }
 
 impl<'a> SemanticContextQuery<'a> {
-    pub fn from_semantic_file_context(semantic: Option<&'a SemanticFileContext>) -> Self {
+    pub fn from_semantic(semantic: Option<&'a SemanticFileContext>) -> Self {
         let mut preprocessor_ranges = Vec::<(usize, usize)>::new();
         let mut diagnostic_error_lines = BTreeSet::<usize>::new();
         let mut declaration_counts_by_line = BTreeMap::<usize, usize>::new();
@@ -130,7 +130,7 @@ impl<'a> SemanticContextQuery<'a> {
             .filter(|declaration| allow_kind(declaration.kind))
     }
 
-    pub fn declaration_by_stable_id(&self, stable_id: &str) -> Option<&'a SemanticDeclaration> {
+    pub fn decl_by_id(&self, stable_id: &str) -> Option<&'a SemanticDeclaration> {
         self.semantic?
             .declarations
             .iter()
@@ -139,7 +139,7 @@ impl<'a> SemanticContextQuery<'a> {
 
     pub fn references_of(&self, stable_id: &str) -> Vec<&'a SemanticReference> {
         self.semantic
-            .map(|semantic| semantic.references_for_stable_id(stable_id))
+            .map(|semantic| semantic.refs_by_id(stable_id))
             .unwrap_or_default()
     }
 
@@ -204,7 +204,7 @@ impl<'a> SemanticContextQuery<'a> {
         false
     }
 
-    pub fn has_diagnostic_error_on_line(&self, line: usize) -> bool {
+    pub fn has_diag_error(&self, line: usize) -> bool {
         self.diagnostic_error_lines.contains(&line)
     }
 
@@ -219,7 +219,7 @@ impl<'a> SemanticContextQuery<'a> {
         if self.is_macro_region(location.line, location.column) {
             return false;
         }
-        if self.has_diagnostic_error_on_line(location.line) {
+        if self.has_diag_error(location.line) {
             // Keep semantic edits strict on diagnostic lines, but allow
             // structural/comment-only edits where no declaration/reference is
             // attached to the line.
@@ -237,7 +237,7 @@ impl<'a> SemanticContextQuery<'a> {
                 return false;
             }
         }
-        if self.has_diagnostic_error_on_line(location.line)
+        if self.has_diag_error(location.line)
             && self
                 .scope_at(location.line, location.column)
                 .is_some_and(|scope| scope.kind == SemanticScopeKind::Preprocessor)
@@ -247,11 +247,11 @@ impl<'a> SemanticContextQuery<'a> {
         true
     }
 
-    pub fn is_safe_preprocessor_or_global_edit(&self, line: usize, column: usize) -> bool {
+    pub fn is_safe_global(&self, line: usize, column: usize) -> bool {
         if !self.is_available() {
             return false;
         }
-        if self.has_diagnostic_error_on_line(line) {
+        if self.has_diag_error(line) {
             return false;
         }
         if self.is_macro_region(line, column) {
@@ -273,7 +273,7 @@ impl<'a> SemanticContextQuery<'a> {
             .copied()
             .unwrap_or(0);
         let in_macro_region = self.is_macro_region(line, 1);
-        let has_diagnostic_error = self.has_diagnostic_error_on_line(line);
+        let has_diagnostic_error = self.has_diag_error(line);
         let scope = self.line_scope(line);
         let role = Self::line_role_for_counts(declaration_count, reference_count, scope);
         let safe_edit = self.is_safe_edit(line, 1);
@@ -433,7 +433,7 @@ mod tests {
     use crate::parser::node_kind;
 
     #[test]
-    fn symbol_and_reference_queries_resolve_stable_id() {
+    fn queries_resolve_stable() {
         let semantic = SemanticFileContext {
             declarations: vec![SemanticDeclaration {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -475,18 +475,18 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let declaration = query
             .symbol_at(2, 5, &[ClangSymbolKind::Function])
             .expect("declaration at location");
         assert_eq!(declaration.name, "foo");
-        assert!(query.declaration_by_stable_id("usr:c:@F@foo#").is_some());
+        assert!(query.decl_by_id("usr:c:@F@foo#").is_some());
         assert!(query.scope_at(2, 1).is_some());
         assert_eq!(query.references_of(declaration.stable_id.as_str()).len(), 2);
     }
 
     #[test]
-    fn safe_edit_blocks_preprocessor_and_symbol_bound_diagnostic_lines() {
+    fn blocks_preprocessor_diag() {
         let semantic = SemanticFileContext {
             diagnostic_summary: ClangDiagnosticSummary {
                 error: 2,
@@ -524,19 +524,19 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         assert!(query.is_macro_region(2, 1));
         assert!(!query.is_safe_edit(2, 1));
         assert!(!query.is_safe_edit(8, 1));
         assert!(query.is_safe_edit(9, 1));
         assert!(query.is_safe_edit(20, 1));
-        assert!(query.is_safe_preprocessor_or_global_edit(2, 1));
-        assert!(!query.is_safe_preprocessor_or_global_edit(8, 1));
-        assert!(query.is_safe_preprocessor_or_global_edit(20, 1));
+        assert!(query.is_safe_global(2, 1));
+        assert!(!query.is_safe_global(8, 1));
+        assert!(query.is_safe_global(20, 1));
     }
 
     #[test]
-    fn line_profile_reports_role_scope_and_safety() {
+    fn profile_reports_role() {
         let semantic = SemanticFileContext {
             diagnostic_summary: ClangDiagnosticSummary {
                 error: 1,
@@ -586,7 +586,7 @@ mod tests {
             ],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
 
         let macro_profile = query.line_profile(1);
         assert_eq!(macro_profile.scope, SemanticLineScope::Preprocessor);
@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn context_cluster_key_is_stable_for_same_line_set() {
+    fn cluster_key_stable() {
         let semantic = SemanticFileContext {
             declarations: vec![SemanticDeclaration {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -640,7 +640,7 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let first = BTreeSet::from([3usize, 5usize]);
         let second = BTreeSet::from([3usize, 5usize]);
         let third = BTreeSet::from([1usize, 3usize, 5usize]);
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn region_queries_return_smallest_covering_region() {
+    fn region_smallest_covering() {
         let semantic = SemanticFileContext {
             regions: vec![
                 SemanticRegion::new(
@@ -691,7 +691,7 @@ mod tests {
             ],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let region = query.region_at(7, 1).expect("region");
         assert_eq!(region.kind, SemanticRegionKind::Declaration);
         assert!(!query.regions_for_line(7).is_empty());

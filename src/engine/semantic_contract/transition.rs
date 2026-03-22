@@ -5,24 +5,24 @@ use super::{SemanticContract, SemanticContractSnapshot, SemanticTransitionAssess
 pub(super) fn evaluate(
     before: &SemanticContractSnapshot,
     after: &SemanticContractSnapshot,
-    semantic_reference_drop_tolerance: usize,
-    semantic_scope_drift_tolerance: usize,
-    identity_line_shift_tolerance: usize,
+    ref_drop_tol: usize,
+    scope_drift_tol: usize,
+    identity_shift_tol: usize,
     edited_lines: Option<&BTreeSet<usize>>,
 ) -> SemanticTransitionAssessment {
     let mut assessment = SemanticTransitionAssessment::default();
 
-    evaluate_identity(before, after, identity_line_shift_tolerance, edited_lines, &mut assessment);
+    evaluate_identity(before, after, identity_shift_tol, edited_lines, &mut assessment);
     evaluate_reference_integrity(
         before,
         after,
-        semantic_reference_drop_tolerance,
+        ref_drop_tol,
         &mut assessment,
     );
     evaluate_scope_integrity(
         before,
         after,
-        semantic_scope_drift_tolerance,
+        scope_drift_tol,
         edited_lines,
         &mut assessment,
     );
@@ -42,22 +42,22 @@ fn evaluate_identity(
     let mut missing_lines = BTreeSet::<usize>::new();
 
     for stable_id in before
-        .declaration_stable_ids
-        .difference(&after.declaration_stable_ids)
+        .identity.decl_ids
+        .difference(&after.identity.decl_ids)
     {
         let declaration_line = before
-            .stable_id_decl_lines
+            .identity.id_decl_lines
             .get(stable_id)
             .copied()
             .unwrap_or(0);
-        let declaration_kind = before.declaration_kind_by_stable_id.get(stable_id).copied();
+        let declaration_kind = before.identity.kind_by_decl_id.get(stable_id).copied();
         let before_reference_count = before
-            .reference_stable_id_counts
+            .identity.ref_id_counts
             .get(stable_id)
             .copied()
             .unwrap_or_else(|| {
                 before
-                    .usr_decl_reference_counts
+                    .identity.usr_ref_counts
                     .get(stable_id)
                     .copied()
                     .unwrap_or(0)
@@ -81,13 +81,13 @@ fn evaluate_identity(
     }
 
     let identity_issue_delta = after
-        .symbol_identity_issue_count
-        .saturating_sub(before.symbol_identity_issue_count);
+        .issues.identity_count
+        .saturating_sub(before.issues.identity_count);
     if identity_issue_delta > 0 {
-        missing_lines.extend(after.symbol_identity_issue_lines.iter().copied());
+        missing_lines.extend(after.issues.identity_lines.iter().copied());
     }
 
-    let total_stable_ids = before.declaration_stable_ids.len().max(1);
+    let total_stable_ids = before.identity.decl_ids.len().max(1);
     let identity_severity_raw = (missing_ids.len() + identity_issue_delta) as f64 / total_stable_ids as f64;
     assessment.identity_severity = identity_severity_raw.clamp(0.0, 1.0);
 
@@ -123,21 +123,21 @@ fn evaluate_identity(
 fn evaluate_reference_integrity(
     before: &SemanticContractSnapshot,
     after: &SemanticContractSnapshot,
-    semantic_reference_drop_tolerance: usize,
+    ref_drop_tol: usize,
     assessment: &mut SemanticTransitionAssessment,
 ) {
     let mut culprit_lines = BTreeSet::<usize>::new();
     let mut drop_events = 0usize;
 
-    for (stable_id, before_count) in &before.usr_decl_reference_counts {
+    for (stable_id, before_count) in &before.identity.usr_ref_counts {
         let after_count = after
-            .usr_decl_reference_counts
+            .identity.usr_ref_counts
             .get(stable_id)
             .copied()
             .unwrap_or(0);
-        if *before_count > after_count.saturating_add(semantic_reference_drop_tolerance) {
+        if *before_count > after_count.saturating_add(ref_drop_tol) {
             drop_events = drop_events.saturating_add(1);
-            if let Some(line) = before.usr_decl_lines.get(stable_id) {
+            if let Some(line) = before.identity.usr_decl_lines.get(stable_id) {
                 culprit_lines.insert((*line).max(1));
             }
         }
@@ -145,15 +145,15 @@ fn evaluate_reference_integrity(
 
     let mut orphan_lines = BTreeSet::<usize>::new();
     let mut orphan_count = 0usize;
-    for (stable_id, after_count) in &after.reference_stable_id_counts {
-        if *after_count == 0 || after.declaration_stable_ids.contains(stable_id) {
+    for (stable_id, after_count) in &after.identity.ref_id_counts {
+        if *after_count == 0 || after.identity.decl_ids.contains(stable_id) {
             continue;
         }
-        let before_orphan_count = if before.declaration_stable_ids.contains(stable_id) {
+        let before_orphan_count = if before.identity.decl_ids.contains(stable_id) {
             0
         } else {
             before
-                .reference_stable_id_counts
+                .identity.ref_id_counts
                 .get(stable_id)
                 .copied()
                 .unwrap_or(0)
@@ -161,20 +161,20 @@ fn evaluate_reference_integrity(
         if *after_count > before_orphan_count {
             orphan_count =
                 orphan_count.saturating_add(after_count.saturating_sub(before_orphan_count));
-            if let Some(line) = after.reference_stable_id_first_line.get(stable_id) {
+            if let Some(line) = after.identity.ref_first_line.get(stable_id) {
                 orphan_lines.insert((*line).max(1));
             }
         }
     }
 
     let usage_mismatch_delta = after
-        .usage_role_mismatch_count
-        .saturating_sub(before.usage_role_mismatch_count);
+        .issues.mismatch_count
+        .saturating_sub(before.issues.mismatch_count);
     if usage_mismatch_delta > 0 {
-        culprit_lines.extend(after.usage_role_mismatch_lines.iter().copied());
+        culprit_lines.extend(after.issues.mismatch_lines.iter().copied());
     }
 
-    let total_references = before.usr_decl_reference_counts.len().max(1);
+    let total_references = before.identity.usr_ref_counts.len().max(1);
     let ref_severity_raw = (drop_events + usage_mismatch_delta + orphan_count) as f64 / total_references as f64;
     assessment.reference_severity = ref_severity_raw.clamp(0.0, 1.0);
 
@@ -191,7 +191,7 @@ fn evaluate_reference_integrity(
         assessment.failure_messages.push(format!(
             "post-edit check failed: semantic declaration-reference connectivity regressed (drops={}, tolerance={}, lines={})",
             drop_events,
-            semantic_reference_drop_tolerance,
+            ref_drop_tol,
             line_hint(culprit_lines.iter().copied(), 8)
         ));
     }
@@ -205,12 +205,12 @@ fn evaluate_reference_integrity(
             .saturating_add((usage_mismatch_delta.min(16) as u32).saturating_mul(2));
         assessment
             .culprit_lines
-            .extend(after.usage_role_mismatch_lines.iter().copied());
+            .extend(after.issues.mismatch_lines.iter().copied());
         assessment.failure_messages.push(format!(
             "post-edit check failed: semantic usage-role consistency regressed ({} -> {}, lines={})",
-            before.usage_role_mismatch_count,
-            after.usage_role_mismatch_count,
-            line_hint(after.usage_role_mismatch_lines.iter().copied(), 8)
+            before.issues.mismatch_count,
+            after.issues.mismatch_count,
+            line_hint(after.issues.mismatch_lines.iter().copied(), 8)
         ));
     }
 
@@ -235,7 +235,7 @@ fn evaluate_reference_integrity(
 fn evaluate_scope_integrity(
     before: &SemanticContractSnapshot,
     after: &SemanticContractSnapshot,
-    semantic_scope_drift_tolerance: usize,
+    scope_drift_tol: usize,
     edited_lines: Option<&BTreeSet<usize>>,
     assessment: &mut SemanticTransitionAssessment,
 ) {
@@ -243,12 +243,12 @@ fn evaluate_scope_integrity(
     let (local_range_drift, remote_range_drift, range_culprit_lines) =
         scope_range_drift(before, after, edited_lines, 1);
 
-    let total_scopes = (before.scope_counts.namespace + before.scope_counts.type_scope + before.scope_counts.function).max(1);
+    let total_scopes = (before.scopes.counts.namespace + before.scopes.counts.type_scope + before.scopes.counts.function).max(1);
     let scope_severity_raw = (count_drift + remote_range_drift) as f64 / total_scopes as f64;
     assessment.scope_severity = scope_severity_raw.clamp(0.0, 1.0);
 
-    let regressed = count_drift > semantic_scope_drift_tolerance
-        || remote_range_drift > semantic_scope_drift_tolerance;
+    let regressed = count_drift > scope_drift_tol
+        || remote_range_drift > scope_drift_tol;
     if !regressed {
         return;
     }
@@ -265,7 +265,7 @@ fn evaluate_scope_integrity(
         count_drift,
         local_range_drift,
         remote_range_drift,
-        semantic_scope_drift_tolerance
+        scope_drift_tol
     ));
 }
 
@@ -284,8 +284,8 @@ fn evaluate_macro_region_safety(
 
     let mut touched = BTreeSet::<usize>::new();
     for line in edited_lines {
-        if SemanticContract::line_in_ranges(*line, before.preprocessor_ranges.as_slice())
-            || SemanticContract::line_in_ranges(*line, after.preprocessor_ranges.as_slice())
+        if SemanticContract::line_in_ranges(*line, before.scopes.preprocessor_ranges.as_slice())
+            || SemanticContract::line_in_ranges(*line, after.scopes.preprocessor_ranges.as_slice())
         {
             touched.insert(*line);
         }
@@ -303,21 +303,21 @@ fn evaluate_macro_region_safety(
 
 fn scope_count_drift(before: &SemanticContractSnapshot, after: &SemanticContractSnapshot) -> usize {
     before
-        .scope_counts
+        .scopes.counts
         .namespace
-        .abs_diff(after.scope_counts.namespace)
+        .abs_diff(after.scopes.counts.namespace)
         + before
-            .scope_counts
+            .scopes.counts
             .type_scope
-            .abs_diff(after.scope_counts.type_scope)
+            .abs_diff(after.scopes.counts.type_scope)
         + before
-            .scope_counts
+            .scopes.counts
             .function
-            .abs_diff(after.scope_counts.function)
+            .abs_diff(after.scopes.counts.function)
         + before
-            .scope_counts
+            .scopes.counts
             .preprocessor
-            .abs_diff(after.scope_counts.preprocessor)
+            .abs_diff(after.scopes.counts.preprocessor)
 }
 
 fn scope_range_drift(
@@ -331,8 +331,8 @@ fn scope_range_drift(
     let mut remote = 0usize;
     let mut culprit_lines = BTreeSet::<usize>::new();
     for kind in ["namespace", "type", "function", "preprocessor"] {
-        let before_ranges = before.scope_ranges_by_kind.get(kind).unwrap_or(&empty);
-        let after_ranges = after.scope_ranges_by_kind.get(kind).unwrap_or(&empty);
+        let before_ranges = before.scopes.ranges_by_kind.get(kind).unwrap_or(&empty);
+        let after_ranges = after.scopes.ranges_by_kind.get(kind).unwrap_or(&empty);
 
         for range in before_ranges.difference(after_ranges) {
             classify_range(*range, edited_lines, radius, &mut local, &mut remote);

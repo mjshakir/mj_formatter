@@ -5,36 +5,38 @@ use crate::parser::file_context::{
     SemanticFileContext, SemanticIdProvenance, SemanticScopeKind,
 };
 
-use super::{SemanticContractSnapshot, SemanticScopeCounts};
+use super::{
+    SemanticContractSnapshot, SemanticIssues, SemanticScopeCounts, ScopeStructure, SymbolIdentity,
+};
 
 pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
-    let mut usr_decl_reference_counts = BTreeMap::<String, usize>::new();
+    let mut usr_ref_counts = BTreeMap::<String, usize>::new();
     let mut usr_decl_lines = BTreeMap::<String, usize>::new();
-    let mut declaration_stable_ids_by_line = BTreeMap::<usize, BTreeSet<String>>::new();
-    let mut declaration_kind_by_stable_id = BTreeMap::new();
-    let mut declaration_stable_ids = BTreeSet::<String>::new();
-    let mut stable_id_decl_lines = BTreeMap::<String, usize>::new();
-    let mut reference_stable_id_counts = BTreeMap::<String, usize>::new();
-    let mut reference_stable_id_first_line = BTreeMap::<String, usize>::new();
-    let mut scope_counts = SemanticScopeCounts::default();
-    let mut scope_ranges_by_kind = BTreeMap::<String, BTreeSet<(usize, usize)>>::new();
-    let mut symbol_identity_issue_count = 0usize;
-    let mut symbol_identity_issue_lines = BTreeSet::<usize>::new();
-    let mut usage_role_mismatch_count = 0usize;
-    let mut usage_role_mismatch_lines = BTreeSet::<usize>::new();
+    let mut decl_ids_by_line = BTreeMap::<usize, BTreeSet<String>>::new();
+    let mut kind_by_decl_id = BTreeMap::new();
+    let mut decl_ids = BTreeSet::<String>::new();
+    let mut id_decl_lines = BTreeMap::<String, usize>::new();
+    let mut ref_id_counts = BTreeMap::<String, usize>::new();
+    let mut ref_first_line = BTreeMap::<String, usize>::new();
+    let mut counts = SemanticScopeCounts::default();
+    let mut ranges_by_kind = BTreeMap::<String, BTreeSet<(usize, usize)>>::new();
+    let mut identity_count = 0usize;
+    let mut identity_lines = BTreeSet::<usize>::new();
+    let mut mismatch_count = 0usize;
+    let mut mismatch_lines = BTreeSet::<usize>::new();
     let mut preprocessor_ranges = Vec::<(usize, usize)>::new();
 
     for declaration in &context.declarations {
         if declaration.kind == ClangSymbolKind::FunctionTemplate {
             continue;
         }
-        declaration_stable_ids.insert(declaration.stable_id.clone());
-        declaration_stable_ids_by_line
+        decl_ids.insert(declaration.stable_id.clone());
+        decl_ids_by_line
             .entry(declaration.line.max(1))
             .or_default()
             .insert(declaration.stable_id.clone());
-        declaration_kind_by_stable_id.insert(declaration.stable_id.clone(), declaration.kind);
-        stable_id_decl_lines.insert(declaration.stable_id.clone(), declaration.line.max(1));
+        kind_by_decl_id.insert(declaration.stable_id.clone(), declaration.kind);
+        id_decl_lines.insert(declaration.stable_id.clone(), declaration.line.max(1));
 
         let stable_id_looks_usr = declaration.stable_id.starts_with("usr:");
         let is_usr_backed = declaration.provenance == SemanticIdProvenance::Usr
@@ -45,7 +47,7 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty());
         if is_usr_backed {
-            usr_decl_reference_counts
+            usr_ref_counts
                 .entry(declaration.stable_id.clone())
                 .or_insert(0);
             usr_decl_lines.insert(declaration.stable_id.clone(), declaration.line.max(1));
@@ -54,28 +56,28 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
         if (declaration.provenance == SemanticIdProvenance::Usr && !stable_id_looks_usr)
             || (declaration.provenance != SemanticIdProvenance::Usr && stable_id_looks_usr)
         {
-            symbol_identity_issue_count = symbol_identity_issue_count.saturating_add(1);
-            symbol_identity_issue_lines.insert(declaration.line.max(1));
+            identity_count = identity_count.saturating_add(1);
+            identity_lines.insert(declaration.line.max(1));
         }
     }
 
     for reference in &context.references {
-        reference_stable_id_counts
+        ref_id_counts
             .entry(reference.stable_id.clone())
             .and_modify(|count| *count = count.saturating_add(1))
             .or_insert(1);
-        reference_stable_id_first_line
+        ref_first_line
             .entry(reference.stable_id.clone())
             .or_insert(reference.line.max(1));
 
-        if let Some(count) = usr_decl_reference_counts.get_mut(reference.stable_id.as_str()) {
+        if let Some(count) = usr_ref_counts.get_mut(reference.stable_id.as_str()) {
             *count = count.saturating_add(1);
         }
 
-        if let Some(decl_kind) = declaration_kind_by_stable_id.get(reference.stable_id.as_str()) {
+        if let Some(decl_kind) = kind_by_decl_id.get(reference.stable_id.as_str()) {
             if *decl_kind != reference.decl_kind {
-                usage_role_mismatch_count = usage_role_mismatch_count.saturating_add(1);
-                usage_role_mismatch_lines.insert(reference.line.max(1));
+                mismatch_count = mismatch_count.saturating_add(1);
+                mismatch_lines.insert(reference.line.max(1));
             }
         }
     }
@@ -87,42 +89,42 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
         );
         match scope.kind {
             SemanticScopeKind::Namespace => {
-                scope_counts.namespace = scope_counts.namespace.saturating_add(1);
-                scope_ranges_by_kind
+                counts.namespace = counts.namespace.saturating_add(1);
+                ranges_by_kind
                     .entry("namespace".to_string())
                     .or_default()
                     .insert(range);
             }
             SemanticScopeKind::Type => {
-                scope_counts.type_scope = scope_counts.type_scope.saturating_add(1);
-                scope_ranges_by_kind
+                counts.type_scope = counts.type_scope.saturating_add(1);
+                ranges_by_kind
                     .entry("type".to_string())
                     .or_default()
                     .insert(range);
             }
             SemanticScopeKind::Function => {
-                scope_counts.function = scope_counts.function.saturating_add(1);
-                scope_ranges_by_kind
+                counts.function = counts.function.saturating_add(1);
+                ranges_by_kind
                     .entry("function".to_string())
                     .or_default()
                     .insert(range);
             }
             SemanticScopeKind::Preprocessor => {
-                scope_counts.preprocessor = scope_counts.preprocessor.saturating_add(1);
-                scope_ranges_by_kind
+                counts.preprocessor = counts.preprocessor.saturating_add(1);
+                ranges_by_kind
                     .entry("preprocessor".to_string())
                     .or_default()
                     .insert(range);
                 preprocessor_ranges.push(range);
             }
             SemanticScopeKind::Template => {
-                scope_ranges_by_kind
+                ranges_by_kind
                     .entry("template".to_string())
                     .or_default()
                     .insert(range);
             }
             SemanticScopeKind::Attribute => {
-                scope_ranges_by_kind
+                ranges_by_kind
                     .entry("attribute".to_string())
                     .or_default()
                     .insert(range);
@@ -135,20 +137,26 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
 
     SemanticContractSnapshot {
         summary: context.summary(),
-        usr_decl_reference_counts,
-        usr_decl_lines,
-        declaration_stable_ids_by_line,
-        declaration_kind_by_stable_id,
-        declaration_stable_ids,
-        stable_id_decl_lines,
-        reference_stable_id_counts,
-        reference_stable_id_first_line,
-        scope_counts,
-        scope_ranges_by_kind,
-        symbol_identity_issue_count,
-        symbol_identity_issue_lines,
-        usage_role_mismatch_count,
-        usage_role_mismatch_lines,
-        preprocessor_ranges,
+        identity: SymbolIdentity {
+            usr_ref_counts,
+            usr_decl_lines,
+            decl_ids_by_line,
+            kind_by_decl_id,
+            decl_ids,
+            id_decl_lines,
+            ref_id_counts,
+            ref_first_line,
+        },
+        scopes: ScopeStructure {
+            counts,
+            ranges_by_kind,
+            preprocessor_ranges,
+        },
+        issues: SemanticIssues {
+            identity_count,
+            identity_lines,
+            mismatch_count,
+            mismatch_lines,
+        },
     }
 }

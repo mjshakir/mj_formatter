@@ -90,7 +90,7 @@ mod tests {
     use crate::parser::clang_types::ClangSymbolKind;
 
     #[test]
-    fn round_trip_internal_warning() {
+    fn roundtrip_internal_warning() {
         let plan = SemanticRenamePlan {
             decl: ClangDeclKey::new(
                 "/tmp/sample.hpp".to_string(),

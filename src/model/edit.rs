@@ -14,7 +14,7 @@ mod tests {
     use super::Edit;
 
     #[test]
-    fn serde_roundtrip_preserves_legacy_policy_string() {
+    fn serde_roundtrip_legacy() {
         let edit = Edit {
             policy: "naming_conventions".into(),
             line: 12,

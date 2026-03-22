@@ -76,12 +76,12 @@ impl<'a> PolicyContext<'a> {
         self
     }
 
-    pub fn with_tree_sitter_tree(mut self, tree_sitter_tree: Option<&'a Tree>) -> Self {
+    pub fn with_tree(mut self, tree_sitter_tree: Option<&'a Tree>) -> Self {
         self.tree_sitter_tree = tree_sitter_tree;
         self
     }
 
-    pub fn with_clang_parse_result(
+    pub fn with_clang(
         mut self,
         clang_parse_result: Option<&'a ClangParseResult>,
     ) -> Self {
@@ -89,7 +89,7 @@ impl<'a> PolicyContext<'a> {
         self
     }
 
-    pub fn with_semantic_file_context(
+    pub fn with_semantic(
         mut self,
         semantic_file_context: Option<&'a SemanticFileContext>,
     ) -> Self {
@@ -97,7 +97,7 @@ impl<'a> PolicyContext<'a> {
         self
     }
 
-    pub fn with_project_graph_snapshot(
+    pub fn with_graph(
         mut self,
         project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
     ) -> Self {
@@ -110,7 +110,7 @@ impl<'a> PolicyContext<'a> {
     }
 
     pub fn semantic_query(&self) -> SemanticContextQuery<'_> {
-        SemanticContextQuery::from_semantic_file_context(self.semantic_file_context)
+        SemanticContextQuery::from_semantic(self.semantic_file_context)
     }
 
     pub fn project_query(&self) -> ProjectContextQuery<'_> {
@@ -122,13 +122,13 @@ impl<'a> PolicyContext<'a> {
             .map(ClangParseResult::diagnostic_summary)
     }
 
-    pub fn clang_fatal_diagnostic_count(&self) -> usize {
+    pub fn fatal_diag_count(&self) -> usize {
         self.clang_diagnostic_summary()
             .map(|summary| summary.fatal)
             .unwrap_or(0)
     }
 
-    pub fn has_fatal_clang_diagnostics(&self) -> bool {
-        self.clang_fatal_diagnostic_count() > 0
+    pub fn has_fatal_diags(&self) -> bool {
+        self.fatal_diag_count() > 0
     }
 }

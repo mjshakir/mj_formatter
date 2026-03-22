@@ -205,7 +205,7 @@ mod tests {
     use crate::model::retry_strategy::{KnownRetryStrategy, RetryStrategyName, RetryStrategyTag};
 
     #[test]
-    fn known_strategy_roundtrips_from_string() {
+    fn strategy_roundtrips_string() {
         let value = RetryStrategyName::from_str_lossy("parser_unavailable_block_culprit");
         assert_eq!(
             value,
@@ -215,14 +215,14 @@ mod tests {
     }
 
     #[test]
-    fn custom_strategy_is_preserved() {
+    fn custom_strategy_preserved() {
         let value = RetryStrategyName::from_str_lossy("custom_strategy_x");
         assert_eq!(value.as_str(), "custom_strategy_x");
         assert!(matches!(value, RetryStrategyName::Custom(_)));
     }
 
     #[test]
-    fn strategy_tags_are_detected() {
+    fn strategy_tags_detected() {
         let value = RetryStrategyName::from_str_lossy("culprit_only_hold_confidence");
         assert!(value.has_tag(RetryStrategyTag::Culprit));
         assert!(value.has_tag(RetryStrategyTag::HoldConfidence));

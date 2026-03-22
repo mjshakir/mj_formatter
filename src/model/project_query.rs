@@ -34,6 +34,37 @@ const ALL_SYMBOL_KINDS: [ClangSymbolKind; 21] = [
     ClangSymbolKind::FriendDecl,
 ];
 
+pub trait SignalKey {
+    fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId>;
+}
+
+impl SignalKey for &str {
+    fn symbol_ids(&self, _query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
+        ProjectContextQuery::symbol_ids_for_stable_id(self)
+    }
+}
+
+impl SignalKey for &SemanticDeclaration {
+    fn symbol_ids(&self, _query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
+        ProjectContextQuery::symbol_ids_for_declaration(self)
+    }
+}
+
+impl SignalKey for SourceLocation {
+    fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
+        match query.symbol_at(self.line, self.column, &ALL_SYMBOL_KINDS) {
+            Some(decl) => ProjectContextQuery::symbol_ids_for_declaration(decl),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl SignalKey for (usize, usize) {
+    fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
+        SourceLocation::new(self.0, self.1).symbol_ids(query)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectContextQuery<'a> {
     semantic_query: SemanticContextQuery<'a>,
@@ -64,8 +95,8 @@ impl<'a> ProjectContextQuery<'a> {
         self.semantic_query.symbol_at(line, column, allowed_kinds)
     }
 
-    pub fn declaration_by_stable_id(&self, stable_id: &str) -> Option<&'a SemanticDeclaration> {
-        self.semantic_query.declaration_by_stable_id(stable_id)
+    pub fn decl_by_id(&self, stable_id: &str) -> Option<&'a SemanticDeclaration> {
+        self.semantic_query.decl_by_id(stable_id)
     }
 
     pub fn references_of(&self, stable_id: &str) -> Vec<&'a SemanticReference> {
@@ -96,30 +127,10 @@ impl<'a> ProjectContextQuery<'a> {
         self.semantic_query.context_cluster_key(lines)
     }
 
-    pub fn project_signal_for_stable_id(&self, stable_id: &str) -> Option<ProjectSignal> {
+    pub fn signal(&self, key: impl SignalKey) -> Option<ProjectSignal> {
         let snapshot = self.project_graph_snapshot?;
-        let symbol_ids = Self::symbol_ids_for_stable_id(stable_id);
-        Self::best_project_signal(snapshot, symbol_ids.as_slice())
-    }
-
-    pub fn project_signal_for_declaration(
-        &self,
-        declaration: &SemanticDeclaration,
-    ) -> Option<ProjectSignal> {
-        let snapshot = self.project_graph_snapshot?;
-        let symbol_ids = Self::symbol_ids_for_declaration(declaration);
-        Self::best_project_signal(snapshot, symbol_ids.as_slice())
-    }
-
-    pub fn project_signal_for_location(&self, location: SourceLocation) -> Option<ProjectSignal> {
-        let declaration =
-            self.semantic_query
-                .symbol_at(location.line, location.column, &ALL_SYMBOL_KINDS)?;
-        self.project_signal_for_declaration(declaration)
-    }
-
-    pub fn project_signal_for_line(&self, line: usize, column: usize) -> Option<ProjectSignal> {
-        self.project_signal_for_location(SourceLocation::new(line, column))
+        let ids = key.symbol_ids(&self.semantic_query);
+        Self::best_project_signal(snapshot, &ids)
     }
 
     fn best_project_signal(
@@ -138,7 +149,7 @@ impl<'a> ProjectContextQuery<'a> {
             })
     }
 
-    fn symbol_ids_for_stable_id(stable_id: &str) -> Vec<SymbolId> {
+    pub(crate) fn symbol_ids_for_stable_id(stable_id: &str) -> Vec<SymbolId> {
         let trimmed = stable_id.trim();
         if let Some(usr) = trimmed.strip_prefix("usr:") {
             return vec![SymbolId::new(format!(
@@ -149,7 +160,7 @@ impl<'a> ProjectContextQuery<'a> {
         Vec::new()
     }
 
-    fn symbol_ids_for_declaration(declaration: &SemanticDeclaration) -> Vec<SymbolId> {
+    pub(crate) fn symbol_ids_for_declaration(declaration: &SemanticDeclaration) -> Vec<SymbolId> {
         let mut ids = Vec::<SymbolId>::new();
         if let Some(usr) = declaration
             .usr
@@ -241,7 +252,7 @@ mod tests {
     use crate::graph::symbol_id::SymbolId;
 
     #[test]
-    fn project_signal_resolves_usr_backed_declaration() {
+    fn signal_resolves_usr() {
         let semantic = SemanticFileContext {
             declarations: vec![SemanticDeclaration {
                 stable_id: "usr:c:@S@Demo@FI@m_value".to_string(),
@@ -267,11 +278,11 @@ mod tests {
         );
         let snapshot = ProjectGraphSnapshot::with_tombstone_decay(Arc::new(state), 0);
         let query = ProjectContextQuery::new(
-            SemanticContextQuery::from_semantic_file_context(Some(&semantic)),
+            SemanticContextQuery::from_semantic(Some(&semantic)),
             Some(&snapshot),
         );
         let signal = query
-            .project_signal_for_line(10, 5)
+            .signal((10, 5))
             .expect("project signal");
         assert_eq!(signal.reference_count, 42);
         assert_eq!(signal.file_count, 7);

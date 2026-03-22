@@ -209,21 +209,36 @@ pub struct SemanticScopeCounts {
 #[derive(Clone, Debug, Default)]
 pub struct SemanticContractSnapshot {
     pub summary: SemanticSummary,
-    pub usr_decl_reference_counts: BTreeMap<String, usize>,
+    pub identity: SymbolIdentity,
+    pub scopes: ScopeStructure,
+    pub issues: SemanticIssues,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SymbolIdentity {
+    pub usr_ref_counts: BTreeMap<String, usize>,
     pub usr_decl_lines: BTreeMap<String, usize>,
-    pub declaration_stable_ids_by_line: BTreeMap<usize, BTreeSet<String>>,
-    pub declaration_kind_by_stable_id: BTreeMap<String, ClangSymbolKind>,
-    pub declaration_stable_ids: BTreeSet<String>,
-    pub stable_id_decl_lines: BTreeMap<String, usize>,
-    pub reference_stable_id_counts: BTreeMap<String, usize>,
-    pub reference_stable_id_first_line: BTreeMap<String, usize>,
-    pub scope_counts: SemanticScopeCounts,
-    pub scope_ranges_by_kind: BTreeMap<String, BTreeSet<(usize, usize)>>,
-    pub symbol_identity_issue_count: usize,
-    pub symbol_identity_issue_lines: BTreeSet<usize>,
-    pub usage_role_mismatch_count: usize,
-    pub usage_role_mismatch_lines: BTreeSet<usize>,
+    pub decl_ids_by_line: BTreeMap<usize, BTreeSet<String>>,
+    pub kind_by_decl_id: BTreeMap<String, ClangSymbolKind>,
+    pub decl_ids: BTreeSet<String>,
+    pub id_decl_lines: BTreeMap<String, usize>,
+    pub ref_id_counts: BTreeMap<String, usize>,
+    pub ref_first_line: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ScopeStructure {
+    pub counts: SemanticScopeCounts,
+    pub ranges_by_kind: BTreeMap<String, BTreeSet<(usize, usize)>>,
     pub preprocessor_ranges: Vec<(usize, usize)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SemanticIssues {
+    pub identity_count: usize,
+    pub identity_lines: BTreeSet<usize>,
+    pub mismatch_count: usize,
+    pub mismatch_lines: BTreeSet<usize>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -274,8 +289,8 @@ impl SemanticContract {
             return PolicyGuidanceMode::HardInvariant;
         }
         if policy_catalog()
-            .behavior_for_name(policy_name)
-            .hard_invariant_by_default
+            .behavior(policy_name)
+            .hard_invariant
         {
             return PolicyGuidanceMode::HardInvariant;
         }
@@ -324,17 +339,17 @@ impl SemanticContract {
         &self,
         before: &SemanticContractSnapshot,
         after: &SemanticContractSnapshot,
-        semantic_reference_drop_tolerance: usize,
-        semantic_scope_drift_tolerance: usize,
-        identity_line_shift_tolerance: usize,
+        ref_drop_tol: usize,
+        scope_drift_tol: usize,
+        identity_shift_tol: usize,
         edited_lines: Option<&BTreeSet<usize>>,
     ) -> SemanticTransitionAssessment {
         transition::evaluate(
             before,
             after,
-            semantic_reference_drop_tolerance,
-            semantic_scope_drift_tolerance,
-            identity_line_shift_tolerance,
+            ref_drop_tol,
+            scope_drift_tol,
+            identity_shift_tol,
             edited_lines,
         )
     }
@@ -353,7 +368,7 @@ impl SemanticContract {
         let search_start = declaration_line.saturating_sub(line_shift_tolerance);
         let search_end = declaration_line.saturating_add(line_shift_tolerance);
         for search_line in search_start..=search_end {
-            let Some(after_ids) = after.declaration_stable_ids_by_line.get(&search_line) else {
+            let Some(after_ids) = after.identity.decl_ids_by_line.get(&search_line) else {
                 continue;
             };
             for after_id in after_ids {
@@ -362,7 +377,7 @@ impl SemanticContract {
                 }
                 if declaration_kind.is_some_and(|kind| {
                     after
-                        .declaration_kind_by_stable_id
+                        .identity.kind_by_decl_id
                         .get(after_id.as_str())
                         .copied()
                         .is_some_and(|after_kind| after_kind != kind)
@@ -374,7 +389,7 @@ impl SemanticContract {
                     .filter(|id| {
                         declaration_kind.is_none_or(|kind| {
                             after
-                                .declaration_kind_by_stable_id
+                                .identity.kind_by_decl_id
                                 .get(id.as_str())
                                 .copied()
                                 .is_none_or(|after_kind| after_kind == kind)
@@ -385,7 +400,7 @@ impl SemanticContract {
                     return true;
                 }
                 let after_ref_count = after
-                    .reference_stable_id_counts
+                    .identity.ref_id_counts
                     .get(after_id.as_str())
                     .copied()
                     .unwrap_or(0);
@@ -448,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_allows_non_zero_clang_errors_within_threshold() {
+    fn allows_clang_errors() {
         let contract = SemanticContract::new();
         let assessment = contract.evaluate_readiness(SemanticReadinessInput {
             tree_unavailable: false,
@@ -461,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_rejects_tree_ratio_above_threshold() {
+    fn rejects_tree_ratio() {
         let contract = SemanticContract::new();
         let high_cert = PolicyCertainty {
             structural: 0.95, semantic: 0.95, coverage: 0.95,
@@ -481,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_rejects_fatal_diagnostics_above_threshold() {
+    fn rejects_fatal_diagnostics() {
         let contract = SemanticContract::new();
         let high_cert = PolicyCertainty {
             structural: 0.95, semantic: 0.95, coverage: 0.95,
@@ -501,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_high_certainty_can_override_moderate_threshold_violation() {
+    fn certainty_overrides_threshold() {
         use crate::engine::catalog::PolicyCertainty;
         let contract = SemanticContract::new();
         let high_certainty = PolicyCertainty {
@@ -522,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn context_invariants_report_symbol_identity_issue() {
+    fn invariants_identity_issue() {
         let contract = SemanticContract::new();
         let context = SemanticFileContext {
             declarations: vec![SemanticDeclaration {
@@ -547,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_flags_usage_role_regression() {
+    fn transition_role_regression() {
         let contract = SemanticContract::new();
         let before = SemanticFileContext {
             declarations: vec![SemanticDeclaration {
@@ -604,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_region_edits_emit_warning() {
+    fn macro_edits_warn() {
         let contract = SemanticContract::new();
         let before = SemanticFileContext::default();
         let after = SemanticFileContext {
@@ -637,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_flags_orphan_reference_introduction() {
+    fn transition_orphan_ref() {
         let contract = SemanticContract::new();
         let stable_id = "fallback:file.cpp:10:3:Variable".to_string();
         let before = SemanticFileContext {
@@ -686,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_flags_scope_structural_drift_even_when_counts_match() {
+    fn transition_scope_drift() {
         let contract = SemanticContract::new();
         let before = SemanticFileContext {
             scopes: vec![SemanticScope {
@@ -729,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_migration_tolerates_small_line_shift() {
+    fn migration_tolerates_small() {
         let contract = SemanticContract::new();
         let stable_id = "usr:c:@F@foo#".to_string();
         let before = SemanticFileContext {
@@ -810,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_migration_rejects_large_line_shift() {
+    fn migration_rejects_large() {
         let contract = SemanticContract::new();
         let stable_id = "usr:c:@F@foo#".to_string();
         let before = SemanticFileContext {
@@ -885,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_guidance_mode_defaults_to_soft_guideline() {
+    fn guidance_defaults_soft() {
         let settings = policy_config();
         assert_eq!(
             SemanticContract::policy_guidance_mode("class_layout", &settings),
@@ -894,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_guidance_mode_honors_hard_invariant_override() {
+    fn guidance_honors_override() {
         let mut settings = policy_config();
         settings.raw.insert(
             "semantic_hard_invariant".to_string(),

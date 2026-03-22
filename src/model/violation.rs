@@ -14,7 +14,7 @@ mod tests {
     use super::Violation;
 
     #[test]
-    fn serde_roundtrip_preserves_legacy_policy_string() {
+    fn serde_roundtrip_legacy() {
         let violation = Violation {
             policy: "semantic_contract".into(),
             message: "regressed".to_string(),

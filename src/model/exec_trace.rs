@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
 use crate::engine::edit_candidate::CandidateRiskTier;
 use crate::engine::run_options::RetryScopeStage;
-use crate::engine::zone::PolicyZone;
+use crate::policy::zone::PolicyZone;
 use crate::engine::semantic_contract::SemanticInvariantClause;
 use crate::model::policy_name::PolicyName;
 
@@ -105,14 +105,14 @@ mod tests {
     use crate::engine::edit_candidate::PolicyDecisionOutcome;
     use crate::engine::edit_candidate::CandidateRiskTier;
     use crate::engine::run_options::RetryScopeStage;
-    use crate::engine::zone::PolicyZone;
+    use crate::policy::zone::PolicyZone;
     use crate::engine::semantic_contract::SemanticInvariantClause;
     use crate::model::exec_trace::{
         PolicyCandidateOutcome, PolicyCandidateTrace, PolicyExecutionTrace,
     };
 
     #[test]
-    fn serde_serializes_trace_fields_as_legacy_strings() {
+    fn serde_serializes_legacy() {
         let trace = PolicyExecutionTrace {
             policy: "naming_conventions".into(),
             parse_mode: "hybrid".to_string(),
@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn serde_deserializes_legacy_string_trace_fields() {
+    fn serde_deserializes_legacy() {
         let value = serde_json::json!({
             "policy": "naming_conventions",
             "parse_mode": "hybrid",
