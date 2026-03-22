@@ -232,6 +232,8 @@ struct ReportSummary {
     total_engine_ms: f64,
     max_engine_ms: f64,
     slowest_file: String,
+    total_boot_parse_ms: f64,
+    max_boot_parse_ms: f64,
     policy_counts: BTreeMap<String, usize>,
     policy_timing: BTreeMap<String, PolicyTimingAgg>,
     certainty_structural_sum: f64,
@@ -254,6 +256,9 @@ struct PolicyTimingAgg {
     total_ms: f64,
     max_ms: f64,
     count: usize,
+    parse_total_ms: f64,
+    execute_total_ms: f64,
+    checkpoint_total_ms: f64,
 }
 
 impl ReportSummary {
@@ -272,6 +277,10 @@ impl ReportSummary {
             self.slowest_file = record.path.display().to_string();
         }
         self.total_engine_ms += record.elapsed_engine_ms;
+        self.total_boot_parse_ms += record.boot_parse_ms;
+        if record.boot_parse_ms > self.max_boot_parse_ms {
+            self.max_boot_parse_ms = record.boot_parse_ms;
+        }
 
         if let Some(cert) = &record.certainty {
             self.certainty_structural_sum += cert.structural;
@@ -311,6 +320,9 @@ impl ReportSummary {
             if policy.elapsed_ms > agg.max_ms {
                 agg.max_ms = policy.elapsed_ms;
             }
+            agg.parse_total_ms += policy.parse_ms;
+            agg.execute_total_ms += policy.execute_ms;
+            agg.checkpoint_total_ms += policy.checkpoint_ms;
         }
     }
 
@@ -337,6 +349,9 @@ impl ReportSummary {
                         "avg_ms": format!("{:.1}", avg),
                         "max_ms": format!("{:.1}", agg.max_ms),
                         "count": agg.count,
+                        "parse_total_ms": format!("{:.1}", agg.parse_total_ms),
+                        "execute_total_ms": format!("{:.1}", agg.execute_total_ms),
+                        "checkpoint_total_ms": format!("{:.1}", agg.checkpoint_total_ms),
                     }),
                 )
             })
@@ -357,6 +372,9 @@ impl ReportSummary {
                 "avg_engine_ms": format!("{:.1}", avg_engine_ms),
                 "max_engine_ms": format!("{:.1}", self.max_engine_ms),
                 "slowest_file": self.slowest_file,
+                "total_boot_parse_ms": format!("{:.1}", self.total_boot_parse_ms),
+                "avg_boot_parse_ms": format!("{:.1}", if self.files > 0 { self.total_boot_parse_ms / self.files as f64 } else { 0.0 }),
+                "max_boot_parse_ms": format!("{:.1}", self.max_boot_parse_ms),
                 "per_policy": per_policy,
             },
             "certainty": {
