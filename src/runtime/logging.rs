@@ -70,8 +70,9 @@ where
 }
 
 impl RuntimeLogging {
-    pub fn init(verbose: bool) {
+    pub fn init(verbose: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
         static INIT: Once = Once::new();
+        let mut guard_out = None;
         INIT.call_once(|| {
             let default_level = if verbose { "debug" } else { "warn" };
             let filter = EnvFilter::try_from_env("FORMATTER_LOG")
@@ -79,10 +80,14 @@ impl RuntimeLogging {
                 .unwrap_or_else(|_| EnvFilter::new(default_level));
             let ansi = io::stderr().is_terminal();
 
+            let (non_blocking, guard) = tracing_appender::non_blocking(io::stderr());
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .event_format(TimestampedColorFormatter { ansi })
+                .with_writer(non_blocking)
                 .try_init();
+            guard_out = Some(guard);
         });
+        guard_out
     }
 }
