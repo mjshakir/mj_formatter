@@ -10,8 +10,8 @@ use crate::model::violation::Violation;
 use crate::parser::file_context::SemanticScopeKind;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
-use crate::policy::traits::Policy;
-use crate::text_scan;
+use crate::policy::Policy;
+use crate::parser::text_scan;
 
 struct Replacement {
     start: usize,
@@ -319,14 +319,14 @@ impl Policy for LogicalKeywordOperatorsPolicy {
             };
         };
 
-        if context.has_fatal_clang_diagnostics() {
+        if context.has_fatal_diags() {
             return PolicyResult {
                 text: context.text.to_string(),
                 violations: Vec::new(),
                 edits: Vec::new(),
                 warnings: vec![format!(
                     "logical_keyword_operators: skipped due fatal clang diagnostics (fatal={})",
-                    context.clang_fatal_diagnostic_count()
+                    context.fatal_diag_count()
                 )],
             };
         }
@@ -417,7 +417,7 @@ mod tests {
     use crate::model::policy_context::PolicyContext;
     use crate::parser::file_context::SemanticFileContext;
     use crate::policy::keyword_operators::LogicalKeywordOperatorsPolicy;
-    use crate::policy::traits::Policy;
+    use crate::policy::Policy;
 
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
@@ -428,15 +428,15 @@ mod tests {
     }
 
     #[test]
-    fn replaces_logical_ops_in_regular_code() {
+    fn replaces_logical_ops() {
         let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
         let path = PathBuf::from("sample.cpp");
         let source = "bool ok = a&&b || c;\n";
         let tree = parse_cpp(source);
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "bool ok = a and b or c;\n");
     }
@@ -449,22 +449,22 @@ mod tests {
         let tree = parse_cpp(source);
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, source);
     }
 
     #[test]
-    fn preserves_comments_and_strings() {
+    fn preserves_comments_strings() {
         let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
         let path = PathBuf::from("sample.cpp");
         let source = "const char* s = \"a&&b || c\"; // keep && ||\nbool x = a||b;\n";
         let tree = parse_cpp(source);
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(
             result.text,
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_replace_rvalue_reference_tokens() {
+    fn keeps_rvalue_tokens() {
         let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
         let path = PathBuf::from("sample.hpp");
         let source =
@@ -481,36 +481,36 @@ mod tests {
         let tree = parse_cpp(source);
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, source);
     }
 
     #[test]
-    fn does_not_replace_operator_overload_symbol() {
+    fn keeps_operator_overload() {
         let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
         let path = PathBuf::from("sample.hpp");
         let source = "struct A {\n  bool operator&&(const A& rhs) const;\n};\n";
         let tree = parse_cpp(source);
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, source);
     }
 
     #[test]
-    fn applies_to_header_files() {
+    fn applies_header_files() {
         let policy = LogicalKeywordOperatorsPolicy::new(true, true, true);
         let path = PathBuf::from("sample.hpp");
         let source = "bool ok = a && b || c;\n";
         let tree = parse_cpp(source);
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "bool ok = a and b or c;\n");
         assert_eq!(result.edits.len(), 2);

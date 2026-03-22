@@ -6,7 +6,7 @@ use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NumericType {
@@ -390,149 +390,149 @@ mod tests {
     }
 
     #[test]
-    fn float_double_literal_gets_f_suffix() {
+    fn float_gets_f() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 1.0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "float x = 1.f;\n");
         assert_eq!(result.edits.len(), 1);
     }
 
     #[test]
-    fn float_with_trailing_digit_strips_zeros() {
+    fn float_strips_zeros() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 1.50;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "float x = 1.5f;\n");
     }
 
     #[test]
-    fn float_literal_already_correct_unchanged() {
+    fn float_already_correct() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 1.f;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());
     }
 
     #[test]
-    fn double_strips_float_suffix() {
+    fn double_strips_suffix() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "double x = 1.0f;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "double x = 1.0;\n");
     }
 
     #[test]
-    fn double_already_correct_unchanged() {
+    fn double_already_correct() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "double x = 1.0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());
     }
 
     #[test]
-    fn long_double_gets_uppercase_l_suffix() {
+    fn long_double_suffix() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "long double x = 1.0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "long double x = 1.L;\n");
     }
 
     #[test]
-    fn unsigned_int_gets_u_suffix() {
+    fn unsigned_gets_u() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "unsigned int x = 42;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "unsigned int x = 42U;\n");
     }
 
     #[test]
-    fn int_strips_wrong_unsigned_suffix() {
+    fn int_strips_unsigned() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "int x = 1u;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int x = 1;\n");
     }
 
     #[test]
-    fn unsigned_long_long_gets_ull_suffix() {
+    fn ull_gets_suffix() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "unsigned long long x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "unsigned long long x = 1ULL;\n");
     }
 
     #[test]
-    fn hex_literal_gets_correct_suffix() {
+    fn hex_gets_suffix() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "unsigned int x = 0xFF;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "unsigned int x = 0xFFU;\n");
     }
 
     #[test]
-    fn integer_literal_in_float_context_skipped() {
+    fn integer_float_skipped() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());
     }
 
     #[test]
-    fn multiple_declarators_all_fixed() {
+    fn multiple_declarators_fixed() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 1.0, y = 2.0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "float x = 1.f, y = 2.f;\n");
         assert_eq!(result.edits.len(), 2);
     }
 
     #[test]
-    fn expression_literals_all_fixed() {
+    fn expression_literals_fixed() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 1.0 + 2.0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "float x = 1.f + 2.f;\n");
     }
@@ -543,97 +543,97 @@ mod tests {
         let text = "auto x = 1.0;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());
     }
 
     #[test]
-    fn scientific_notation_gets_suffix() {
+    fn scientific_gets_suffix() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "float x = 1.0e10;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "float x = 1.e10f;\n");
     }
 
     #[test]
-    fn uint8_t_gets_u_suffix() {
+    fn uint8_gets_u() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "uint8_t x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "uint8_t x = 1U;\n");
         assert_eq!(result.edits.len(), 1);
     }
 
     #[test]
-    fn uint64_t_gets_ull_suffix() {
+    fn uint64_gets_ull() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "uint64_t x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "uint64_t x = 1ULL;\n");
     }
 
     #[test]
-    fn int32_t_strips_wrong_suffix() {
+    fn int32_strips_suffix() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "int32_t x = 1u;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int32_t x = 1;\n");
     }
 
     #[test]
-    fn int64_t_gets_ll_suffix() {
+    fn int64_gets_ll() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "int64_t x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int64_t x = 1LL;\n");
     }
 
     #[test]
-    fn size_t_gets_ull_suffix() {
+    fn sizet_gets_ull() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "size_t x = 10;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "size_t x = 10ULL;\n");
     }
 
     #[test]
-    fn static_constexpr_size_t_gets_ull() {
+    fn constexpr_sizet_ull() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "static constexpr size_t x = 2;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "static constexpr size_t x = 2ULL;\n");
     }
 
     #[test]
-    fn static_constexpr_size_t_in_class_gets_ull() {
+    fn constexpr_class_ull() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "class Foo {\n    static constexpr size_t C_MAX = 2;\n};\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.hpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(
             result.text,
@@ -642,35 +642,35 @@ mod tests {
     }
 
     #[test]
-    fn size_t_already_ull_unchanged() {
+    fn sizet_ull_unchanged() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "static constexpr size_t x = 2ULL;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());
     }
 
     #[test]
-    fn size_t_with_ul_corrected_to_ull() {
+    fn sizet_ul_corrected() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "static constexpr size_t x = 6UL;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "static constexpr size_t x = 6ULL;\n");
     }
 
     #[test]
-    fn size_t_template_parameter_default_untouched() {
+    fn sizet_template_untouched() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "template<typename T, size_t N = 0UL>\nclass Foo {};\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.hpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         // Template parameters are not declarations, should be untouched
         assert_eq!(result.text, text);
@@ -682,7 +682,7 @@ mod tests {
         let text = "MyCustomType x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());

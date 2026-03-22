@@ -479,9 +479,9 @@ impl DispatchScheduler {
             .map(|unit| unit.estimate.estimated_cost as u128)
             .sum::<u128>();
         let sizing = Self::workload_lease_sizing(ranked_units.as_slice(), parallelism, mode);
-        let lanes = Self::assign_units_to_virtual_lanes(ranked_units, sizing.lane_count);
+        let lanes = Self::assign_lanes(ranked_units, sizing.lane_count);
         let lane_batches =
-            Self::split_virtual_lanes_into_batches(lanes, sizing, total_estimated_cost);
+            Self::split_into_batches(lanes, sizing, total_estimated_cost);
         Self::interleave_lane_batches(lane_batches)
     }
 
@@ -614,7 +614,7 @@ impl DispatchScheduler {
         }
     }
 
-    fn assign_units_to_virtual_lanes(
+    fn assign_lanes(
         ranked_units: Vec<DispatchUnit>,
         lane_count: usize,
     ) -> Vec<VirtualLane> {
@@ -634,7 +634,7 @@ impl DispatchScheduler {
         lanes
     }
 
-    fn split_virtual_lanes_into_batches(
+    fn split_into_batches(
         lanes: Vec<VirtualLane>,
         sizing: WorkloadLeaseSizing,
         _total_estimated_cost: u128,
@@ -756,7 +756,7 @@ impl DispatchFeatures {
             preprocessor_density_bp: sampled.preprocessor_density_bp,
             comment_density_bp: sampled.comment_density_bp,
             extension_class: sampled.extension_class,
-            semantic_context_kind: parser_manager.semantic_compdb_context_kind_for_path(path),
+            semantic_context_kind: parser_manager.semantic_compdb_kind(path),
             unit_kind,
         }
     }
@@ -783,7 +783,7 @@ impl DispatchFeatures {
         let cost = base_cost
             .saturating_mul(self.unit_kind.multiplier_bp() as u128)
             .saturating_mul(self.extension_class.multiplier_bp() as u128)
-            .saturating_mul(semantic_context_multiplier_bp(self.semantic_context_kind) as u128)
+            .saturating_mul(semantic_mult_bp(self.semantic_context_kind) as u128)
             .saturating_div(10_000)
             .saturating_div(10_000)
             .saturating_div(10_000);
@@ -849,7 +849,7 @@ struct SampleAnalysis {
     comment_density_bp: u64,
 }
 
-fn semantic_context_multiplier_bp(kind: SemanticCompdbContextKind) -> u64 {
+fn semantic_mult_bp(kind: SemanticCompdbContextKind) -> u64 {
     match kind {
         SemanticCompdbContextKind::None => 8_500,
         SemanticCompdbContextKind::Exact => 10_500,
@@ -972,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_batches_is_deterministic_for_same_input() {
+    fn batches_deterministic_input() {
         let dir = temp_dir("mj_dispatch_deterministic");
         let files = [("a.cpp", 32usize), ("b.cpp", 640usize), ("c.hpp", 96usize)]
             .into_iter()
@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_batches_keeps_paired_units_together() {
+    fn batches_keep_paired() {
         let dir = temp_dir("mj_dispatch_paired");
         let include_dir = dir.join("include");
         let src_dir = dir.join("src");
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn history_blending_requires_three_samples() {
+    fn blending_requires_three() {
         let mut history = DispatchHistoryStore::ephemeral();
         history.entries.insert(
             "a".to_string(),
@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_history_payload_is_ignored() {
+    fn corrupt_payload_ignored() {
         let dir = temp_dir("mj_dispatch_history");
         let path = dir.join("dispatch_cost_cache.bin");
         fs::write(path.as_path(), b"not-bincode").expect("write corrupt history");
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_history_round_trips() {
+    fn history_round_trips() {
         let dir = temp_dir("mj_dispatch_history_round_trip");
         let mut history = DispatchHistoryStore::open(dir.as_path());
         history.record_observations(&[DispatchObservation {
@@ -1108,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn record_observations_uses_ewma() {
+    fn observations_use_ewma() {
         let mut history = DispatchHistoryStore::ephemeral();
         history.record_observations(&[
             DispatchObservation {

@@ -15,7 +15,7 @@ impl App {
         let mut pass_count = 0usize;
 
         for result in results {
-            if let Some(decision) = result.accuracy_gate.as_ref() {
+            if let Some(decision) = result.outcome.accuracy_gate.as_ref() {
                 considered = considered.saturating_add(1);
                 failing = failing.saturating_add(1);
                 precision_sum += decision.precision.clamp(0.0, 1.0);

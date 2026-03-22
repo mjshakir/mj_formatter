@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -6,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::engine::accuracy_gate::AccuracyGateFailure;
 use crate::engine::coordinator::FormatterEngine;
 use crate::files::file_io::FileIo;
-use crate::model::file_result::FileResult;
+use crate::model::file_result::{FileMeta, FormatOutcome, FileResult};
 use crate::model::rename_plan::SemanticRenamePlan;
 use crate::runtime::result_cache::CheckResultCache;
 use crate::runtime::scheduler::{DispatchObservation, ProcessedFileOutcome};
@@ -41,25 +40,20 @@ impl FileProcessor {
             Err(err) => {
                 let total_elapsed = total_started.elapsed();
                 let result = FileResult {
-                    path,
-                    changed: false,
-                    pending_text: None,
-                    semantic_rename_plans: Vec::new(),
-                    convergence_pairs: BTreeMap::new(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    policy_traces: Vec::new(),
-                    accuracy_gate: None,
+                    meta: FileMeta {
+                        path,
+                        backup_path: None,
+                        engine_ms: 0.0,
+                        total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                        boot_parse_ms: 0.0,
+                    },
+                    outcome: FormatOutcome::default(),
+                    traces: Vec::new(),
                     error: Some(format!("read failed: {err}")),
-                    backup_path: None,
                     warnings: Vec::new(),
-                    elapsed_engine_ms: 0.0,
-                    elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
-                    boot_parse_ms: 0.0,
-                    policy_certainty: None,
                 };
                 let observation = DispatchObservation::from_processed_file(
-                    result.path.as_path(),
+                    result.meta.path.as_path(),
                     None,
                     Duration::default(),
                     total_elapsed,
@@ -83,7 +77,7 @@ impl FileProcessor {
             {
                 if let Some(cached) = cache.get(path.as_path(), hash.as_str()) {
                     let observation = DispatchObservation::from_processed_file(
-                        cached.path.as_path(),
+                        cached.meta.path.as_path(),
                         Some(original.as_str()),
                         Duration::default(),
                         total_started.elapsed(),
@@ -108,25 +102,23 @@ impl FileProcessor {
                 let engine_elapsed = engine_started.elapsed();
                 let total_elapsed = total_started.elapsed();
                 let result = FileResult {
-                    path,
-                    changed: false,
-                    pending_text: None,
-                    semantic_rename_plans: Vec::new(),
-                    convergence_pairs: BTreeMap::new(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    policy_traces: Vec::new(),
-                    accuracy_gate,
+                    meta: FileMeta {
+                        path,
+                        backup_path: None,
+                        engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
+                        total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                        boot_parse_ms: 0.0,
+                    },
+                    outcome: FormatOutcome {
+                        accuracy_gate,
+                        ..FormatOutcome::default()
+                    },
+                    traces: Vec::new(),
                     error: Some(format!("pipeline failed: {err}")),
-                    backup_path: None,
                     warnings: Vec::new(),
-                    elapsed_engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
-                    elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
-                    boot_parse_ms: 0.0,
-                    policy_certainty: None,
                 };
                 let observation = DispatchObservation::from_processed_file(
-                    result.path.as_path(),
+                    result.meta.path.as_path(),
                     Some(original.as_str()),
                     engine_elapsed,
                     total_elapsed,
@@ -142,12 +134,12 @@ impl FileProcessor {
         let engine_elapsed = engine_started.elapsed();
         let retry_effort_units = pass_result.metrics.retry_effort_units();
         let policy_result = pass_result.policy_result;
-        let changed = !crate::text_scan::TEXT_SCAN.strings_equal(&policy_result.text, &original);
-        let mut semantic_rename_plans = Vec::new();
+        let changed = !crate::parser::text_scan::TEXT_SCAN.strings_equal(&policy_result.text, &original);
+        let mut rename_plans = Vec::new();
         let mut warnings = Vec::new();
         for warning in policy_result.warnings {
             if let Some(plan) = SemanticRenamePlan::from_internal_warning(warning.as_str()) {
-                semantic_rename_plans.push(plan);
+                rename_plans.push(plan);
             } else {
                 warnings.push(warning);
             }
@@ -155,32 +147,36 @@ impl FileProcessor {
 
         let total_elapsed = total_started.elapsed();
         let result = FileResult {
-            path,
-            changed,
-            pending_text: (changed && !self.check).then_some(policy_result.text),
-            semantic_rename_plans,
-            convergence_pairs: pass_result.convergence_pairs,
-            violations: policy_result.violations,
-            edits: policy_result.edits,
-            policy_traces: pass_result.policy_traces,
-            accuracy_gate: pass_result.accuracy_gate,
+            meta: FileMeta {
+                path,
+                backup_path: None,
+                engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
+                total_ms: total_elapsed.as_secs_f64() * 1000.0,
+                boot_parse_ms: pass_result.boot_parse_ms,
+            },
+            outcome: FormatOutcome {
+                changed,
+                pending_text: (changed && !self.check).then_some(policy_result.text),
+                rename_plans,
+                convergence_pairs: pass_result.convergence_pairs,
+                violations: policy_result.violations,
+                edits: policy_result.edits,
+                accuracy_gate: pass_result.accuracy_gate,
+                certainty: pass_result.policy_certainty,
+            },
+            traces: pass_result.policy_traces,
             error: None,
-            backup_path: None,
             warnings,
-            elapsed_engine_ms: engine_elapsed.as_secs_f64() * 1000.0,
-            elapsed_total_ms: total_elapsed.as_secs_f64() * 1000.0,
-            boot_parse_ms: pass_result.boot_parse_ms,
-            policy_certainty: pass_result.policy_certainty,
         };
         if self.check {
             if let (Some(cache), Some(hash)) =
                 (self.check_result_cache.as_ref(), content_hash.as_ref())
             {
-                cache.put(result.path.as_path(), hash.as_str(), &result);
+                cache.put(result.meta.path.as_path(), hash.as_str(), &result);
             }
         }
         let observation = DispatchObservation::from_processed_file(
-            result.path.as_path(),
+            result.meta.path.as_path(),
             Some(original.as_str()),
             engine_elapsed,
             total_started.elapsed(),

@@ -5,17 +5,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::policy_name::PolicyName;
 use crate::model::retry_strategy::RetryStrategyName;
-use crate::graph::state::RetryStrategyLearningStats;
+use crate::graph::state::RetryStats;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RetryStrategySnapshotEntry {
     pub strategy: RetryStrategyName,
     pub failure_context: String,
-    pub stats: RetryStrategyLearningStats,
+    pub stats: RetryStats,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RetryCulpritPairSnapshotEntry {
+pub struct CulpritSnapshot {
     pub culprit_policy: PolicyName,
     pub peer_policy: PolicyName,
     pub count: u64,
@@ -24,11 +24,11 @@ pub struct RetryCulpritPairSnapshotEntry {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RetryLearningSnapshot {
     pub strategy_outcomes: Vec<RetryStrategySnapshotEntry>,
-    pub culprit_pairs: Vec<RetryCulpritPairSnapshotEntry>,
+    pub culprit_pairs: Vec<CulpritSnapshot>,
 }
 
 struct RetryLearningMaps {
-    strategy_outcomes: DashMap<(RetryStrategyName, String), RetryStrategyLearningStats>,
+    strategy_outcomes: DashMap<(RetryStrategyName, String), RetryStats>,
     culprit_pairs: DashMap<(String, String), u64>,
 }
 
@@ -73,7 +73,7 @@ impl RetryLearningTelemetry {
             .iter()
             .map(|entry| {
                 let (culprit, peer) = entry.key();
-                RetryCulpritPairSnapshotEntry {
+                CulpritSnapshot {
                     culprit_policy: culprit.clone().into(),
                     peer_policy: peer.clone().into(),
                     count: *entry.value(),
@@ -147,14 +147,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_snapshot_accumulates_counts() {
+    fn snapshot_accumulates_counts() {
         let _guard = test_guard();
         RetryLearningTelemetry::reset();
         let snapshot = RetryLearningSnapshot {
             strategy_outcomes: vec![RetryStrategySnapshotEntry {
                 strategy: "raise_confidence".into(),
                 failure_context: "tree".to_string(),
-                stats: crate::graph::state::RetryStrategyLearningStats {
+                stats: crate::graph::state::RetryStats {
                     attempts: 3,
                     successes: 2,
                 },

@@ -1,4 +1,4 @@
-use crate::text_scan;
+use crate::parser::text_scan;
 
 pub fn detect_line_ending(text: &str) -> &'static str {
     if text_scan::contains_subslice(text.as_bytes(), b"\r\n") {

@@ -12,7 +12,7 @@ use crate::parser::manager::ParserManager;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::parser::ts_traversal;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum AccessLevel {
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_no_matching_header() {
+    fn skips_no_header() {
         let policy = ClassLayoutPolicy::new(
             vec![".cpp".to_string()],
             vec![".hpp".to_string()],
@@ -632,8 +632,8 @@ mod tests {
         let semantic = SemanticFileContext::default();
         let path = PathBuf::from("missing.cpp");
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());

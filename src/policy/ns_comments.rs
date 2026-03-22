@@ -9,7 +9,7 @@ use crate::model::violation::Violation;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::parser::ts_traversal;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
 
 #[derive(Clone, Debug)]
@@ -20,14 +20,14 @@ struct BlockCandidate {
     close_line: usize,
 }
 
-pub struct NamespaceEndCommentsPolicy {
+pub struct NsCommentsPolicy {
     blocks_filter: HashSet<String>,
     control_block_kinds: HashSet<String>,
     max_named_lines: usize,
     max_label_length: usize,
 }
 
-impl NamespaceEndCommentsPolicy {
+impl NsCommentsPolicy {
     pub fn new(
         blocks: Vec<String>,
         control_block_kinds: Vec<String>,
@@ -279,7 +279,7 @@ impl NamespaceEndCommentsPolicy {
     }
 }
 
-impl Policy for NamespaceEndCommentsPolicy {
+impl Policy for NsCommentsPolicy {
     fn name(&self) -> &str {
         "namespace_end_comments"
     }
@@ -424,76 +424,76 @@ mod tests {
     }
 
     #[test]
-    fn adds_namespace_end_comment() {
-        let policy = NamespaceEndCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
+    fn adds_namespace_comment() {
+        let policy = NsCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
         let text = "namespace demo {\nint x = 1;\n}\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.text.contains("} // end namespace demo"));
     }
 
     #[test]
-    fn preserves_existing_comment_when_present() {
-        let policy = NamespaceEndCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
+    fn preserves_existing_comment() {
+        let policy = NsCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
         let text = "namespace demo {\nint x = 1;\n} // wrong\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
     }
 
     #[test]
-    fn preserves_detailed_function_end_comment() {
-        let policy = NamespaceEndCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
+    fn preserves_detailed_comment() {
+        let policy = NsCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
         let text = "int f(void) {\nreturn 0;\n} // end f(void)\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
     }
 
     #[test]
-    fn does_not_add_generic_function_comment_when_missing() {
-        let policy = NamespaceEndCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
+    fn skips_generic_comment() {
+        let policy = NsCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
         let text = "int f(void) {\nreturn 0;\n}\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
     }
 
     #[test]
-    fn default_filter_skips_struct_end_comments() {
-        let policy = NamespaceEndCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
+    fn skips_struct_comments() {
+        let policy = NsCommentsPolicy::new(Vec::new(), Vec::new(), 40, 48, true);
         let text = "struct Slot {\nint value;\n};\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, text);
     }

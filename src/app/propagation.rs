@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use crate::model::edit::Edit;
 use crate::model::file_result::FileResult;
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::manager::{ParserManager, SemanticCompdbContextKind};
-use crate::text_scan;
+use crate::parser::text_scan;
 
 impl App {
     pub(crate) fn apply_project_wide_semantic_renames(
@@ -22,13 +22,13 @@ impl App {
         parallel_pool: Option<&rayon::ThreadPool>,
         population_edit_success: f64,
     ) {
-        let mut rename_by_decl: HashMap<ClangDeclKey, (String, String)> = HashMap::new();
+        let mut rename_by_decl: FxHashMap<ClangDeclKey, (String, String)> = FxHashMap::default();
         let mut plan_conflict = None::<String>;
         for result in results.iter() {
             if result.error.is_some() {
                 continue;
             }
-            for plan in &result.semantic_rename_plans {
+            for plan in &result.outcome.rename_plans {
                 let next = (plan.old_name.clone(), plan.new_name.clone());
                 if let Some(existing) = rename_by_decl.get(&plan.decl) {
                     if existing != &next {
@@ -49,10 +49,10 @@ impl App {
 
         if let Some(conflict) = plan_conflict {
             for result in results.iter_mut() {
-                if result.error.is_none() && !result.semantic_rename_plans.is_empty() {
+                if result.error.is_none() && !result.outcome.rename_plans.is_empty() {
                     result.error = Some(conflict.clone());
-                    result.changed = false;
-                    result.pending_text = None;
+                    result.outcome.changed = false;
+                    result.outcome.pending_text = None;
                 }
             }
             return;
@@ -66,18 +66,18 @@ impl App {
         // by population edit_success trust.
         let willingness = 1.0 / (1.0 + (-5.0_f64 * (population_edit_success - 0.5)).exp());
         let population_edit_bar = 1.0 - willingness;
-        let mut decl_proposer_count: HashMap<ClangDeclKey, usize> = HashMap::new();
+        let mut decl_proposer_count: FxHashMap<ClangDeclKey, usize> = FxHashMap::default();
         for result in results.iter() {
             if result.error.is_some() {
                 continue;
             }
-            for plan in &result.semantic_rename_plans {
+            for plan in &result.outcome.rename_plans {
                 *decl_proposer_count.entry(plan.decl.clone()).or_insert(0) += 1;
             }
         }
         let total_files_with_plans = results
             .iter()
-            .filter(|r| r.error.is_none() && !r.semantic_rename_plans.is_empty())
+            .filter(|r| r.error.is_none() && !r.outcome.rename_plans.is_empty())
             .count()
             .max(1);
         rename_by_decl.retain(|decl, _| {
@@ -94,7 +94,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, result)| Self::should_process_semantic_propagation_result(result))
-            .map(|(index, result)| (index, result.path.clone(), result.pending_text.clone()))
+            .map(|(index, result)| (index, result.meta.path.clone(), result.outcome.pending_text.clone()))
             .collect::<Vec<_>>();
         if targets.is_empty() {
             return;
@@ -147,8 +147,8 @@ impl App {
             }
             if let Some(error) = outcome.error {
                 result.error = Some(error);
-                result.changed = false;
-                result.pending_text = None;
+                result.outcome.changed = false;
+                result.outcome.pending_text = None;
                 continue;
             }
             if outcome.edits.is_empty() || outcome.pending_text.is_none() {
@@ -158,17 +158,18 @@ impl App {
                 continue;
             };
             if result
+                .outcome
                 .pending_text
                 .as_ref()
                 .is_none_or(|existing| existing != &text)
             {
-                result.pending_text = Some(text);
-                result.changed = true;
+                result.outcome.pending_text = Some(text);
+                result.outcome.changed = true;
                 if let Some(warning) = outcome.warning {
                     result.warnings.push(warning);
                 }
             }
-            result.edits.extend(outcome.edits);
+            result.outcome.edits.extend(outcome.edits);
         }
     }
 
@@ -176,7 +177,7 @@ impl App {
         index: usize,
         path: PathBuf,
         pending_text: Option<String>,
-        rename_by_decl: &HashMap<ClangDeclKey, (String, String)>,
+        rename_by_decl: &FxHashMap<ClangDeclKey, (String, String)>,
         parser_manager: &ParserManager,
         file_io: &FileIo,
     ) -> SemanticPropagationOutcome {
@@ -239,7 +240,7 @@ impl App {
         let line_starts = Self::line_starts(text.as_str());
         let mut replacements = Vec::<(usize, usize, usize, String, String)>::new();
         for (decl, (old_name, new_name)) in rename_by_decl {
-            let offsets = parse_result.reference_offsets_for_decl(decl);
+            let offsets = parse_result.ref_offsets(decl);
             for offset in offsets {
                 let end = offset.saturating_add(old_name.len());
                 if end > text.len() || !text.is_char_boundary(offset) || !text.is_char_boundary(end)
@@ -309,11 +310,11 @@ impl App {
         parser_manager: &ParserManager,
         path: &Path,
     ) -> bool {
-        let exact = parser_manager.has_exact_compdb_entry_for_path(path);
+        let exact = parser_manager.has_exact_compdb(path);
         if exact {
             return false;
         }
-        let context_kind = parser_manager.semantic_compdb_context_kind_for_path(path);
+        let context_kind = parser_manager.semantic_compdb_kind(path);
         Self::should_skip_project_wide_semantic_propagation_for_context(context_kind)
     }
 
@@ -329,7 +330,7 @@ impl App {
     }
 
     fn should_process_semantic_propagation_result(result: &FileResult) -> bool {
-        result.error.is_none() && !result.semantic_rename_plans.is_empty()
+        result.error.is_none() && !result.outcome.rename_plans.is_empty()
     }
 
     fn line_starts(text: &str) -> Vec<usize> {
@@ -358,24 +359,24 @@ impl App {
     pub(crate) fn apply_write_phase(file_io: &FileIo, results: &mut [FileResult], parallel_pool: Option<&rayon::ThreadPool>) {
         let write_fn = |result: &mut FileResult| {
             if result.error.is_some() {
-                result.pending_text = None;
-                result.changed = false;
+                result.outcome.pending_text = None;
+                result.outcome.changed = false;
                 return;
             }
-            if !result.changed {
-                result.pending_text = None;
+            if !result.outcome.changed {
+                result.outcome.pending_text = None;
                 return;
             }
-            let Some(text) = result.pending_text.take() else {
-                result.changed = false;
+            let Some(text) = result.outcome.pending_text.take() else {
+                result.outcome.changed = false;
                 return;
             };
-            match file_io.write_text(result.path.as_path(), text.as_str()) {
+            match file_io.write_text(result.meta.path.as_path(), text.as_str()) {
                 Ok(backup_path) => {
-                    result.backup_path = backup_path;
+                    result.meta.backup_path = backup_path;
                 }
                 Err(err) => {
-                    result.changed = false;
+                    result.outcome.changed = false;
                     result.error = Some(format!("write failed: {err}"));
                 }
             }
@@ -398,13 +399,13 @@ mod tests {
     use crate::parser::manager::SemanticCompdbContextKind;
 
     #[test]
-    fn project_wide_semantic_propagation_requires_exact_compdb() {
+    fn propagation_requires_compdb() {
         assert!(App::should_skip_project_wide_semantic_propagation_for_exact_compdb(false));
         assert!(!App::should_skip_project_wide_semantic_propagation_for_exact_compdb(true));
     }
 
     #[test]
-    fn project_wide_semantic_propagation_allows_paired_source_heuristic() {
+    fn propagation_allows_heuristic() {
         assert!(!App::should_skip_project_wide_semantic_propagation_for_context(
             SemanticCompdbContextKind::Exact,
         ));
@@ -423,11 +424,11 @@ mod tests {
     }
 
     #[test]
-    fn semantic_propagation_targets_only_files_with_local_rename_plans() {
+    fn propagation_targets_renames() {
         let mut result = FileResult::default();
         assert!(!App::should_process_semantic_propagation_result(&result));
 
-        result.semantic_rename_plans.push(SemanticRenamePlan {
+        result.outcome.rename_plans.push(SemanticRenamePlan {
             decl: ClangDeclKey::new(
                 "/tmp/sample.cpp".to_string(),
                 7,

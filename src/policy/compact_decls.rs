@@ -2,7 +2,7 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
 
 #[derive(Clone, Debug)]
@@ -240,7 +240,7 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         let semantic = SemanticFileContext::default();
         let ctx =
-            PolicyContext::new(text.as_str(), &path).with_semantic_file_context(Some(&semantic));
+            PolicyContext::new(text.as_str(), &path).with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int a, b, c;\n");
         assert_eq!(result.violations.len(), 1);

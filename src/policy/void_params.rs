@@ -7,7 +7,7 @@ use crate::model::violation::Violation;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::parser::ts_traversal;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 
 pub struct FunctionVoidParamsPolicy {
     require_void: bool,
@@ -265,15 +265,15 @@ mod tests {
     }
 
     #[test]
-    fn adds_void_to_empty_params() {
+    fn adds_void_params() {
         let policy = FunctionVoidParamsPolicy::new(true, true);
         let text = "int foo () { return 0; }\n".to_string();
         let tree = parse_cpp(text.as_str());
         let semantic = SemanticFileContext::default();
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.text.contains("foo(void)"));
     }

@@ -4,9 +4,9 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
-use crate::text_scan;
+use crate::parser::text_scan;
 
 pub struct SectionTitleNormalizerPolicy {
     mapping: HashMap<String, String>,

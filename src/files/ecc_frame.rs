@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_single_shard_corruption() {
+    fn recovers_shard_corruption() {
         let payload = b"test data for ecc recovery that is longer than a few bytes to ensure multiple shards";
         let mut buf = Vec::new();
         write_frame(&mut buf, payload).expect("write");

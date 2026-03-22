@@ -383,13 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_current_binary_format() {
+    fn rejects_binary_format() {
         let json = br#"{"value":7,"label":"unsupported"}"#;
         assert!(StateCodec::decode_binary::<DemoState>(json).is_err());
     }
 
     #[test]
-    fn recovers_single_shard_corruption() {
+    fn recovers_shard_corruption() {
         let state = DemoState {
             value: 42,
             label: "ecc-recover".to_string(),
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn fails_when_corruption_exceeds_parity_budget() {
+    fn corruption_exceeds_parity() {
         let state = DemoState {
             value: 100,
             label: "ecc-fail".to_string(),

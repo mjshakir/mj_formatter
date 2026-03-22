@@ -4,8 +4,8 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::ts_traversal;
-use crate::policy::traits::Policy;
-use crate::text_scan;
+use crate::policy::Policy;
+use crate::parser::text_scan;
 
 pub struct ClangFormatPolicy {
     command: String,
@@ -292,7 +292,7 @@ impl Policy for ClangFormatPolicy {
             context
                 .policy_certainty
                 .as_ref()
-                .map(|c| fuzzy_inference::fuzzy_region_batch_lines(c, before_error_count))
+                .map(|c| fuzzy_inference::fuzzy_batch_lines(c, before_error_count))
                 .unwrap_or(usize::MAX)
         });
         let regions = Self::compute_line_regions(line_count, batch_size);
@@ -410,10 +410,10 @@ mod tests {
     use crate::parser::clang_result::{
         ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
     };
-    use crate::policy::traits::Policy;
+    use crate::policy::Policy;
 
     #[test]
-    fn preserve_sensitive_lines_restores_delete_default_spacing() {
+    fn preserve_restores_spacing() {
         let before = "    Hasher(void)                    = delete;\n    ~Hasher(void)                   = delete;\n";
         let after = "    Hasher(void) = delete;\n    ~Hasher(void) = delete;\n";
         let restored = ClangFormatPolicy::preserve_sensitive_lines(before, after);
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn preserve_sensitive_lines_restores_end_comment_line() {
+    fn preserve_restores_comment() {
         let before = "            } // end bool swap(const Key& key, std::shared_ptr<T> old_data, std::shared_ptr<T> new_data)\n";
         let after = "            } // end bool swap(const Key& key, std::shared_ptr<T> old_data, std::shared_ptr<T>\n              // new_data)\n";
         let restored = ClangFormatPolicy::preserve_sensitive_lines(before, after);
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_lines_anchors_localized_insertions() {
+    fn diff_anchors_insertions() {
         let policy = ClangFormatPolicy::new("clang-format".to_string(), "LLVM".to_string());
         let before = "#pragma once\n#include \"A.hpp\"\n";
         let after = "#pragma once\n\n#include \"A.hpp\"\n";
@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_clang_has_fatal_diagnostics() {
+    fn skips_fatal_diagnostics() {
         let policy = ClangFormatPolicy::new("clang-format".to_string(), "LLVM".to_string());
         let parse = ClangParseResult::new(
             false,
@@ -457,7 +457,7 @@ mod tests {
         );
         let text = "int x=1;\n";
         let path = PathBuf::from("fatal.cpp");
-        let context = PolicyContext::new(text, &path).with_clang_parse_result(Some(&parse));
+        let context = PolicyContext::new(text, &path).with_clang(Some(&parse));
         let result = policy.apply(&context);
         assert_eq!(result.text, text);
         assert!(result.edits.is_empty());

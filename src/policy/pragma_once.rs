@@ -2,7 +2,7 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
 
 pub struct PragmaOnceSpacingPolicy {
@@ -76,12 +76,12 @@ impl Policy for PragmaOnceSpacingPolicy {
         let end = start + existing_blank;
         let before_segment = lines[start..end].to_vec();
         let mut skipped_semantic_unsafe = 0usize;
-        if !semantic_query.is_safe_preprocessor_or_global_edit(pragma_index + 1, 1) {
+        if !semantic_query.is_safe_global(pragma_index + 1, 1) {
             skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
         }
         if skipped_semantic_unsafe == 0
             && (start + 1..=end.max(start + self.blank_lines_after))
-                .any(|line| !semantic_query.is_safe_preprocessor_or_global_edit(line, 1))
+                .any(|line| !semantic_query.is_safe_global(line, 1))
         {
             skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
         }

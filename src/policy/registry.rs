@@ -2,7 +2,7 @@ use crate::config::app_config::AppConfig;
 use crate::engine::catalog::policy_catalog;
 use crate::policy::factory::PolicyFactory;
 use crate::policy::id::PolicyId;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 
 pub struct PolicyRegistry;
 
@@ -26,7 +26,7 @@ impl PolicyRegistry {
 
     fn execution_priority(policy_id: PolicyId) -> u8 {
         policy_catalog()
-            .behavior_for_id(&policy_id)
+            .behavior(&policy_id)
             .execution_priority
     }
 }
@@ -37,7 +37,7 @@ mod tests {
     use crate::policy::id::PolicyId;
 
     #[test]
-    fn execution_priority_matches_expected_buckets() {
+    fn priority_matches_buckets() {
         assert_eq!(
             PolicyRegistry::execution_priority(PolicyId::NamingConventions),
             10
@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_priority_defaults_unknown_to_neutral_bucket() {
+    fn priority_defaults_neutral() {
         assert_eq!(
             PolicyRegistry::execution_priority(PolicyId::Unknown("custom".to_string())),
             80

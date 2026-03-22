@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -88,7 +88,7 @@ impl FileUnitKind {
 
 #[derive(Clone, Debug)]
 pub struct FileUnitLayout {
-    descriptors_by_path: HashMap<String, FileUnitDescriptor>,
+    descriptors_by_path: FxHashMap<String, FileUnitDescriptor>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,7 +99,7 @@ struct FileUnitDescriptor {
 
 impl FileUnitLayout {
     pub fn from_paths(paths: &[PathBuf]) -> Self {
-        let mut groups = HashMap::<String, FileUnitAccumulator>::new();
+        let mut groups: FxHashMap<String, FileUnitAccumulator> = FxHashMap::default();
         for path in paths {
             let path_key = Self::normalize_path(path.as_path());
             let unit_key = Self::unit_key(path.as_path());
@@ -112,7 +112,7 @@ impl FileUnitLayout {
             }
         }
 
-        let mut descriptors_by_path = HashMap::<String, FileUnitDescriptor>::new();
+        let mut descriptors_by_path: FxHashMap<String, FileUnitDescriptor> = FxHashMap::default();
         for (unit_key, group) in groups {
             let kind = if group.has_header && group.has_implementation {
                 FileUnitKind::Paired
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_classifies_pairs_and_singletons() {
+    fn layout_classifies_pairs() {
         let root = temp_dir("file_unit_layout");
         let include_dir = root.join("include");
         let src_dir = root.join("src");
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_on_disk_detects_paired_and_header_only_units() {
+    fn classify_paired_header() {
         let root = temp_dir("file_unit_disk");
         let include_dir = root.join("include");
         let src_dir = root.join("src");

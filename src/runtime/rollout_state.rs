@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn arms_fail_closed_after_stable_pass_streak() {
+    fn arms_after_streak() {
         let path = temp_state_path();
         let mut state = AccuracyRolloutState::open(path.as_path());
         assert!(!state.effective_fail_closed(AccuracyRolloutProfile::Balanced, true, true));
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn fail_resets_streak_and_disarms() {
+    fn fail_resets_disarms() {
         let path = temp_state_path();
         let mut state = AccuracyRolloutState::open(path.as_path());
         state
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn promotes_profile_when_metrics_stay_stable() {
+    fn promotes_when_stable() {
         let path = temp_state_path();
         let mut state = AccuracyRolloutState::open(path.as_path());
         for _ in 0..3 {
@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn demotes_profile_after_repeated_failures() {
+    fn demotes_after_failures() {
         let path = temp_state_path();
         let mut state = AccuracyRolloutState::open(path.as_path());
         state
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn low_sample_runs_do_not_force_demotion() {
+    fn low_samples_nodemotion() {
         let path = temp_state_path();
         let mut state = AccuracyRolloutState::open(path.as_path());
         state
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_signal_is_persisted_in_status() {
+    fn signal_persisted_status() {
         let path = temp_state_path();
         let mut state = AccuracyRolloutState::open(path.as_path());
         state

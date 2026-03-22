@@ -20,11 +20,16 @@ pub struct PolicyTelemetryEntry {
     pub confidence_advisory_only: u64,
     pub confidence_block: u64,
     pub reason_low_consensus: u64,
-    pub reason_parser_consensus_strict: u64,
-    pub reason_parser_consensus_adaptive_hardened: u64,
-    pub reason_parser_consensus_adaptive_relaxed: u64,
-    pub reason_context_coverage_low: u64,
-    pub reason_semantic_consensus_low: u64,
+    #[serde(alias = "reason_parser_consensus_strict")]
+    pub reason_parser_strict: u64,
+    #[serde(alias = "reason_parser_consensus_adaptive_hardened")]
+    pub reason_parser_hardened: u64,
+    #[serde(alias = "reason_parser_consensus_adaptive_relaxed")]
+    pub reason_parser_relaxed: u64,
+    #[serde(alias = "reason_context_coverage_low")]
+    pub reason_coverage_low: u64,
+    #[serde(alias = "reason_semantic_consensus_low")]
+    pub reason_semantic_low: u64,
     pub reason_parser_disagreement: u64,
     pub reason_clang_diagnostics: u64,
     pub total_elapsed_ns: u64,
@@ -62,11 +67,11 @@ pub struct PolicyExecutionSample {
 pub struct PolicyConfidenceSample {
     pub outcome: PolicyDecisionOutcome,
     pub low_consensus: bool,
-    pub parser_consensus_strict: bool,
-    pub parser_consensus_adaptive_hardened: bool,
-    pub parser_consensus_adaptive_relaxed: bool,
-    pub context_coverage_low: bool,
-    pub semantic_consensus_low: bool,
+    pub parser_strict: bool,
+    pub parser_hardened: bool,
+    pub parser_relaxed: bool,
+    pub coverage_low: bool,
+    pub semantic_low: bool,
     pub parser_disagreement: bool,
     pub clang_diagnostics: bool,
 }
@@ -79,11 +84,11 @@ impl PolicyConfidenceSample {
         let mut sample = Self {
             outcome,
             low_consensus: false,
-            parser_consensus_strict: false,
-            parser_consensus_adaptive_hardened: false,
-            parser_consensus_adaptive_relaxed: false,
-            context_coverage_low: false,
-            semantic_consensus_low: false,
+            parser_strict: false,
+            parser_hardened: false,
+            parser_relaxed: false,
+            coverage_low: false,
+            semantic_low: false,
             parser_disagreement: false,
             clang_diagnostics: false,
         };
@@ -92,16 +97,16 @@ impl PolicyConfidenceSample {
             match reason {
                 ConfidenceReasonCode::LowConsensus => sample.low_consensus = true,
                 ConfidenceReasonCode::ParserConsensusStrict => {
-                    sample.parser_consensus_strict = true
+                    sample.parser_strict = true
                 }
-                ConfidenceReasonCode::ParserConsensusAdaptiveHardened => {
-                    sample.parser_consensus_adaptive_hardened = true
+                ConfidenceReasonCode::ParserHardened => {
+                    sample.parser_hardened = true
                 }
-                ConfidenceReasonCode::ParserConsensusAdaptiveRelaxed => {
-                    sample.parser_consensus_adaptive_relaxed = true
+                ConfidenceReasonCode::ParserRelaxed => {
+                    sample.parser_relaxed = true
                 }
-                ConfidenceReasonCode::ContextCoverageLow => sample.context_coverage_low = true,
-                ConfidenceReasonCode::SemanticConsensusLow => sample.semantic_consensus_low = true,
+                ConfidenceReasonCode::ContextCoverageLow => sample.coverage_low = true,
+                ConfidenceReasonCode::SemanticConsensusLow => sample.semantic_low = true,
                 ConfidenceReasonCode::ParserDisagreement => sample.parser_disagreement = true,
                 ConfidenceReasonCode::ClangDiagnostics => sample.clang_diagnostics = true,
                 _ => {}
@@ -217,27 +222,27 @@ impl PolicyTelemetry {
                 if confidence.low_consensus {
                     entry.reason_low_consensus = entry.reason_low_consensus.saturating_add(1);
                 }
-                if confidence.parser_consensus_strict {
-                    entry.reason_parser_consensus_strict =
-                        entry.reason_parser_consensus_strict.saturating_add(1);
+                if confidence.parser_strict {
+                    entry.reason_parser_strict =
+                        entry.reason_parser_strict.saturating_add(1);
                 }
-                if confidence.parser_consensus_adaptive_hardened {
-                    entry.reason_parser_consensus_adaptive_hardened = entry
-                        .reason_parser_consensus_adaptive_hardened
+                if confidence.parser_hardened {
+                    entry.reason_parser_hardened = entry
+                        .reason_parser_hardened
                         .saturating_add(1);
                 }
-                if confidence.parser_consensus_adaptive_relaxed {
-                    entry.reason_parser_consensus_adaptive_relaxed = entry
-                        .reason_parser_consensus_adaptive_relaxed
+                if confidence.parser_relaxed {
+                    entry.reason_parser_relaxed = entry
+                        .reason_parser_relaxed
                         .saturating_add(1);
                 }
-                if confidence.context_coverage_low {
-                    entry.reason_context_coverage_low =
-                        entry.reason_context_coverage_low.saturating_add(1);
+                if confidence.coverage_low {
+                    entry.reason_coverage_low =
+                        entry.reason_coverage_low.saturating_add(1);
                 }
-                if confidence.semantic_consensus_low {
-                    entry.reason_semantic_consensus_low =
-                        entry.reason_semantic_consensus_low.saturating_add(1);
+                if confidence.semantic_low {
+                    entry.reason_semantic_low =
+                        entry.reason_semantic_low.saturating_add(1);
                 }
                 if confidence.parser_disagreement {
                     entry.reason_parser_disagreement =
@@ -308,21 +313,21 @@ impl PolicyTelemetry {
             entry.reason_low_consensus = entry
                 .reason_low_consensus
                 .saturating_add(item.entry.reason_low_consensus);
-            entry.reason_parser_consensus_strict = entry
-                .reason_parser_consensus_strict
-                .saturating_add(item.entry.reason_parser_consensus_strict);
-            entry.reason_parser_consensus_adaptive_hardened = entry
-                .reason_parser_consensus_adaptive_hardened
-                .saturating_add(item.entry.reason_parser_consensus_adaptive_hardened);
-            entry.reason_parser_consensus_adaptive_relaxed = entry
-                .reason_parser_consensus_adaptive_relaxed
-                .saturating_add(item.entry.reason_parser_consensus_adaptive_relaxed);
-            entry.reason_context_coverage_low = entry
-                .reason_context_coverage_low
-                .saturating_add(item.entry.reason_context_coverage_low);
-            entry.reason_semantic_consensus_low = entry
-                .reason_semantic_consensus_low
-                .saturating_add(item.entry.reason_semantic_consensus_low);
+            entry.reason_parser_strict = entry
+                .reason_parser_strict
+                .saturating_add(item.entry.reason_parser_strict);
+            entry.reason_parser_hardened = entry
+                .reason_parser_hardened
+                .saturating_add(item.entry.reason_parser_hardened);
+            entry.reason_parser_relaxed = entry
+                .reason_parser_relaxed
+                .saturating_add(item.entry.reason_parser_relaxed);
+            entry.reason_coverage_low = entry
+                .reason_coverage_low
+                .saturating_add(item.entry.reason_coverage_low);
+            entry.reason_semantic_low = entry
+                .reason_semantic_low
+                .saturating_add(item.entry.reason_semantic_low);
             entry.reason_parser_disagreement = entry
                 .reason_parser_disagreement
                 .saturating_add(item.entry.reason_parser_disagreement);
@@ -362,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn records_and_sorts_policy_telemetry() {
+    fn sorts_policy_telemetry() {
         let _guard = test_guard();
         let suffix = format!("{:?}", std::thread::current().id());
         let policy_a = format!("policy_a_records_and_sorts_{suffix}");
@@ -418,11 +423,11 @@ mod tests {
                     confidence_advisory_only: 0,
                     confidence_block: 0,
                     reason_low_consensus: 1,
-                    reason_parser_consensus_strict: 1,
-                    reason_parser_consensus_adaptive_hardened: 0,
-                    reason_parser_consensus_adaptive_relaxed: 0,
-                    reason_context_coverage_low: 0,
-                    reason_semantic_consensus_low: 0,
+                    reason_parser_strict: 1,
+                    reason_parser_hardened: 0,
+                    reason_parser_relaxed: 0,
+                    reason_coverage_low: 0,
+                    reason_semantic_low: 0,
                     reason_parser_disagreement: 1,
                     reason_clang_diagnostics: 0,
                     total_elapsed_ns: 20,
@@ -444,11 +449,11 @@ mod tests {
                     confidence_advisory_only: 1,
                     confidence_block: 0,
                     reason_low_consensus: 0,
-                    reason_parser_consensus_strict: 0,
-                    reason_parser_consensus_adaptive_hardened: 0,
-                    reason_parser_consensus_adaptive_relaxed: 1,
-                    reason_context_coverage_low: 1,
-                    reason_semantic_consensus_low: 0,
+                    reason_parser_strict: 0,
+                    reason_parser_hardened: 0,
+                    reason_parser_relaxed: 1,
+                    reason_coverage_low: 1,
+                    reason_semantic_low: 0,
                     reason_parser_disagreement: 0,
                     reason_clang_diagnostics: 1,
                     total_elapsed_ns: 10,
@@ -471,9 +476,9 @@ mod tests {
         assert_eq!(entry.confidence_apply_partial, 1);
         assert_eq!(entry.confidence_advisory_only, 1);
         assert_eq!(entry.reason_low_consensus, 1);
-        assert_eq!(entry.reason_parser_consensus_strict, 1);
-        assert_eq!(entry.reason_parser_consensus_adaptive_relaxed, 1);
-        assert_eq!(entry.reason_context_coverage_low, 1);
+        assert_eq!(entry.reason_parser_strict, 1);
+        assert_eq!(entry.reason_parser_relaxed, 1);
+        assert_eq!(entry.reason_coverage_low, 1);
         assert_eq!(entry.reason_parser_disagreement, 1);
         assert_eq!(entry.reason_clang_diagnostics, 1);
         assert_eq!(entry.total_elapsed_ns, 30);

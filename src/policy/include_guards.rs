@@ -4,7 +4,7 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,7 +168,7 @@ impl Policy for IncludeGuardsPolicy {
         ) && !has_pragma
         {
             let insert = Self::find_top_insert(&lines);
-            if !semantic_query.is_safe_preprocessor_or_global_edit(insert + 1, 1) {
+            if !semantic_query.is_safe_global(insert + 1, 1) {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
             } else {
                 lines.insert(insert, "#pragma once".to_string());
@@ -192,9 +192,9 @@ impl Policy for IncludeGuardsPolicy {
             IncludeGuardMode::IncludeGuard | IncludeGuardMode::Both
         ) && !has_guard
         {
-            let top_safe = semantic_query.is_safe_preprocessor_or_global_edit(1, 1);
+            let top_safe = semantic_query.is_safe_global(1, 1);
             let footer_line = lines.len().max(1);
-            let footer_safe = semantic_query.is_safe_preprocessor_or_global_edit(footer_line, 1);
+            let footer_safe = semantic_query.is_safe_global(footer_line, 1);
             if !top_safe || !footer_safe {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
             } else {
@@ -263,7 +263,7 @@ mod tests {
     use crate::parser::file_context::SemanticFileContext;
 
     #[test]
-    fn adds_pragma_once_for_header() {
+    fn adds_pragma_once() {
         let mut exts = HashSet::new();
         exts.insert(".hpp".to_string());
         let policy = IncludeGuardsPolicy::new(IncludeGuardMode::PragmaOnce, exts);
@@ -271,7 +271,7 @@ mod tests {
         let path = PathBuf::from("a.hpp");
         let semantic = SemanticFileContext::default();
         let ctx =
-            PolicyContext::new(text.as_str(), &path).with_semantic_file_context(Some(&semantic));
+            PolicyContext::new(text.as_str(), &path).with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.text.contains("#pragma once"));
     }

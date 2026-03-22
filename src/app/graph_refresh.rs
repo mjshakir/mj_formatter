@@ -13,17 +13,17 @@ use crate::model::file_result::FileResult;
 use crate::model::policy_name::PolicyName;
 use crate::parser::clang_result::ClangParseResult;
 use crate::parser::manager::ParserManager;
-use crate::graph::persist_stats::ProjectGraphPersistStats;
-use crate::graph::state::PolicyClusterLearningSnapshotEntry;
-use crate::graph::state::RetryCulpritPairSnapshotEntry as ProjectGraphRetryCulpritPairSnapshotEntry;
+use crate::graph::store::PersistStats;
+use crate::graph::state::ClusterSnapshot;
+use crate::graph::state::CulpritSnapshot as ProjectGraphCulpritSnapshot;
 use crate::graph::store::ProjectGraphStoreOptions;
-use crate::graph::state_updater::ProjectGraphStateUpdater;
+use crate::graph::state_updater::GraphUpdater;
 use crate::runtime::cluster_telemetry::{
     PolicyClusterSnapshotEntry, PolicyClusterTelemetry,
 };
 use crate::runtime::graph_runtime::ProjectGraphRuntime;
 use crate::runtime::retry_telemetry::{
-    RetryCulpritPairSnapshotEntry, RetryLearningSnapshot, RetryLearningTelemetry,
+    CulpritSnapshot, RetryLearningSnapshot, RetryLearningTelemetry,
     RetryStrategySnapshotEntry,
 };
 
@@ -37,12 +37,12 @@ pub(crate) struct GraphRefreshInput {
 
 /// Warnings produced by graph refresh, indexed by result position.
 pub(crate) struct GraphRefreshOutput {
-    pub stats: Option<ProjectGraphPersistStats>,
+    pub stats: Option<PersistStats>,
     /// (result_index or None, warning_message)
     pub warnings: Vec<(Option<usize>, String)>,
 }
 
-fn adaptive_eager_parse_cap(total_targets: usize, population_observation_count: u32) -> usize {
+fn eager_parse_cap(total_targets: usize, population_observation_count: u32) -> usize {
     let base = (total_targets as f64).sqrt().ceil() as usize;
     let maturity = 1.0 / (1.0 + (-3.0_f64 * (population_observation_count as f64 / 10.0 - 1.0)).exp());
     let factor = 1.5 - maturity;
@@ -172,7 +172,7 @@ impl App {
         };
         let state = runtime.snapshot().to_state_clone();
         let cluster_entries = state
-            .policy_cluster_learning_snapshot()
+            .cluster_snapshot()
             .into_iter()
             .map(|entry| PolicyClusterSnapshotEntry {
                 policy: entry.policy,
@@ -184,7 +184,7 @@ impl App {
 
         let retry_learning = RetryLearningSnapshot {
             strategy_outcomes: state
-                .retry_strategy_learning_snapshot()
+                .retry_snapshot()
                 .into_iter()
                 .map(
                     |(strategy, failure_context, stats)| RetryStrategySnapshotEntry {
@@ -195,9 +195,9 @@ impl App {
                 )
                 .collect(),
             culprit_pairs: state
-                .retry_culprit_pairs_snapshot()
+                .culprit_snapshot()
                 .into_iter()
-                .map(|entry| RetryCulpritPairSnapshotEntry {
+                .map(|entry| CulpritSnapshot {
                     culprit_policy: entry.culprit_policy,
                     peer_policy: entry.peer_policy,
                     count: entry.count,
@@ -280,7 +280,7 @@ impl App {
     ) -> RetryLearningSnapshot {
         let mut baseline_strategy = HashMap::<
             (crate::model::retry_strategy::RetryStrategyName, String),
-            crate::graph::state::RetryStrategyLearningStats,
+            crate::graph::state::RetryStats,
         >::new();
         for entry in &baseline.strategy_outcomes {
             baseline_strategy.insert(
@@ -305,7 +305,7 @@ impl App {
             strategy_outcomes.push(RetryStrategySnapshotEntry {
                 strategy: entry.strategy.clone(),
                 failure_context: entry.failure_context.clone(),
-                stats: crate::graph::state::RetryStrategyLearningStats {
+                stats: crate::graph::state::RetryStats {
                     attempts,
                     successes,
                 },
@@ -324,7 +324,7 @@ impl App {
                 entry.count,
             );
         }
-        let mut culprit_pairs = Vec::<RetryCulpritPairSnapshotEntry>::new();
+        let mut culprit_pairs = Vec::<CulpritSnapshot>::new();
         for entry in &current.culprit_pairs {
             let baseline_count = baseline_pairs
                 .get(&(entry.culprit_policy.clone(), entry.peer_policy.clone()))
@@ -334,7 +334,7 @@ impl App {
             if count == 0 {
                 continue;
             }
-            culprit_pairs.push(RetryCulpritPairSnapshotEntry {
+            culprit_pairs.push(CulpritSnapshot {
                 culprit_policy: entry.culprit_policy.clone(),
                 peer_policy: entry.peer_policy.clone(),
                 count,
@@ -395,18 +395,18 @@ impl App {
     pub(crate) fn extract_graph_refresh_input(
         results: &[FileResult],
         project_graph: &ProjectGraphRuntime,
-        project_graph_config: &crate::config::graph_config::ProjectGraphConfig,
+        project_graph_config: &crate::config::types::ProjectGraphConfig,
         include_parse_updates: bool,
         population_observation_count: u32,
     ) -> (GraphRefreshInput, Vec<(Option<usize>, String)>) {
         let convergence_pairs = Self::collect_convergence_pairs(results);
-        let edit_counts: Vec<usize> = results.iter().map(|r| r.edits.len()).collect();
+        let edit_counts: Vec<usize> = results.iter().map(|r| r.outcome.edits.len()).collect();
         let mut targets = if include_parse_updates {
             results
                 .iter()
                 .enumerate()
-                .filter(|(_, result)| result.error.is_none() && result.changed)
-                .map(|(index, result)| (Some(index), result.path.clone()))
+                .filter(|(_, result)| result.error.is_none() && result.outcome.changed)
+                .map(|(index, result)| (Some(index), result.meta.path.clone()))
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -451,7 +451,7 @@ impl App {
                 )));
             }
         }
-        let cap = adaptive_eager_parse_cap(targets.len(), population_observation_count);
+        let cap = eager_parse_cap(targets.len(), population_observation_count);
         if targets.len() > cap {
             targets.sort_by(|a, b| {
                 let edits_a = a.0.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
@@ -484,7 +484,7 @@ impl App {
         let graph_snapshot = project_graph.snapshot();
         let persisted_state = graph_snapshot.to_state_clone();
         let persisted_cluster = persisted_state
-            .policy_cluster_learning_snapshot()
+            .cluster_snapshot()
             .into_iter()
             .map(|entry| PolicyClusterSnapshotEntry {
                 policy: entry.policy,
@@ -496,7 +496,7 @@ impl App {
         let cluster_learning_changed = persisted_cluster != cluster_learning_entries;
         let persisted_retry = RetryLearningSnapshot {
             strategy_outcomes: persisted_state
-                .retry_strategy_learning_snapshot()
+                .retry_snapshot()
                 .into_iter()
                 .map(|(strategy, failure_context, stats)| RetryStrategySnapshotEntry {
                     strategy: strategy.into(),
@@ -505,9 +505,9 @@ impl App {
                 })
                 .collect(),
             culprit_pairs: persisted_state
-                .retry_culprit_pairs_snapshot()
+                .culprit_snapshot()
                 .into_iter()
-                .map(|entry| RetryCulpritPairSnapshotEntry {
+                .map(|entry| CulpritSnapshot {
                     culprit_policy: entry.culprit_policy,
                     peer_policy: entry.peer_policy,
                     count: entry.count,
@@ -520,7 +520,7 @@ impl App {
         );
         let cluster_learning_state_entries = cluster_learning_entries
             .iter()
-            .map(|entry| PolicyClusterLearningSnapshotEntry {
+            .map(|entry| ClusterSnapshot {
                 policy: entry.policy.clone(),
                 cluster: entry.cluster,
                 stats: entry.stats.clone(),
@@ -538,10 +538,10 @@ impl App {
                 )
             })
             .collect::<Vec<_>>();
-        let retry_culprit_pairs = retry_learning_delta
+        let culprit_pairs = retry_learning_delta
             .culprit_pairs
             .iter()
-            .map(|entry| ProjectGraphRetryCulpritPairSnapshotEntry {
+            .map(|entry| ProjectGraphCulpritSnapshot {
                 culprit_policy: entry.culprit_policy.clone(),
                 peer_policy: entry.peer_policy.clone(),
                 count: entry.count,
@@ -552,7 +552,7 @@ impl App {
             && input.convergence_pairs.is_empty()
             && !cluster_learning_changed
             && retry_strategy_entries.is_empty()
-            && retry_culprit_pairs.is_empty()
+            && culprit_pairs.is_empty()
         {
             return GraphRefreshOutput {
                 stats: None,
@@ -603,7 +603,7 @@ impl App {
             && input.convergence_pairs.is_empty()
             && !cluster_learning_changed
             && retry_strategy_entries.is_empty()
-            && retry_culprit_pairs.is_empty()
+            && culprit_pairs.is_empty()
         {
             return GraphRefreshOutput {
                 stats: None,
@@ -613,26 +613,26 @@ impl App {
 
         let stats = match project_graph.update_state_with_stats(|state| {
             for (path, parse) in &file_parses {
-                ProjectGraphStateUpdater::apply_clang_parse(state, path.as_path(), parse);
+                GraphUpdater::apply_clang_parse(state, path.as_path(), parse);
             }
             if !input.convergence_pairs.is_empty() {
                 state.record_convergence_pairs(&input.convergence_pairs);
             }
             if cluster_learning_changed {
-                state.replace_policy_cluster_learning_entries(
+                state.replace_clusters(
                     cluster_learning_state_entries.as_slice(),
                 );
             }
             for (strategy, context, attempts, successes) in &retry_strategy_entries {
-                state.record_retry_strategy_learning(
+                state.record_retry(
                     strategy.as_str(),
                     context.as_str(),
                     *attempts,
                     *successes,
                 );
             }
-            if !retry_culprit_pairs.is_empty() {
-                state.record_retry_culprit_pairs(retry_culprit_pairs.as_slice());
+            if !culprit_pairs.is_empty() {
+                state.record_culprits(culprit_pairs.as_slice());
             }
         }) {
             Ok((_, stats)) => Some(stats),
@@ -649,19 +649,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::adaptive_eager_parse_cap;
+    use super::eager_parse_cap;
 
     #[test]
-    fn adaptive_cap_scales_sublinearly() {
+    fn cap_scales_sublinearly() {
         // Cold start (obs=0): sqrt(31)≈6 * 1.5 = 9
-        let cap = adaptive_eager_parse_cap(31, 0);
+        let cap = eager_parse_cap(31, 0);
         assert!(cap >= 4 && cap <= 12, "cold cap for 31: {cap}");
         // Warm start (obs=20): sqrt(31)≈6 * ~0.5 = 3 → clamped to 4
-        let cap_warm = adaptive_eager_parse_cap(31, 20);
+        let cap_warm = eager_parse_cap(31, 20);
         assert!(cap_warm >= 4, "warm cap for 31: {cap_warm}");
         assert!(cap_warm <= cap, "warm should be <= cold: {cap_warm} vs {cap}");
         // Small batch: always fits
-        let cap_small = adaptive_eager_parse_cap(4, 0);
+        let cap_small = eager_parse_cap(4, 0);
         assert!(cap_small >= 4, "small batch cap: {cap_small}");
     }
 }

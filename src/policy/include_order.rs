@@ -8,7 +8,7 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::query_cache::TsQueryCache;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn reorders_source_include_groups() {
+    fn reorders_include_groups() {
         let project_prefixes = vec!["project/".to_string()];
         let policy = IncludeOrderPolicy::new(
             vec![
@@ -532,8 +532,8 @@ mod tests {
         let tree = parse_cpp(text.as_str());
         let semantic = SemanticFileContext::default();
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.text.contains("#include \"main.hpp\""));
         assert!(result.text.contains("#include <vector>"));

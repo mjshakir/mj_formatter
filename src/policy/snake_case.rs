@@ -7,7 +7,7 @@ use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::parser::ts_traversal;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnakeCaseApplyTarget {
@@ -354,37 +354,37 @@ mod tests {
     }
 
     #[test]
-    fn reports_non_snake_case_symbols() {
+    fn reports_non_snake() {
         let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false, true, true);
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n".to_string();
         let tree = parse_cpp(text.as_str());
         let path = PathBuf::from("sample.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.violations.len() >= 2);
     }
 
     #[test]
-    fn ignores_uppercase_type_like_names_when_configured() {
+    fn ignores_uppercase_types() {
         let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Variables, true, true, true);
         let text = "const MyType Value = {};\n".to_string();
         let tree = parse_cpp(text.as_str());
         let path = PathBuf::from("sample.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.violations.is_empty());
     }
 
     #[test]
-    fn uses_clang_symbols_to_filter_tree_candidates() {
+    fn clang_filters_tree() {
         let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false, true, true);
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n".to_string();
         let tree = parse_cpp(text.as_str());
@@ -404,8 +404,8 @@ mod tests {
         );
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&ctx);
         assert!(result.violations.is_empty());
     }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 
-use crate::graph::persist_stats::ProjectGraphPersistStats;
+use crate::graph::store::PersistStats;
 use crate::graph::snapshot::ProjectGraphSnapshot;
 use crate::graph::state::ProjectGraphState;
 use crate::graph::store::{ProjectGraphStore, ProjectGraphStoreOptions};
@@ -34,13 +34,13 @@ impl ProjectGraphRuntime {
     pub fn update_state_with_stats<F>(
         &self,
         mutator: F,
-    ) -> Result<(Arc<ProjectGraphSnapshot>, ProjectGraphPersistStats)>
+    ) -> Result<(Arc<ProjectGraphSnapshot>, PersistStats)>
     where
         F: FnOnce(&mut ProjectGraphState),
     {
         let mut state = self.snapshot().to_state_clone();
         mutator(&mut state);
-        let (next_snapshot, stats) = self.store.persist_state_with_stats(&state)?;
+        let (next_snapshot, stats) = self.store.persist_with_stats(&state)?;
         let next = Arc::new(next_snapshot);
         self.snapshot.store(next.clone());
         Ok((next, stats))

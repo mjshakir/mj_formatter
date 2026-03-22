@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::path::Path;
 
@@ -16,8 +16,8 @@ use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::node_kind;
 use crate::parser::ts_traversal;
-use crate::policy::traits::Policy;
-use crate::text_scan;
+use crate::policy::Policy;
+use crate::parser::text_scan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RenamePlan {
@@ -391,7 +391,7 @@ impl NamingConventionsPolicy {
         if name.is_empty() || covered_offsets.is_empty() || text.len() < name.len() {
             return None;
         }
-        let covered = covered_offsets.iter().copied().collect::<HashSet<_>>();
+        let covered = covered_offsets.iter().copied().collect::<FxHashSet<_>>();
         let bytes = text.as_bytes();
         let name_len = name.len();
         for offset in text_scan::subslice_match_indices(bytes, name.as_bytes()) {
@@ -434,9 +434,9 @@ impl NamingConventionsPolicy {
         strict_issues: &mut StrictIssues,
     ) -> Vec<Replacement> {
         let line_starts = Self::line_starts(text);
-        let mut by_start: HashMap<usize, Replacement> =
-            HashMap::with_capacity(plans.len().saturating_mul(2));
-        let mut conflicting_starts = HashSet::new();
+        let mut by_start: FxHashMap<usize, Replacement> =
+            FxHashMap::with_capacity_and_hasher(plans.len().saturating_mul(2), Default::default());
+        let mut conflicting_starts = FxHashSet::default();
 
         for plan in plans {
             let mut offsets = if let Some(stable_id) = plan.stable_id.as_deref() {
@@ -460,7 +460,7 @@ impl NamingConventionsPolicy {
                 semantic_offsets.dedup();
                 semantic_offsets
             } else {
-                clang_parse.rename_offsets_on_line(
+                clang_parse.rename_offsets(
                     &plan.old_name,
                     plan.line,
                     std::slice::from_ref(&plan.kind),
@@ -905,7 +905,7 @@ impl Policy for NamingConventionsPolicy {
                                     expected_occurrences = references.len().max(1);
                                     minimum_required_occurrences = safe_reference_count.max(1);
                                 }
-                                if parse.has_symbol_name_elsewhere(&suggested, line) {
+                                if parse.has_name_elsewhere(&suggested, line) {
                                     continue;
                                 }
                                 rename_plans.push(RenamePlan {
@@ -994,7 +994,7 @@ impl Policy for NamingConventionsPolicy {
                                 expected_occurrences = references.len().max(1);
                                 minimum_required_occurrences = safe_reference_count.max(1);
                             }
-                            if parse.has_symbol_name_elsewhere(&suggested, line) {
+                            if parse.has_name_elsewhere(&suggested, line) {
                                 continue;
                             }
                             rename_plans.push(RenamePlan {
@@ -1120,7 +1120,7 @@ impl Policy for NamingConventionsPolicy {
                             expected_occurrences = references.len().max(1);
                             minimum_required_occurrences = safe_reference_count.max(1);
                         }
-                        if parse.has_symbol_name_elsewhere(&suggested, line) {
+                        if parse.has_name_elsewhere(&suggested, line) {
                             continue;
                         }
                         rename_plans.push(RenamePlan {
@@ -1263,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_candidates_using_clang_symbols() {
+    fn filters_clang_symbols() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n";
         let tree = parse_cpp(text);
@@ -1283,14 +1283,14 @@ mod tests {
         );
         let path = PathBuf::from("sample.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
         assert!(result.violations.is_empty());
     }
 
     #[test]
-    fn semantic_mode_applies_rename_edits() {
+    fn semantic_applies_renames() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "int CamelVar = 0;\nint use_it() { return CamelVar; }\n";
         let tree = parse_cpp(text);
@@ -1319,8 +1319,8 @@ mod tests {
 
         let path = PathBuf::from("sample.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
 
         assert!(result.text.contains("_camel_var"));
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_semantic_mode_reports_conflict_without_fatal_abort() {
+    fn strict_reports_conflict() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "int CamelVar = 0;\nint _camel_var = 1;\nint use_it() { return CamelVar + _camel_var; }\n";
         let tree = parse_cpp(text);
@@ -1371,8 +1371,8 @@ mod tests {
 
         let path = PathBuf::from("sample.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
 
         assert_eq!(result.text, text);
@@ -1384,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_semantic_mode_does_not_fatal_on_clang_diagnostics_only() {
+    fn strict_nonfatal_clang() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "int CamelVar = 0;\n";
         let tree = parse_cpp(text);
@@ -1404,8 +1404,8 @@ mod tests {
         );
         let path = PathBuf::from("sample.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
 
         assert_eq!(result.text, text);
@@ -1417,7 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_clang_diagnostics_skip_semantic_renames() {
+    fn recoverable_skips_renames() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "int CamelVar = 0;\nint use_it() { return CamelVar; }\n";
         let tree = parse_cpp(text);
@@ -1453,8 +1453,8 @@ mod tests {
 
         let path = PathBuf::from("sample.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
 
         assert_eq!(result.text, text);
@@ -1465,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn constructor_names_are_not_rewritten_to_snake_case() {
+    fn constructor_not_rewritten() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "struct Node {\n  Node() {}\n};\n";
         let tree = parse_cpp(text);
@@ -1485,8 +1485,8 @@ mod tests {
         );
         let path = PathBuf::from("sample.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
 
         assert!(result
@@ -1497,12 +1497,12 @@ mod tests {
     }
 
     #[test]
-    fn parameter_identifiers_are_not_forced_to_local_prefix() {
+    fn params_no_prefix() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "int compute(int other) { return other; }\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
 
         assert!(result
@@ -1513,12 +1513,12 @@ mod tests {
     }
 
     #[test]
-    fn constant_style_identifiers_are_not_rewritten() {
+    fn constant_not_rewritten() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "struct A {\n  static constexpr size_t C_LEVEL_SHIFT = 6UL;\n};\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
 
         assert!(result
@@ -1529,12 +1529,12 @@ mod tests {
     }
 
     #[test]
-    fn for_loop_header_variable_skips_prefix() {
+    fn loop_header_skips() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "void f() {\n  for (int i = 0; i < 10; i++) {}\n}\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
         assert!(
             result.violations.iter().all(|v| !v.message.contains("'i'")),
@@ -1543,12 +1543,12 @@ mod tests {
     }
 
     #[test]
-    fn for_range_loop_header_variable_skips_prefix() {
+    fn range_header_skips() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "void f() {\n  int arr[3] = {1,2,3};\n  for (auto val : arr) {}\n}\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
         assert!(
             result.violations.iter().all(|v| !v.message.contains("'val'")),
@@ -1557,12 +1557,12 @@ mod tests {
     }
 
     #[test]
-    fn for_loop_body_variable_requires_prefix() {
+    fn loop_body_prefix() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "void f() {\n  for (int _i = 0; _i < 10; _i++) {\n    int count = 0;\n  }\n}\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
         assert!(
             result.violations.iter().any(|v| v.message.contains("'count'")),
@@ -1571,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn include_only_translation_unit_skips_reliability_warning() {
+    fn include_only_skips() {
         let policy = NamingConventionsPolicy::new(true, true);
         let text = "#include \"HashSet.hpp\"\n";
         let tree = parse_cpp(text);
@@ -1584,8 +1584,8 @@ mod tests {
         );
         let path = PathBuf::from("HashSet.cpp");
         let context = PolicyContext::new(text, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&clang_parse_result));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang_parse_result));
         let result = policy.apply(&context);
         assert!(result.edits.is_empty());
         assert!(!result.warnings.iter().any(|item| {
@@ -1594,12 +1594,12 @@ mod tests {
     }
 
     #[test]
-    fn field_declaration_skipped_for_safety() {
+    fn field_skipped_safety() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "struct Foo {\n  int count;\n};\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.hpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
         assert!(
             !result.violations.iter().any(|v| v.message.contains("'count'")),
@@ -1608,12 +1608,12 @@ mod tests {
     }
 
     #[test]
-    fn local_declaration_gets_local_prefix() {
+    fn local_gets_prefix() {
         let policy = NamingConventionsPolicy::new(false, false);
         let text = "void f() {\n  int count = 0;\n}\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let context = PolicyContext::new(text, &path).with_tree_sitter_tree(Some(&tree));
+        let context = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&context);
         assert!(
             result.violations.iter().any(|v| v.message.contains("'_count'")),

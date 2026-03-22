@@ -12,7 +12,7 @@ use crate::engine::accuracy_gate::AccuracyGateDecision;
 use crate::files::atomic_writer::AtomicWriter;
 use crate::files::codec::StateCodec;
 use crate::model::edit::Edit;
-use crate::model::file_result::FileResult;
+use crate::model::file_result::{FileMeta, FormatOutcome, FileResult};
 use crate::model::exec_trace::PolicyExecutionTrace;
 use crate::model::rename_plan::SemanticRenamePlan;
 use crate::model::violation::Violation;
@@ -29,7 +29,7 @@ struct CacheConvergencePair {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CachedFileResult {
     changed: bool,
-    semantic_rename_plans: Vec<SemanticRenamePlan>,
+    rename_plans: Vec<SemanticRenamePlan>,
     convergence_pairs: Vec<CacheConvergencePair>,
     violations: Vec<Violation>,
     edits: Vec<Edit>,
@@ -185,6 +185,7 @@ impl CheckResultCache {
 
     fn from_file_result(result: &FileResult) -> CachedFileResult {
         let convergence_pairs = result
+            .outcome
             .convergence_pairs
             .iter()
             .map(|((loser, winner), count)| CacheConvergencePair {
@@ -194,13 +195,13 @@ impl CheckResultCache {
             })
             .collect::<Vec<_>>();
         CachedFileResult {
-            changed: result.changed,
-            semantic_rename_plans: result.semantic_rename_plans.clone(),
+            changed: result.outcome.changed,
+            rename_plans: result.outcome.rename_plans.clone(),
             convergence_pairs,
-            violations: result.violations.clone(),
-            edits: result.edits.clone(),
-            policy_traces: result.policy_traces.clone(),
-            accuracy_gate: result.accuracy_gate.clone(),
+            violations: result.outcome.violations.clone(),
+            edits: result.outcome.edits.clone(),
+            policy_traces: result.traces.clone(),
+            accuracy_gate: result.outcome.accuracy_gate.clone(),
             warnings: result.warnings.clone(),
         }
     }
@@ -216,22 +217,26 @@ impl CheckResultCache {
                 .or_insert(0usize) += pair.count;
         }
         FileResult {
-            path: path.to_path_buf(),
-            changed: cached.changed,
-            pending_text: None,
-            semantic_rename_plans: cached.semantic_rename_plans.clone(),
-            convergence_pairs,
-            violations: cached.violations.clone(),
-            edits: cached.edits.clone(),
-            policy_traces: cached.policy_traces.clone(),
-            accuracy_gate: cached.accuracy_gate.clone(),
+            meta: FileMeta {
+                path: path.to_path_buf(),
+                backup_path: None,
+                engine_ms: 0.0,
+                total_ms: 0.0,
+                boot_parse_ms: 0.0,
+            },
+            outcome: FormatOutcome {
+                changed: cached.changed,
+                pending_text: None,
+                rename_plans: cached.rename_plans.clone(),
+                convergence_pairs,
+                violations: cached.violations.clone(),
+                edits: cached.edits.clone(),
+                accuracy_gate: cached.accuracy_gate.clone(),
+                certainty: None,
+            },
+            traces: cached.policy_traces.clone(),
             error: None,
-            backup_path: None,
             warnings: cached.warnings.clone(),
-            elapsed_engine_ms: 0.0,
-            elapsed_total_ms: 0.0,
-            boot_parse_ms: 0.0,
-            policy_certainty: None,
         }
     }
 }
@@ -243,7 +248,7 @@ mod tests {
     use crate::runtime::result_cache::CheckResultCache;
 
     #[test]
-    fn normalizes_directory_cache_path() {
+    fn normalizes_cache_path() {
         let temp_root = std::env::temp_dir().join(format!(
             "fmt_cache_{}_{}",
             std::process::id(),
@@ -256,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_legacy_check_results_filename() {
+    fn normalizes_check_results() {
         let legacy = PathBuf::from("var/cache/check_results");
         let normalized = CheckResultCache::normalize_store_path(legacy);
         assert!(normalized.ends_with(PathBuf::from("check_results.bin")));

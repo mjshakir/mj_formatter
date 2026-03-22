@@ -1,6 +1,6 @@
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 
 pub struct StubPolicy {
     name: String,

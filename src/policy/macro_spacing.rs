@@ -2,7 +2,7 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
 
 pub struct LuaMacroSpacingPolicy;
@@ -77,7 +77,7 @@ impl Policy for LuaMacroSpacingPolicy {
                 if define_index < lines.len() {
                     let candidate = lines[define_index].trim_start();
                     if candidate.starts_with("#define") {
-                        if !semantic_query.is_safe_preprocessor_or_global_edit(define_index + 1, 1)
+                        if !semantic_query.is_safe_global(define_index + 1, 1)
                         {
                             skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
                             index += 1;

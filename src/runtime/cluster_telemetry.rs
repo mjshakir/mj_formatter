@@ -87,11 +87,11 @@ struct PolicyClusterTelemetryState {
 }
 
 pub struct PolicyClusterTelemetry;
-pub struct DeterministicClusterReadGuard;
+pub struct ClusterGuard;
 
-impl Drop for DeterministicClusterReadGuard {
+impl Drop for ClusterGuard {
     fn drop(&mut self) {
-        PolicyClusterTelemetry::clear_deterministic_read_model();
+        PolicyClusterTelemetry::clear_read_model();
     }
 }
 
@@ -102,14 +102,14 @@ impl PolicyClusterTelemetry {
         s.read_model.store(std::sync::Arc::new(None));
     }
 
-    pub fn begin_deterministic_read_model() -> DeterministicClusterReadGuard {
+    pub fn begin_read_model() -> ClusterGuard {
         let s = Self::global();
         let model = Self::build_read_model_snapshot(&s.entries);
         s.read_model.store(std::sync::Arc::new(Some(model)));
-        DeterministicClusterReadGuard
+        ClusterGuard
     }
 
-    pub fn clear_deterministic_read_model() {
+    pub fn clear_read_model() {
         Self::global().read_model.store(std::sync::Arc::new(None));
     }
 
@@ -423,7 +423,7 @@ impl PolicyClusterTelemetry {
             } else {
                 ClusterEnforcementBias::Neutral
             },
-            max_impact_radius_cap: crate::engine::fuzzy_inference::fuzzy_impact_radius_cap(
+            max_impact_radius_cap: crate::engine::fuzzy_inference::fuzzy_radius_cap(
                 stability_score,
                 uncertainty,
                 reliability_lower,
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn record_outcome_dedups_same_cluster_in_batch() {
+    fn dedup_same_cluster() {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
         let policy = format!("snake_case_{:?}", std::thread::current().id());
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_controls_relax_and_harden_predictably() {
+    fn controls_relax_harden() {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
 
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_adaptive_hints_survive_reload() {
+    fn hints_survive_reload() {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
 
@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_read_model_freezes_controls_until_guard_drop() {
+    fn read_model_freezes() {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
 
@@ -653,7 +653,7 @@ mod tests {
             );
         }
         let baseline = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster);
-        let guard = PolicyClusterTelemetry::begin_deterministic_read_model();
+        let guard = PolicyClusterTelemetry::begin_read_model();
 
         for _ in 0..16 {
             PolicyClusterTelemetry::record_decision(

@@ -7,7 +7,8 @@ use crate::engine::gate_decision::ConfidenceReasonCode;
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct AdaptiveTelemetrySnapshot {
+#[serde(rename = "AdaptiveTelemetrySnapshot")]
+pub struct AdaptiveSnapshot {
     pub threshold_evaluations: u64,
     pub threshold_applied: u64,
     pub threshold_canary: u64,
@@ -18,11 +19,16 @@ pub struct AdaptiveTelemetrySnapshot {
     pub confidence_advisory_only: u64,
     pub confidence_block: u64,
     pub reason_low_consensus: u64,
-    pub reason_parser_consensus_strict: u64,
-    pub reason_parser_consensus_adaptive_hardened: u64,
-    pub reason_parser_consensus_adaptive_relaxed: u64,
-    pub reason_context_coverage_low: u64,
-    pub reason_semantic_consensus_low: u64,
+    #[serde(alias = "reason_parser_consensus_strict")]
+    pub reason_parser_strict: u64,
+    #[serde(alias = "reason_parser_consensus_adaptive_hardened")]
+    pub reason_parser_hardened: u64,
+    #[serde(alias = "reason_parser_consensus_adaptive_relaxed")]
+    pub reason_parser_relaxed: u64,
+    #[serde(alias = "reason_context_coverage_low")]
+    pub reason_coverage_low: u64,
+    #[serde(alias = "reason_semantic_consensus_low")]
+    pub reason_semantic_low: u64,
     pub reason_parser_disagreement: u64,
     pub reason_clang_diagnostics: u64,
     pub outcomes_first_pass: u64,
@@ -37,7 +43,7 @@ pub struct AdaptiveTelemetrySnapshot {
     pub max_abs_drift: f64,
 }
 
-impl AdaptiveTelemetrySnapshot {
+impl AdaptiveSnapshot {
     pub fn outcomes_total(&self) -> u64 {
         self.outcomes_first_pass
             .saturating_add(self.outcomes_after_retry)
@@ -57,11 +63,11 @@ struct AdaptiveTelemetryState {
     confidence_advisory_only: AtomicU64,
     confidence_block: AtomicU64,
     reason_low_consensus: AtomicU64,
-    reason_parser_consensus_strict: AtomicU64,
-    reason_parser_consensus_adaptive_hardened: AtomicU64,
-    reason_parser_consensus_adaptive_relaxed: AtomicU64,
-    reason_context_coverage_low: AtomicU64,
-    reason_semantic_consensus_low: AtomicU64,
+    reason_parser_strict: AtomicU64,
+    reason_parser_hardened: AtomicU64,
+    reason_parser_relaxed: AtomicU64,
+    reason_coverage_low: AtomicU64,
+    reason_semantic_low: AtomicU64,
     reason_parser_disagreement: AtomicU64,
     reason_clang_diagnostics: AtomicU64,
     outcomes_first_pass: AtomicU64,
@@ -89,11 +95,11 @@ impl Default for AdaptiveTelemetryState {
             confidence_advisory_only: AtomicU64::new(0),
             confidence_block: AtomicU64::new(0),
             reason_low_consensus: AtomicU64::new(0),
-            reason_parser_consensus_strict: AtomicU64::new(0),
-            reason_parser_consensus_adaptive_hardened: AtomicU64::new(0),
-            reason_parser_consensus_adaptive_relaxed: AtomicU64::new(0),
-            reason_context_coverage_low: AtomicU64::new(0),
-            reason_semantic_consensus_low: AtomicU64::new(0),
+            reason_parser_strict: AtomicU64::new(0),
+            reason_parser_hardened: AtomicU64::new(0),
+            reason_parser_relaxed: AtomicU64::new(0),
+            reason_coverage_low: AtomicU64::new(0),
+            reason_semantic_low: AtomicU64::new(0),
             reason_parser_disagreement: AtomicU64::new(0),
             reason_clang_diagnostics: AtomicU64::new(0),
             outcomes_first_pass: AtomicU64::new(0),
@@ -126,19 +132,19 @@ impl AdaptiveTelemetry {
         state.confidence_block.store(0, Ordering::Relaxed);
         state.reason_low_consensus.store(0, Ordering::Relaxed);
         state
-            .reason_parser_consensus_strict
+            .reason_parser_strict
             .store(0, Ordering::Relaxed);
         state
-            .reason_parser_consensus_adaptive_hardened
+            .reason_parser_hardened
             .store(0, Ordering::Relaxed);
         state
-            .reason_parser_consensus_adaptive_relaxed
+            .reason_parser_relaxed
             .store(0, Ordering::Relaxed);
         state
-            .reason_context_coverage_low
+            .reason_coverage_low
             .store(0, Ordering::Relaxed);
         state
-            .reason_semantic_consensus_low
+            .reason_semantic_low
             .store(0, Ordering::Relaxed);
         state.reason_parser_disagreement.store(0, Ordering::Relaxed);
         state.reason_clang_diagnostics.store(0, Ordering::Relaxed);
@@ -180,27 +186,27 @@ impl AdaptiveTelemetry {
                 }
                 ConfidenceReasonCode::ParserConsensusStrict => {
                     state
-                        .reason_parser_consensus_strict
+                        .reason_parser_strict
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                ConfidenceReasonCode::ParserConsensusAdaptiveHardened => {
+                ConfidenceReasonCode::ParserHardened => {
                     state
-                        .reason_parser_consensus_adaptive_hardened
+                        .reason_parser_hardened
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                ConfidenceReasonCode::ParserConsensusAdaptiveRelaxed => {
+                ConfidenceReasonCode::ParserRelaxed => {
                     state
-                        .reason_parser_consensus_adaptive_relaxed
+                        .reason_parser_relaxed
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 ConfidenceReasonCode::ContextCoverageLow => {
                     state
-                        .reason_context_coverage_low
+                        .reason_coverage_low
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 ConfidenceReasonCode::SemanticConsensusLow => {
                     state
-                        .reason_semantic_consensus_low
+                        .reason_semantic_low
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 ConfidenceReasonCode::ParserDisagreement => {
@@ -218,9 +224,9 @@ impl AdaptiveTelemetry {
         }
     }
 
-    pub fn snapshot() -> AdaptiveTelemetrySnapshot {
+    pub fn snapshot() -> AdaptiveSnapshot {
         let state = Self::state();
-        AdaptiveTelemetrySnapshot {
+        AdaptiveSnapshot {
             threshold_evaluations: state.threshold_evaluations.load(Ordering::Relaxed),
             threshold_applied: state.threshold_applied.load(Ordering::Relaxed),
             threshold_canary: state.threshold_canary.load(Ordering::Relaxed),
@@ -231,18 +237,18 @@ impl AdaptiveTelemetry {
             confidence_advisory_only: state.confidence_advisory_only.load(Ordering::Relaxed),
             confidence_block: state.confidence_block.load(Ordering::Relaxed),
             reason_low_consensus: state.reason_low_consensus.load(Ordering::Relaxed),
-            reason_parser_consensus_strict: state
-                .reason_parser_consensus_strict
+            reason_parser_strict: state
+                .reason_parser_strict
                 .load(Ordering::Relaxed),
-            reason_parser_consensus_adaptive_hardened: state
-                .reason_parser_consensus_adaptive_hardened
+            reason_parser_hardened: state
+                .reason_parser_hardened
                 .load(Ordering::Relaxed),
-            reason_parser_consensus_adaptive_relaxed: state
-                .reason_parser_consensus_adaptive_relaxed
+            reason_parser_relaxed: state
+                .reason_parser_relaxed
                 .load(Ordering::Relaxed),
-            reason_context_coverage_low: state.reason_context_coverage_low.load(Ordering::Relaxed),
-            reason_semantic_consensus_low: state
-                .reason_semantic_consensus_low
+            reason_coverage_low: state.reason_coverage_low.load(Ordering::Relaxed),
+            reason_semantic_low: state
+                .reason_semantic_low
                 .load(Ordering::Relaxed),
             reason_parser_disagreement: state.reason_parser_disagreement.load(Ordering::Relaxed),
             reason_clang_diagnostics: state.reason_clang_diagnostics.load(Ordering::Relaxed),
@@ -263,7 +269,7 @@ impl AdaptiveTelemetry {
         }
     }
 
-    pub fn merge_snapshot(snapshot: &AdaptiveTelemetrySnapshot) {
+    pub fn merge_snapshot(snapshot: &AdaptiveSnapshot) {
         let state = Self::state();
         state
             .threshold_evaluations
@@ -296,22 +302,22 @@ impl AdaptiveTelemetry {
             .reason_low_consensus
             .fetch_add(snapshot.reason_low_consensus, Ordering::Relaxed);
         state
-            .reason_parser_consensus_strict
-            .fetch_add(snapshot.reason_parser_consensus_strict, Ordering::Relaxed);
-        state.reason_parser_consensus_adaptive_hardened.fetch_add(
-            snapshot.reason_parser_consensus_adaptive_hardened,
+            .reason_parser_strict
+            .fetch_add(snapshot.reason_parser_strict, Ordering::Relaxed);
+        state.reason_parser_hardened.fetch_add(
+            snapshot.reason_parser_hardened,
             Ordering::Relaxed,
         );
-        state.reason_parser_consensus_adaptive_relaxed.fetch_add(
-            snapshot.reason_parser_consensus_adaptive_relaxed,
+        state.reason_parser_relaxed.fetch_add(
+            snapshot.reason_parser_relaxed,
             Ordering::Relaxed,
         );
         state
-            .reason_context_coverage_low
-            .fetch_add(snapshot.reason_context_coverage_low, Ordering::Relaxed);
+            .reason_coverage_low
+            .fetch_add(snapshot.reason_coverage_low, Ordering::Relaxed);
         state
-            .reason_semantic_consensus_low
-            .fetch_add(snapshot.reason_semantic_consensus_low, Ordering::Relaxed);
+            .reason_semantic_low
+            .fetch_add(snapshot.reason_semantic_low, Ordering::Relaxed);
         state
             .reason_parser_disagreement
             .fetch_add(snapshot.reason_parser_disagreement, Ordering::Relaxed);
@@ -406,10 +412,10 @@ mod tests {
     }
 
     #[test]
-    fn merges_snapshots_across_workers() {
+    fn merges_across_workers() {
         let _guard = test_guard();
         AdaptiveTelemetry::reset();
-        AdaptiveTelemetry::merge_snapshot(&super::AdaptiveTelemetrySnapshot {
+        AdaptiveTelemetry::merge_snapshot(&super::AdaptiveSnapshot {
             threshold_evaluations: 2,
             threshold_applied: 1,
             threshold_canary: 1,
@@ -420,11 +426,11 @@ mod tests {
             confidence_advisory_only: 0,
             confidence_block: 1,
             reason_low_consensus: 2,
-            reason_parser_consensus_strict: 1,
-            reason_parser_consensus_adaptive_hardened: 1,
-            reason_parser_consensus_adaptive_relaxed: 0,
-            reason_context_coverage_low: 1,
-            reason_semantic_consensus_low: 0,
+            reason_parser_strict: 1,
+            reason_parser_hardened: 1,
+            reason_parser_relaxed: 0,
+            reason_coverage_low: 1,
+            reason_semantic_low: 0,
             reason_parser_disagreement: 1,
             reason_clang_diagnostics: 1,
             outcomes_first_pass: 3,
@@ -438,7 +444,7 @@ mod tests {
             last_drift: -0.03,
             max_abs_drift: 0.09,
         });
-        AdaptiveTelemetry::merge_snapshot(&super::AdaptiveTelemetrySnapshot {
+        AdaptiveTelemetry::merge_snapshot(&super::AdaptiveSnapshot {
             threshold_evaluations: 1,
             threshold_applied: 1,
             threshold_canary: 0,
@@ -449,11 +455,11 @@ mod tests {
             confidence_advisory_only: 0,
             confidence_block: 0,
             reason_low_consensus: 1,
-            reason_parser_consensus_strict: 0,
-            reason_parser_consensus_adaptive_hardened: 0,
-            reason_parser_consensus_adaptive_relaxed: 1,
-            reason_context_coverage_low: 0,
-            reason_semantic_consensus_low: 1,
+            reason_parser_strict: 0,
+            reason_parser_hardened: 0,
+            reason_parser_relaxed: 1,
+            reason_coverage_low: 0,
+            reason_semantic_low: 1,
             reason_parser_disagreement: 0,
             reason_clang_diagnostics: 0,
             outcomes_first_pass: 1,
@@ -477,11 +483,11 @@ mod tests {
         assert_eq!(snapshot.confidence_advisory_only, 0);
         assert!(snapshot.confidence_block >= 1);
         assert!(snapshot.reason_low_consensus >= 3);
-        assert!(snapshot.reason_parser_consensus_strict >= 1);
-        assert!(snapshot.reason_parser_consensus_adaptive_hardened >= 1);
-        assert!(snapshot.reason_parser_consensus_adaptive_relaxed >= 1);
-        assert!(snapshot.reason_context_coverage_low >= 1);
-        assert!(snapshot.reason_semantic_consensus_low >= 1);
+        assert!(snapshot.reason_parser_strict >= 1);
+        assert!(snapshot.reason_parser_hardened >= 1);
+        assert!(snapshot.reason_parser_relaxed >= 1);
+        assert!(snapshot.reason_coverage_low >= 1);
+        assert!(snapshot.reason_semantic_low >= 1);
         assert!(snapshot.reason_parser_disagreement >= 1);
         assert!(snapshot.reason_clang_diagnostics >= 1);
         assert!(snapshot.outcomes_first_pass >= 4);
@@ -492,14 +498,14 @@ mod tests {
     }
 
     #[test]
-    fn tracks_confidence_gate_outcomes_and_reasons() {
+    fn tracks_gate_outcomes() {
         let _guard = test_guard();
         AdaptiveTelemetry::reset();
         AdaptiveTelemetry::record_confidence_gate(
             PolicyDecisionOutcome::ApplyPartial,
             &[
                 ConfidenceReasonCode::LowConsensus,
-                ConfidenceReasonCode::ParserConsensusAdaptiveHardened,
+                ConfidenceReasonCode::ParserHardened,
                 ConfidenceReasonCode::ContextCoverageLow,
                 ConfidenceReasonCode::SemanticConsensusLow,
             ],
@@ -507,7 +513,7 @@ mod tests {
         AdaptiveTelemetry::record_confidence_gate(
             PolicyDecisionOutcome::Block,
             &[
-                ConfidenceReasonCode::ParserConsensusAdaptiveRelaxed,
+                ConfidenceReasonCode::ParserRelaxed,
                 ConfidenceReasonCode::ParserDisagreement,
                 ConfidenceReasonCode::ClangDiagnostics,
             ],
@@ -520,11 +526,11 @@ mod tests {
         assert_eq!(snapshot.confidence_advisory_only, 0);
         assert_eq!(snapshot.confidence_block, 1);
         assert_eq!(snapshot.reason_low_consensus, 1);
-        assert_eq!(snapshot.reason_parser_consensus_strict, 0);
-        assert_eq!(snapshot.reason_parser_consensus_adaptive_hardened, 1);
-        assert_eq!(snapshot.reason_parser_consensus_adaptive_relaxed, 1);
-        assert_eq!(snapshot.reason_context_coverage_low, 1);
-        assert_eq!(snapshot.reason_semantic_consensus_low, 1);
+        assert_eq!(snapshot.reason_parser_strict, 0);
+        assert_eq!(snapshot.reason_parser_hardened, 1);
+        assert_eq!(snapshot.reason_parser_relaxed, 1);
+        assert_eq!(snapshot.reason_coverage_low, 1);
+        assert_eq!(snapshot.reason_semantic_low, 1);
         assert_eq!(snapshot.reason_parser_disagreement, 1);
         assert_eq!(snapshot.reason_clang_diagnostics, 1);
     }

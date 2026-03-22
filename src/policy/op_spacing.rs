@@ -7,9 +7,9 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::query_cache::TsQueryCache;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
-use crate::text_scan;
+use crate::parser::text_scan;
 
 pub struct OperatorOverloadSpacingPolicy;
 
@@ -296,16 +296,16 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_symbol_operator_spacing() {
+    fn normalizes_operator_spacing() {
         let policy = OperatorOverloadSpacingPolicy::new();
         let path = PathBuf::from("op.cpp");
         let source = "struct X { X operator +(const X& rhs) const; };\n";
         let tree = parse_cpp(source);
         let (clang, semantic) = semantic_for(source, &path, &tree);
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(
             result.text,
@@ -314,16 +314,16 @@ mod tests {
     }
 
     #[test]
-    fn does_not_change_conversion_operator_spacing() {
+    fn keeps_conversion_spacing() {
         let policy = OperatorOverloadSpacingPolicy::new();
         let path = PathBuf::from("op.cpp");
         let source = "struct X { explicit operator bool() const; };\n";
         let tree = parse_cpp(source);
         let (clang, semantic) = semantic_for(source, &path, &tree);
         let ctx = PolicyContext::new(source, &path)
-            .with_tree_sitter_tree(Some(&tree))
-            .with_clang_parse_result(Some(&*clang))
-            .with_semantic_file_context(Some(&semantic));
+            .with_tree(Some(&tree))
+            .with_clang(Some(&*clang))
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, source);
     }

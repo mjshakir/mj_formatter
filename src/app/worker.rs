@@ -27,7 +27,7 @@ use crate::model::file_result::FileResult;
 use crate::parser::clang_service::ClangParseService;
 use crate::parser::manager::ParserManager;
 use crate::policy::registry::PolicyRegistry;
-use crate::runtime::adaptive_telemetry::{AdaptiveTelemetry, AdaptiveTelemetrySnapshot};
+use crate::runtime::adaptive_telemetry::{AdaptiveTelemetry, AdaptiveSnapshot};
 use crate::runtime::result_cache::CheckResultCache;
 use crate::runtime::scheduler::{
     persist_batch_telemetry, DispatchBatchTelemetry, DispatchFeatureCache, DispatchHistoryStore,
@@ -103,7 +103,7 @@ impl App {
         Ok(decoded)
     }
 
-    fn write_framed_worker_payload<W: Write, T: Serialize>(
+    fn write_framed<W: Write, T: Serialize>(
         writer: &mut W,
         value: &T,
     ) -> Result<()> {
@@ -113,7 +113,7 @@ impl App {
         writer.flush().context("failed flushing worker payload")
     }
 
-    fn read_framed_worker_payload<R: Read, T: DeserializeOwned>(
+    fn read_framed<R: Read, T: DeserializeOwned>(
         reader: &mut R,
     ) -> Result<Option<T>> {
         match crate::files::ecc_frame::read_frame(reader)? {
@@ -122,7 +122,7 @@ impl App {
         }
     }
 
-    pub(crate) fn run_worker_pool_entry(_args: &CliArgs, config: &AppConfig) -> Result<()> {
+    pub(crate) fn run_pool_entry(_args: &CliArgs, config: &AppConfig) -> Result<()> {
         let config = if std::env::var_os("FMT_OBSERVATION_ONLY").is_some() {
             let mut c = config.clone();
             c.observation_only = true;
@@ -142,7 +142,7 @@ impl App {
         let mut writer = stdout.lock();
         let mut batch_index = 0usize;
         while let Some(request) =
-            Self::read_framed_worker_payload::<_, PersistentWorkerRequest>(&mut reader)?
+            Self::read_framed::<_, PersistentWorkerRequest>(&mut reader)?
         {
             match request {
                 PersistentWorkerRequest::Process(manifest) => {
@@ -159,7 +159,7 @@ impl App {
                     let cluster_baseline = PolicyClusterTelemetry::snapshot_entries();
                     let retry_baseline = RetryLearningTelemetry::snapshot();
                     info!(batch = batch_index, "worker: starting processing pass");
-                    let response = match Self::run_processing_pass_collecting(
+                    let response = match Self::run_pass(
                         config,
                         manifest.files,
                         project_graph_runtime.clone(),
@@ -174,7 +174,7 @@ impl App {
                                 .map(Self::to_worker_file_result)
                                 .collect::<Vec<_>>();
                             let result_coverage_fingerprint =
-                                Self::coverage_fingerprint_from_worker_results(
+                                Self::coverage_fingerprint(
                                     worker_results.as_slice(),
                                 );
                             PersistentWorkerResponse::Output(Box::new(WorkerOutput {
@@ -191,7 +191,7 @@ impl App {
                                     &adaptive_baseline,
                                     &AdaptiveTelemetry::snapshot(),
                                 ),
-                                policy_telemetry: Self::diff_policy_telemetry_entries(
+                                policy_telemetry: Self::diff_telemetry(
                                     policy_baseline.as_slice(),
                                     PolicyTelemetry::snapshot_sorted().as_slice(),
                                 ),
@@ -215,7 +215,7 @@ impl App {
                         elapsed_ms = batch_start.elapsed().as_millis() as u64,
                         "worker: writing response"
                     );
-                    Self::write_framed_worker_payload(&mut writer, &response)?;
+                    Self::write_framed(&mut writer, &response)?;
                 }
                 PersistentWorkerRequest::Shutdown => break,
             }
@@ -245,7 +245,7 @@ impl App {
             .and_then(|p| crate::engine::population_context::PopulationContext::load_for_ipc(&p));
         let cluster_baseline = PolicyClusterTelemetry::snapshot_entries();
         let retry_baseline = RetryLearningTelemetry::snapshot();
-        let pass_result = Self::run_processing_pass_collecting(
+        let pass_result = Self::run_pass(
             config,
             manifest.files,
             project_graph_runtime.clone(),
@@ -259,7 +259,7 @@ impl App {
             .map(Self::to_worker_file_result)
             .collect::<Vec<_>>();
         let result_coverage_fingerprint =
-            Self::coverage_fingerprint_from_worker_results(worker_results.as_slice());
+            Self::coverage_fingerprint(worker_results.as_slice());
         let cluster_delta = Self::diff_policy_cluster_entries(
             cluster_baseline.as_slice(),
             PolicyClusterTelemetry::snapshot_entries().as_slice(),
@@ -298,7 +298,7 @@ impl App {
         record_dispatch_history: bool,
         population_context: Option<crate::engine::population_context::PopulationContext>,
     ) -> Result<Vec<FileResult>> {
-        let pass_result = Self::run_processing_pass_collecting(
+        let pass_result = Self::run_pass(
             config,
             files,
             project_graph_runtime,
@@ -309,7 +309,7 @@ impl App {
         Ok(pass_result.results)
     }
 
-    fn run_processing_pass_collecting(
+    fn run_pass(
         config: &AppConfig,
         files: Vec<PathBuf>,
         project_graph_runtime: Option<Arc<ProjectGraphRuntime>>,
@@ -324,7 +324,7 @@ impl App {
             warn!(error = %err, "failed to initialize clang parse service eagerly");
         }
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
-        let _cluster_read_guard = PolicyClusterTelemetry::begin_deterministic_read_model();
+        let _cluster_read_guard = PolicyClusterTelemetry::begin_read_model();
         let parser_manager = ParserManager::with_full_config(
             config.clang_binary.clone(),
             config.clang_args.clone(),
@@ -332,7 +332,7 @@ impl App {
             config.clang_args_mode,
             config.cpp_standard.clone(),
             config.semantic_require_compdb,
-            !config.semantic_disable_inferred_includes,
+            !config.semantic_no_inferred,
         );
         let policies = PolicyRegistry::build_enabled(config);
         let pipeline = PolicyPipeline::new(
@@ -340,7 +340,7 @@ impl App {
             parser_manager.clone(),
             config.policy_settings.clone(),
             config.confidence.clone(),
-            config.conflict_detection_enabled,
+            config.conflict_enabled,
             config.conflict_touch_threshold,
             population_context,
         );
@@ -351,9 +351,9 @@ impl App {
             config.accuracy_gate.clone(),
             project_graph_runtime,
         );
-        if let Some(tracker) = crate::engine::context_tracker::PolicyContextTracker::load_from_path(&config.policy_context_tracker_path) {
+        if let Some(tracker) = crate::engine::context_tracker::PolicyContextTracker::load_from_path(&config.tracker_path) {
             if config.verbose {
-                tracing::info!("loaded policy context tracker from {}", config.policy_context_tracker_path.display());
+                tracing::info!("loaded policy context tracker from {}", config.tracker_path.display());
             }
             engine.set_context_tracker(tracker);
         }
@@ -361,12 +361,12 @@ impl App {
         let engine = Arc::new(engine);
         let file_io = FileIo::new(config);
         let check_result_cache =
-            if allow_check_result_cache && config.check && config.check_result_cache_enabled {
+            if allow_check_result_cache && config.check && config.cache_enabled {
                 Some(Arc::new(CheckResultCache::open(
-                    config.check_result_cache_path.clone(),
+                    config.cache_path.clone(),
                     true,
-                    config.check_result_cache_l1_size,
-                    Self::check_result_cache_fingerprint(config),
+                    config.cache_l1_size,
+                    Self::cache_fingerprint(config),
                 )))
             } else {
                 None
@@ -461,19 +461,19 @@ impl App {
         if let Some(cache) = check_result_cache.as_ref() {
             cache.flush().context(format!(
                 "failed persisting check-result cache {}",
-                config.check_result_cache_path.display()
+                config.cache_path.display()
             ))?;
         }
         if record_dispatch_history {
             let certainty_path = config
-                .check_result_cache_path
+                .cache_path
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .join("certainty_filter_state.bin");
             if let Err(err) = engine.save_certainty_state(&certainty_path) {
                 warn!(error = %err, "failed to persist certainty filter state");
             }
-            if let Err(err) = engine.save_context_tracker(&config.policy_context_tracker_path) {
+            if let Err(err) = engine.save_context_tracker(&config.tracker_path) {
                 warn!(error = %err, "failed to persist policy context tracker");
             }
         }
@@ -522,7 +522,7 @@ impl App {
             config.clang_args_mode,
             config.cpp_standard.clone(),
             config.semantic_require_compdb,
-            !config.semantic_disable_inferred_includes,
+            !config.semantic_no_inferred,
         );
         let mut dispatch_history = DispatchHistoryStore::open(config.run_journal_dir.as_path());
         let mut feature_cache = DispatchFeatureCache::open(config.run_journal_dir.as_path(), true);
@@ -560,8 +560,8 @@ impl App {
             )
         })?;
         let _temp_guard = TempDirCleanupGuard::new(temp_root.clone());
-        let base_timeout_secs = config.worker_process_timeout_seconds.max(10) as u128;
-        let kill_grace = Duration::from_secs(config.worker_process_kill_grace_seconds.max(1));
+        let base_timeout_secs = config.worker_timeout_secs.max(10) as u128;
+        let kill_grace = Duration::from_secs(config.worker_kill_secs.max(1));
         let worker_base_timeout = Duration::from_secs(
             base_timeout_secs.min(7200) as u64,
         );
@@ -573,7 +573,7 @@ impl App {
             .map(|(index, batch)| WorkerBatchTask {
                 index,
                 estimated_cost: batch.estimated_cost,
-                expected_coverage_fingerprint: Self::coverage_fingerprint_from_paths(
+                expected_coverage_fingerprint: Self::coverage_fingerprint(
                     batch.paths.as_slice(),
                 ),
                 files: batch.paths,
@@ -610,7 +610,7 @@ impl App {
                         temp_root.join(format!("worker_slot_{worker_slot}.adaptive_state.json"));
                     let retry_optimizer_state_path = temp_root
                         .join(format!("worker_slot_{worker_slot}.retry_optimizer_state.json"));
-                    let mut worker = Self::spawn_persistent_worker_process(
+                    let mut worker = Self::spawn_worker(
                         current_exe,
                         args,
                         config,
@@ -654,12 +654,12 @@ impl App {
                                     error = %err,
                                     "multiprocess worker failed before lease dispatch; restarting worker"
                                 );
-                                Self::terminate_persistent_worker_process(
+                                Self::terminate_worker(
                                     worker,
                                     worker_base_timeout,
                                     kill_grace,
                                 );
-                                worker = Self::spawn_persistent_worker_process(
+                                worker = Self::spawn_worker(
                                     current_exe,
                                     args,
                                     config,
@@ -677,7 +677,7 @@ impl App {
                                 (base_timeout_secs * batch_cost_ratio)
                                     .min(7200) as u64,
                             );
-                            match Self::collect_persistent_worker_output(
+                            match Self::collect_output(
                                 task,
                                 &worker,
                                 batch_timeout,
@@ -729,12 +729,12 @@ impl App {
                                         error = %err,
                                         "multiprocess worker failed; restarting batch"
                                     );
-                                    Self::terminate_persistent_worker_process(
+                                    Self::terminate_worker(
                                         worker,
                                         worker_base_timeout,
                                         kill_grace,
                                     );
-                                    worker = Self::spawn_persistent_worker_process(
+                                    worker = Self::spawn_worker(
                                         current_exe,
                                         args,
                                         config,
@@ -769,7 +769,7 @@ impl App {
                         );
                     }
                     if let Err(err) =
-                        Self::shutdown_persistent_worker_process(worker, worker_base_timeout, kill_grace)
+                        Self::shutdown_worker(worker, worker_base_timeout, kill_grace)
                     {
                         output.worker_failures = output.worker_failures.saturating_add(1);
                         warn!(
@@ -852,7 +852,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_persistent_worker_process(
+    fn spawn_worker(
         current_exe: &Path,
         args: &CliArgs,
         config: &AppConfig,
@@ -863,7 +863,7 @@ impl App {
         population_measurements_path: Option<&Path>,
     ) -> Result<PersistentWorkerProcess> {
         let mut command = Command::new(current_exe);
-        Self::append_worker_base_args(&mut command, args, config, worker_jobs);
+        Self::append_base_args(&mut command, args, config, worker_jobs);
         let stderr = if config.verbose {
             Stdio::inherit()
         } else {
@@ -913,7 +913,7 @@ impl App {
         thread::spawn(move || {
             let mut stdout = io::BufReader::new(stdout);
             loop {
-                match App::read_framed_worker_payload::<_, PersistentWorkerResponse>(&mut stdout) {
+                match App::read_framed::<_, PersistentWorkerResponse>(&mut stdout) {
                     Ok(Some(response)) => {
                         if response_tx.send(Ok(response)).is_err() {
                             break;
@@ -934,7 +934,7 @@ impl App {
         })
     }
 
-    fn collect_persistent_worker_output(
+    fn collect_output(
         task: &WorkerBatchTask,
         worker: &PersistentWorkerProcess,
         worker_timeout: Duration,
@@ -1003,7 +1003,7 @@ impl App {
         Ok(parsed)
     }
 
-    fn shutdown_persistent_worker_process(
+    fn shutdown_worker(
         mut worker: PersistentWorkerProcess,
         worker_timeout: Duration,
         kill_grace: Duration,
@@ -1024,20 +1024,20 @@ impl App {
         Ok(())
     }
 
-    fn terminate_persistent_worker_process(
+    fn terminate_worker(
         worker: PersistentWorkerProcess,
         _worker_timeout: Duration,
         kill_grace: Duration,
     ) {
         let _ =
-            Self::shutdown_persistent_worker_process(worker, Duration::from_millis(1), kill_grace);
+            Self::shutdown_worker(worker, Duration::from_millis(1), kill_grace);
     }
 
     fn diff_adaptive_snapshot(
-        previous: &AdaptiveTelemetrySnapshot,
-        current: &AdaptiveTelemetrySnapshot,
-    ) -> AdaptiveTelemetrySnapshot {
-        AdaptiveTelemetrySnapshot {
+        previous: &AdaptiveSnapshot,
+        current: &AdaptiveSnapshot,
+    ) -> AdaptiveSnapshot {
+        AdaptiveSnapshot {
             threshold_evaluations: current
                 .threshold_evaluations
                 .saturating_sub(previous.threshold_evaluations),
@@ -1068,21 +1068,21 @@ impl App {
             reason_low_consensus: current
                 .reason_low_consensus
                 .saturating_sub(previous.reason_low_consensus),
-            reason_parser_consensus_strict: current
-                .reason_parser_consensus_strict
-                .saturating_sub(previous.reason_parser_consensus_strict),
-            reason_parser_consensus_adaptive_hardened: current
-                .reason_parser_consensus_adaptive_hardened
-                .saturating_sub(previous.reason_parser_consensus_adaptive_hardened),
-            reason_parser_consensus_adaptive_relaxed: current
-                .reason_parser_consensus_adaptive_relaxed
-                .saturating_sub(previous.reason_parser_consensus_adaptive_relaxed),
-            reason_context_coverage_low: current
-                .reason_context_coverage_low
-                .saturating_sub(previous.reason_context_coverage_low),
-            reason_semantic_consensus_low: current
-                .reason_semantic_consensus_low
-                .saturating_sub(previous.reason_semantic_consensus_low),
+            reason_parser_strict: current
+                .reason_parser_strict
+                .saturating_sub(previous.reason_parser_strict),
+            reason_parser_hardened: current
+                .reason_parser_hardened
+                .saturating_sub(previous.reason_parser_hardened),
+            reason_parser_relaxed: current
+                .reason_parser_relaxed
+                .saturating_sub(previous.reason_parser_relaxed),
+            reason_coverage_low: current
+                .reason_coverage_low
+                .saturating_sub(previous.reason_coverage_low),
+            reason_semantic_low: current
+                .reason_semantic_low
+                .saturating_sub(previous.reason_semantic_low),
             reason_parser_disagreement: current
                 .reason_parser_disagreement
                 .saturating_sub(previous.reason_parser_disagreement),
@@ -1114,7 +1114,7 @@ impl App {
         }
     }
 
-    fn diff_policy_telemetry_entries(
+    fn diff_telemetry(
         previous: &[PolicyTelemetrySnapshotEntry],
         current: &[PolicyTelemetrySnapshotEntry],
     ) -> Vec<PolicyTelemetrySnapshotEntry> {
@@ -1166,33 +1166,33 @@ impl App {
                     .entry
                     .reason_low_consensus
                     .saturating_sub(baseline.map_or(0, |value| value.reason_low_consensus)),
-                reason_parser_consensus_strict: item
+                reason_parser_strict: item
                     .entry
-                    .reason_parser_consensus_strict
+                    .reason_parser_strict
                     .saturating_sub(
-                        baseline.map_or(0, |value| value.reason_parser_consensus_strict),
+                        baseline.map_or(0, |value| value.reason_parser_strict),
                     ),
-                reason_parser_consensus_adaptive_hardened: item
+                reason_parser_hardened: item
                     .entry
-                    .reason_parser_consensus_adaptive_hardened
+                    .reason_parser_hardened
                     .saturating_sub(
-                        baseline.map_or(0, |value| value.reason_parser_consensus_adaptive_hardened),
+                        baseline.map_or(0, |value| value.reason_parser_hardened),
                     ),
-                reason_parser_consensus_adaptive_relaxed: item
+                reason_parser_relaxed: item
                     .entry
-                    .reason_parser_consensus_adaptive_relaxed
+                    .reason_parser_relaxed
                     .saturating_sub(
-                        baseline.map_or(0, |value| value.reason_parser_consensus_adaptive_relaxed),
+                        baseline.map_or(0, |value| value.reason_parser_relaxed),
                     ),
-                reason_context_coverage_low: item
+                reason_coverage_low: item
                     .entry
-                    .reason_context_coverage_low
-                    .saturating_sub(baseline.map_or(0, |value| value.reason_context_coverage_low)),
-                reason_semantic_consensus_low: item
+                    .reason_coverage_low
+                    .saturating_sub(baseline.map_or(0, |value| value.reason_coverage_low)),
+                reason_semantic_low: item
                     .entry
-                    .reason_semantic_consensus_low
+                    .reason_semantic_low
                     .saturating_sub(
-                        baseline.map_or(0, |value| value.reason_semantic_consensus_low),
+                        baseline.map_or(0, |value| value.reason_semantic_low),
                     ),
                 reason_parser_disagreement: item
                     .entry
@@ -1245,6 +1245,6 @@ impl App {
 
 impl PersistentWorkerProcess {
     fn send(&mut self, request: &PersistentWorkerRequest) -> Result<()> {
-        App::write_framed_worker_payload(&mut self.stdin, request)
+        App::write_framed(&mut self.stdin, request)
     }
 }

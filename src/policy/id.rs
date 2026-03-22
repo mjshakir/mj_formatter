@@ -79,7 +79,7 @@ mod tests {
     use crate::policy::id::PolicyId;
 
     #[test]
-    fn parses_known_policy_ids_case_insensitively() {
+    fn parses_ids_insensitively() {
         assert_eq!(
             PolicyId::from_str_lossy("Naming_Conventions"),
             PolicyId::NamingConventions
@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_unknown_policy_as_normalized_string() {
+    fn preserves_unknown_policy() {
         assert_eq!(
             PolicyId::from_str_lossy("  Custom_Policy "),
             PolicyId::Unknown("custom_policy".to_string())
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_policy_id_as_policy_name() {
+    fn formats_policy_name() {
         assert_eq!(PolicyId::SnakeCase.to_string(), "snake_case");
         assert_eq!(
             PolicyId::Unknown("custom_policy".to_string()).to_string(),

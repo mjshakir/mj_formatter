@@ -31,7 +31,7 @@ use crate::engine::population_context::PopulationContext;
 use crate::engine::catalog::PolicyCapabilityMatrix;
 use crate::policy::registry::PolicyRegistry;
 use crate::runtime::rollout_state::AccuracyRolloutState;
-use crate::runtime::adaptive_telemetry::{AdaptiveTelemetry, AdaptiveTelemetrySnapshot};
+use crate::runtime::adaptive_telemetry::{AdaptiveTelemetry, AdaptiveSnapshot};
 use crate::runtime::backup::BackupManifest;
 use crate::runtime::scheduler::{
     DispatchBatch, DispatchFeatureCache, DispatchHistoryStore, DispatchMode, DispatchObservation,
@@ -49,6 +49,22 @@ use crate::runtime::journal::RunJournal;
 use crate::runtime::toolchain::ToolchainRequirements;
 
 pub struct App;
+
+pub(crate) trait HasPath {
+    fn as_path(&self) -> &Path;
+}
+
+impl HasPath for PathBuf {
+    fn as_path(&self) -> &Path {
+        self
+    }
+}
+
+impl HasPath for WorkerFileResult {
+    fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
 
 pub(crate) struct SemanticPropagationOutcome {
     pub(crate) index: usize,
@@ -145,7 +161,7 @@ pub(crate) struct WorkerFileResult {
     pub(crate) path: PathBuf,
     pub(crate) changed: bool,
     pub(crate) pending_text: Option<String>,
-    pub(crate) semantic_rename_plans: Vec<SemanticRenamePlan>,
+    pub(crate) rename_plans: Vec<SemanticRenamePlan>,
     pub(crate) convergence_pairs: Vec<WorkerConvergencePair>,
     pub(crate) violations: Vec<Violation>,
     pub(crate) edits: Vec<Edit>,
@@ -187,7 +203,7 @@ pub(crate) struct WorkerOutput {
     pub(crate) results: Vec<WorkerFileResult>,
     #[serde(default)]
     pub(crate) dispatch_observations: Vec<WorkerDispatchObservation>,
-    pub(crate) adaptive_telemetry: AdaptiveTelemetrySnapshot,
+    pub(crate) adaptive_telemetry: AdaptiveSnapshot,
     pub(crate) policy_telemetry: Vec<PolicyTelemetrySnapshotEntry>,
     pub(crate) policy_cluster_telemetry: Vec<PolicyClusterSnapshotEntry>,
     pub(crate) retry_learning: RetryLearningSnapshot,
@@ -237,7 +253,7 @@ impl App {
         let effective_rollout_profile =
             accuracy_rollout_state.effective_profile(requested_rollout_profile);
         config.accuracy_gate.profile = effective_rollout_profile;
-        Self::apply_accuracy_profile_thresholds(&mut config);
+        Self::apply_profile(&mut config);
         let requested_fail_closed = config.accuracy_gate.fail_closed;
         let effective_fail_closed = accuracy_rollout_state.effective_fail_closed(
             requested_rollout_profile,
@@ -265,7 +281,7 @@ impl App {
         ToolchainRequirements::verify(&config.clang_binary, &config.clang_format_binary)?;
 
         if args.benchmark_only {
-            return Self::run_benchmark_only_entry(
+            return Self::run_benchmark(
                 &mut config,
                 &mut accuracy_rollout_state,
                 requested_rollout_profile,
@@ -274,7 +290,7 @@ impl App {
         }
 
         if args.worker_pool {
-            return Self::run_worker_pool_entry(&args, &config);
+            return Self::run_pool_entry(&args, &config);
         }
 
         if args.worker_manifest.is_some() || args.worker_result.is_some() {
@@ -318,7 +334,7 @@ impl App {
             config.clang_args_mode,
             config.cpp_standard.clone(),
             config.semantic_require_compdb,
-            !config.semantic_disable_inferred_includes,
+            !config.semantic_no_inferred,
         );
         let project_graph_runtime = Self::open_project_graph_runtime(&config)?;
         let file_io = FileIo::new(&config);
@@ -348,7 +364,7 @@ impl App {
         let observation_started = Instant::now();
         let population_context = {
             let certainty_path = config
-                .check_result_cache_path
+                .cache_path
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .join("certainty_filter_state.bin");
@@ -418,7 +434,7 @@ impl App {
                     last_obs_results = obs_results;
                     let certainties: Vec<&crate::engine::catalog::PolicyCertainty> = last_obs_results
                         .iter()
-                        .filter_map(|r| r.policy_certainty.as_ref())
+                        .filter_map(|r| r.outcome.certainty.as_ref())
                         .collect();
                     let measurements: Vec<[f64; 5]> = certainties
                         .iter()
@@ -476,10 +492,10 @@ impl App {
                     {
                         let store = crate::engine::filter_store::CertaintyFilterStore::new(Some(&final_ctx));
                         for result in last_obs_results.iter() {
-                            if let Some(ref cert) = result.policy_certainty {
+                            if let Some(ref cert) = result.outcome.certainty {
                                 let measurement = [cert.structural, cert.semantic, cert.coverage, cert.richness, cert.edit_success];
-                                let content_hash = crc32fast::hash(result.path.to_string_lossy().as_bytes()) as u64;
-                                store.observe(&result.path.to_string_lossy(), measurement, content_hash);
+                                let content_hash = crc32fast::hash(result.meta.path.to_string_lossy().as_bytes()) as u64;
+                                store.observe(&result.meta.path.to_string_lossy(), measurement, content_hash);
                             }
                         }
                         if let Err(err) = store.save_to_path(&certainty_path) {
@@ -521,7 +537,7 @@ impl App {
             Self::run_processing_pass(&config, files, project_graph_runtime.clone(), true, true, population_context)?
         };
 
-        results.sort_by(|left, right| left.path.cmp(&right.path));
+        results.sort_by(|left, right| left.meta.path.cmp(&right.meta.path));
 
         let parallel_pool = if effective_jobs > 1 {
             rayon::ThreadPoolBuilder::new()
@@ -643,51 +659,51 @@ impl App {
         let mut backup_writes = 0usize;
         for result in &results {
             summary.merge_file(
-                result.changed,
-                result.violations.len(),
+                result.outcome.changed,
+                result.outcome.violations.len(),
                 result.error.is_some(),
                 result.warnings.iter().filter(|w| !w.starts_with("internal:")).count(),
             );
-            total_edits += result.edits.len();
-            if result.backup_path.is_some() {
+            total_edits += result.outcome.edits.len();
+            if result.meta.backup_path.is_some() {
                 backup_writes += 1;
             }
 
             if config.verbose {
                 if let Some(error) = &result.error {
-                    error!(path = %result.path.display(), error = %error, "file failed");
+                    error!(path = %result.meta.path.display(), error = %error, "file failed");
                 }
                 for warning in &result.warnings {
                     if warning.starts_with("internal:") {
                         continue;
                     }
-                    warn!(path = %result.path.display(), warning = %warning, "file warning");
+                    warn!(path = %result.meta.path.display(), warning = %warning, "file warning");
                 }
-                for violation in &result.violations {
+                for violation in &result.outcome.violations {
                     let column = violation.column.unwrap_or(1);
                     println!(
                         "VIOLATION {}:{}:{} [{}] {}",
-                        result.path.display(),
+                        result.meta.path.display(),
                         violation.line,
                         column,
                         violation.policy,
                         violation.message
                     );
                 }
-                for edit in &result.edits {
+                for edit in &result.outcome.edits {
                     println!(
                         "EDIT {}:{} [{}] '{}' -> '{}'",
-                        result.path.display(),
+                        result.meta.path.display(),
                         edit.line,
                         edit.policy,
                         edit.before,
                         edit.after
                     );
                 }
-                if let Some(backup_path) = &result.backup_path {
+                if let Some(backup_path) = &result.meta.backup_path {
                     println!(
                         "BACKUP {} -> {}",
-                        result.path.display(),
+                        result.meta.path.display(),
                         backup_path.display()
                     );
                 }
@@ -781,13 +797,13 @@ impl App {
                     confidence_advisory_only = adaptive.confidence_advisory_only,
                     confidence_block = adaptive.confidence_block,
                     reason_low_consensus = adaptive.reason_low_consensus,
-                    reason_parser_consensus_strict = adaptive.reason_parser_consensus_strict,
-                    reason_parser_consensus_adaptive_hardened =
-                        adaptive.reason_parser_consensus_adaptive_hardened,
-                    reason_parser_consensus_adaptive_relaxed =
-                        adaptive.reason_parser_consensus_adaptive_relaxed,
-                    reason_context_coverage_low = adaptive.reason_context_coverage_low,
-                    reason_semantic_consensus_low = adaptive.reason_semantic_consensus_low,
+                    reason_parser_strict = adaptive.reason_parser_strict,
+                    reason_parser_hardened =
+                        adaptive.reason_parser_hardened,
+                    reason_parser_relaxed =
+                        adaptive.reason_parser_relaxed,
+                    reason_coverage_low = adaptive.reason_coverage_low,
+                    reason_semantic_low = adaptive.reason_semantic_low,
                     reason_parser_disagreement = adaptive.reason_parser_disagreement,
                     reason_clang_diagnostics = adaptive.reason_clang_diagnostics,
                     first_pass = adaptive.outcomes_first_pass,
@@ -842,7 +858,7 @@ impl App {
         } else {
             None
         };
-        let benchmark_spawned = Self::spawn_async_accuracy_benchmark(&args, &config)?;
+        let benchmark_spawned = Self::spawn_benchmark(&args, &config)?;
         if benchmark_spawned {
             println!("accuracy_benchmark: scheduled async");
         } else {
@@ -934,8 +950,8 @@ impl App {
     }
 
     pub(crate) fn to_worker_file_result(result: FileResult) -> WorkerFileResult {
-        let mut convergence_pairs = Vec::with_capacity(result.convergence_pairs.len());
-        for ((loser, winner), count) in result.convergence_pairs {
+        let mut convergence_pairs = Vec::with_capacity(result.outcome.convergence_pairs.len());
+        for ((loser, winner), count) in result.outcome.convergence_pairs {
             convergence_pairs.push(WorkerConvergencePair {
                 loser: loser.into(),
                 winner: winner.into(),
@@ -943,21 +959,21 @@ impl App {
             });
         }
         WorkerFileResult {
-            path: result.path,
-            changed: result.changed,
-            pending_text: result.pending_text,
-            semantic_rename_plans: result.semantic_rename_plans,
+            path: result.meta.path,
+            changed: result.outcome.changed,
+            pending_text: result.outcome.pending_text,
+            rename_plans: result.outcome.rename_plans,
             convergence_pairs,
-            violations: result.violations,
-            edits: result.edits,
-            policy_traces: result.policy_traces,
-            accuracy_gate: result.accuracy_gate,
+            violations: result.outcome.violations,
+            edits: result.outcome.edits,
+            policy_traces: result.traces,
+            accuracy_gate: result.outcome.accuracy_gate,
             error: result.error,
             warnings: result.warnings,
-            elapsed_engine_ms: result.elapsed_engine_ms,
-            elapsed_total_ms: result.elapsed_total_ms,
-            boot_parse_ms: result.boot_parse_ms,
-            policy_certainty: result.policy_certainty,
+            elapsed_engine_ms: result.meta.engine_ms,
+            elapsed_total_ms: result.meta.total_ms,
+            boot_parse_ms: result.meta.boot_parse_ms,
+            policy_certainty: result.outcome.certainty,
         }
     }
 
@@ -972,22 +988,26 @@ impl App {
                 .or_insert(0usize) += pair.count;
         }
         FileResult {
-            path: result.path,
-            changed: result.changed,
-            pending_text: result.pending_text,
-            semantic_rename_plans: result.semantic_rename_plans,
-            convergence_pairs,
-            violations: result.violations,
-            edits: result.edits,
-            policy_traces: result.policy_traces,
-            accuracy_gate: result.accuracy_gate,
+            meta: crate::model::file_result::FileMeta {
+                path: result.path,
+                backup_path: None,
+                engine_ms: result.elapsed_engine_ms,
+                total_ms: result.elapsed_total_ms,
+                boot_parse_ms: result.boot_parse_ms,
+            },
+            outcome: crate::model::file_result::FormatOutcome {
+                changed: result.changed,
+                pending_text: result.pending_text,
+                rename_plans: result.rename_plans,
+                convergence_pairs,
+                violations: result.violations,
+                edits: result.edits,
+                accuracy_gate: result.accuracy_gate,
+                certainty: result.policy_certainty,
+            },
+            traces: result.policy_traces,
             error: result.error,
-            backup_path: None,
             warnings: result.warnings,
-            elapsed_engine_ms: result.elapsed_engine_ms,
-            elapsed_total_ms: result.elapsed_total_ms,
-            boot_parse_ms: result.boot_parse_ms,
-            policy_certainty: result.policy_certainty,
         }
     }
 
@@ -1026,8 +1046,8 @@ impl App {
         results: &[WorkerFileResult],
         expected_paths: &[PathBuf],
     ) -> Result<()> {
-        let expected_counts = Self::path_counts_from_paths(expected_paths);
-        let actual_counts = Self::path_counts_from_worker_results(results);
+        let expected_counts = Self::path_counts(expected_paths);
+        let actual_counts = Self::path_counts(results);
         if expected_counts == actual_counts {
             return Ok(());
         }
@@ -1055,35 +1075,21 @@ impl App {
         ))
     }
 
-    fn path_counts_from_paths(paths: &[PathBuf]) -> HashMap<String, usize> {
+    fn path_counts<T: HasPath>(items: &[T]) -> HashMap<String, usize> {
         let mut counts = HashMap::<String, usize>::new();
-        for path in paths {
-            let key = Self::path_identity(path.as_path());
+        for item in items {
+            let key = Self::path_identity(item.as_path());
             *counts.entry(key).or_insert(0) += 1;
         }
         counts
     }
 
-    fn path_counts_from_worker_results(results: &[WorkerFileResult]) -> HashMap<String, usize> {
-        let mut counts = HashMap::<String, usize>::new();
-        for result in results {
-            let key = Self::path_identity(result.path.as_path());
-            *counts.entry(key).or_insert(0) += 1;
-        }
-        counts
+    pub(crate) fn coverage_fingerprint<T: HasPath>(items: &[T]) -> String {
+        let counts = Self::path_counts(items);
+        Self::fingerprint_from_counts(&counts)
     }
 
-    pub(crate) fn coverage_fingerprint_from_paths(paths: &[PathBuf]) -> String {
-        let counts = Self::path_counts_from_paths(paths);
-        Self::coverage_fingerprint_from_counts(&counts)
-    }
-
-    pub(crate) fn coverage_fingerprint_from_worker_results(results: &[WorkerFileResult]) -> String {
-        let counts = Self::path_counts_from_worker_results(results);
-        Self::coverage_fingerprint_from_counts(&counts)
-    }
-
-    fn coverage_fingerprint_from_counts(counts: &HashMap<String, usize>) -> String {
+    fn fingerprint_from_counts(counts: &HashMap<String, usize>) -> String {
         let mut entries = counts
             .iter()
             .map(|(path, count)| format!("{path}:{count}"))
@@ -1105,7 +1111,7 @@ impl App {
         }
         let mut keyed = Vec::<(String, FileResult)>::with_capacity(results.len());
         for result in results {
-            let key = Self::path_identity(result.path.as_path());
+            let key = Self::path_identity(result.meta.path.as_path());
             keyed.push((key, result));
         }
 
@@ -1140,7 +1146,7 @@ impl App {
         keyed.sort_by(|(left_key, left_result), (right_key, right_result)| {
             left_key
                 .cmp(right_key)
-                .then_with(|| left_result.path.cmp(&right_result.path))
+                .then_with(|| left_result.meta.path.cmp(&right_result.meta.path))
         });
         Ok(keyed.into_iter().map(|(_, result)| result).collect())
     }
@@ -1216,7 +1222,7 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn append_worker_base_args(
+    pub(crate) fn append_base_args(
         command: &mut Command,
         args: &CliArgs,
         config: &AppConfig,
@@ -1353,7 +1359,7 @@ impl App {
             .unwrap_or_else(|_| "0".to_string())
     }
 
-    pub(crate) fn check_result_cache_fingerprint(config: &AppConfig) -> String {
+    pub(crate) fn cache_fingerprint(config: &AppConfig) -> String {
         let mut lines = Vec::<String>::new();
         lines.push(format!("root={}", config.root.display()));
         lines.push(format!("style={}", config.style_name));
@@ -1370,7 +1376,7 @@ impl App {
         lines.push(format!("clang_args_mode={:?}", config.clang_args_mode));
         lines.push(format!(
             "semantic_fidelity=require_compdb:{} disable_inferred_includes:{}",
-            config.semantic_require_compdb, config.semantic_disable_inferred_includes
+            config.semantic_require_compdb, config.semantic_no_inferred
         ));
         lines.push(format!(
             "accuracy_gate={}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}:{}",
@@ -1421,7 +1427,7 @@ impl App {
     ) -> BTreeMap<(String, String), usize> {
         let mut pairs = BTreeMap::<(String, String), usize>::new();
         for result in results {
-            for ((loser, winner), count) in &result.convergence_pairs {
+            for ((loser, winner), count) in &result.outcome.convergence_pairs {
                 if *count == 0 {
                     continue;
                 }
@@ -1445,31 +1451,43 @@ mod tests {
     use crate::engine::accuracy_gate::{
         AccuracyGateDecision, AccuracyGateReason, AccuracyGateStatus,
     };
-    use crate::model::file_result::FileResult;
+    use crate::model::file_result::{FileMeta, FormatOutcome, FileResult};
     use crate::runtime::scheduler::DispatchObservation;
 
     #[test]
-    fn collect_convergence_pairs_aggregates_multiple_files() {
+    fn convergence_aggregates_files() {
         let first = FileResult {
-            path: PathBuf::from("a.hpp"),
-            convergence_pairs: BTreeMap::from([(
-                ("naming_conventions".to_string(), "clang_format".to_string()),
-                2usize,
-            )]),
+            meta: FileMeta {
+                path: PathBuf::from("a.hpp"),
+                ..FileMeta::default()
+            },
+            outcome: FormatOutcome {
+                convergence_pairs: BTreeMap::from([(
+                    ("naming_conventions".to_string(), "clang_format".to_string()),
+                    2usize,
+                )]),
+                ..FormatOutcome::default()
+            },
             ..FileResult::default()
         };
         let second = FileResult {
-            path: PathBuf::from("b.hpp"),
-            convergence_pairs: BTreeMap::from([
-                (
-                    ("naming_conventions".to_string(), "clang_format".to_string()),
-                    3usize,
-                ),
-                (
-                    ("snake_case".to_string(), "clang_format".to_string()),
-                    1usize,
-                ),
-            ]),
+            meta: FileMeta {
+                path: PathBuf::from("b.hpp"),
+                ..FileMeta::default()
+            },
+            outcome: FormatOutcome {
+                convergence_pairs: BTreeMap::from([
+                    (
+                        ("naming_conventions".to_string(), "clang_format".to_string()),
+                        3usize,
+                    ),
+                    (
+                        ("snake_case".to_string(), "clang_format".to_string()),
+                        1usize,
+                    ),
+                ]),
+                ..FormatOutcome::default()
+            },
             ..FileResult::default()
         };
         let pairs = App::collect_convergence_pairs(&[first, second]);
@@ -1484,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_workers_caps_to_available_parallelism() {
+    fn workers_caps_parallelism() {
         let available = App::available_parallelism();
         let requested = available.saturating_add(8);
         assert_eq!(App::resolve_effective_workers(requested), available);
@@ -1492,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_jobs_respects_requested_budget() {
+    fn jobs_respects_budget() {
         let available = App::available_parallelism();
         let requested = available.saturating_add(8);
         assert_eq!(App::resolve_effective_jobs(requested), requested);
@@ -1500,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_log_excerpt_handles_empty_stderr() {
+    fn excerpt_empty_stderr() {
         assert_eq!(App::worker_log_excerpt(&[], 8), "<no stderr output>");
         assert_eq!(
             App::worker_log_excerpt(b"\n\n   \n", 8),
@@ -1509,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_dispatch_observation_round_trips() {
+    fn dispatch_round_trips() {
         let observation = DispatchObservation {
             path_identity: "src/a.cpp".to_string(),
             observed_size: 128,
@@ -1533,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_log_excerpt_keeps_tail_lines() {
+    fn excerpt_keeps_tail() {
         let sample = b"line1\nline2\nline3\nline4\n";
         assert_eq!(
             App::worker_log_excerpt(sample, 2),
@@ -1542,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_and_order_multiprocess_results_sorts_paths() {
+    fn multiprocess_sorts_paths() {
         let expected = vec![
             PathBuf::from("include/B.hpp"),
             PathBuf::from("include/A.hpp"),
@@ -1550,36 +1568,36 @@ mod tests {
         ];
         let results = vec![
             FileResult {
-                path: PathBuf::from("src/C.cpp"),
+                meta: FileMeta { path: PathBuf::from("src/C.cpp"), ..FileMeta::default() },
                 ..FileResult::default()
             },
             FileResult {
-                path: PathBuf::from("include/B.hpp"),
+                meta: FileMeta { path: PathBuf::from("include/B.hpp"), ..FileMeta::default() },
                 ..FileResult::default()
             },
             FileResult {
-                path: PathBuf::from("include/A.hpp"),
+                meta: FileMeta { path: PathBuf::from("include/A.hpp"), ..FileMeta::default() },
                 ..FileResult::default()
             },
         ];
         let ordered = App::validate_and_order_multiprocess_results(results, expected.as_slice())
             .expect("ordered results");
         assert_eq!(ordered.len(), 3);
-        assert_eq!(ordered[0].path, PathBuf::from("include/A.hpp"));
-        assert_eq!(ordered[1].path, PathBuf::from("include/B.hpp"));
-        assert_eq!(ordered[2].path, PathBuf::from("src/C.cpp"));
+        assert_eq!(ordered[0].meta.path, PathBuf::from("include/A.hpp"));
+        assert_eq!(ordered[1].meta.path, PathBuf::from("include/B.hpp"));
+        assert_eq!(ordered[2].meta.path, PathBuf::from("src/C.cpp"));
     }
 
     #[test]
-    fn validate_and_order_multiprocess_results_rejects_coverage_mismatch() {
+    fn multiprocess_rejects_mismatch() {
         let expected = vec![PathBuf::from("a.cpp"), PathBuf::from("b.cpp")];
         let results = vec![
             FileResult {
-                path: PathBuf::from("a.cpp"),
+                meta: FileMeta { path: PathBuf::from("a.cpp"), ..FileMeta::default() },
                 ..FileResult::default()
             },
             FileResult {
-                path: PathBuf::from("a.cpp"),
+                meta: FileMeta { path: PathBuf::from("a.cpp"), ..FileMeta::default() },
                 ..FileResult::default()
             },
         ];
@@ -1589,14 +1607,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_worker_shard_coverage_accepts_exact_set() {
+    fn shard_accepts_exact() {
         let expected = vec![PathBuf::from("a.cpp"), PathBuf::from("b.cpp")];
         let results = vec![
             WorkerFileResult {
                 path: PathBuf::from("b.cpp"),
                 changed: false,
                 pending_text: None,
-                semantic_rename_plans: Vec::new(),
+                rename_plans: Vec::new(),
                 convergence_pairs: Vec::new(),
                 violations: Vec::new(),
                 edits: Vec::new(),
@@ -1613,7 +1631,7 @@ mod tests {
                 path: PathBuf::from("a.cpp"),
                 changed: false,
                 pending_text: None,
-                semantic_rename_plans: Vec::new(),
+                rename_plans: Vec::new(),
                 convergence_pairs: Vec::new(),
                 violations: Vec::new(),
                 edits: Vec::new(),
@@ -1632,14 +1650,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_worker_shard_coverage_rejects_duplicates() {
+    fn shard_rejects_duplicates() {
         let expected = vec![PathBuf::from("a.cpp"), PathBuf::from("b.cpp")];
         let results = vec![
             WorkerFileResult {
                 path: PathBuf::from("a.cpp"),
                 changed: false,
                 pending_text: None,
-                semantic_rename_plans: Vec::new(),
+                rename_plans: Vec::new(),
                 convergence_pairs: Vec::new(),
                 violations: Vec::new(),
                 edits: Vec::new(),
@@ -1656,7 +1674,7 @@ mod tests {
                 path: PathBuf::from("a.cpp"),
                 changed: false,
                 pending_text: None,
-                semantic_rename_plans: Vec::new(),
+                rename_plans: Vec::new(),
                 convergence_pairs: Vec::new(),
                 violations: Vec::new(),
                 edits: Vec::new(),
@@ -1678,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_fingerprint_is_order_invariant() {
+    fn fingerprint_order_invariant() {
         let first = vec![
             PathBuf::from("src/a.cpp"),
             PathBuf::from("src/b.cpp"),
@@ -1689,26 +1707,26 @@ mod tests {
             PathBuf::from("src/a.cpp"),
             PathBuf::from("src/a.cpp"),
         ];
-        let left = App::coverage_fingerprint_from_paths(first.as_slice());
-        let right = App::coverage_fingerprint_from_paths(second.as_slice());
+        let left = App::coverage_fingerprint(first.as_slice());
+        let right = App::coverage_fingerprint(second.as_slice());
         assert_eq!(left, right);
     }
 
     #[test]
-    fn coverage_fingerprint_changes_when_multiplicity_changes() {
+    fn fingerprint_multiplicity_changes() {
         let first = vec![PathBuf::from("src/a.cpp"), PathBuf::from("src/b.cpp")];
         let second = vec![
             PathBuf::from("src/a.cpp"),
             PathBuf::from("src/a.cpp"),
             PathBuf::from("src/b.cpp"),
         ];
-        let left = App::coverage_fingerprint_from_paths(first.as_slice());
-        let right = App::coverage_fingerprint_from_paths(second.as_slice());
+        let left = App::coverage_fingerprint(first.as_slice());
+        let right = App::coverage_fingerprint(second.as_slice());
         assert_ne!(left, right);
     }
 
     #[test]
-    fn schedule_files_for_parallel_prefers_heavier_files_deterministically() {
+    fn schedule_prefers_heavier() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1729,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn build_file_shards_is_input_order_invariant() {
+    fn shards_order_invariant() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1781,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn build_file_shards_keeps_paired_units_together() {
+    fn shards_keep_paired() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1817,7 +1835,7 @@ mod tests {
     }
 
     #[test]
-    fn accuracy_gate_decision_renders_boundary_message() {
+    fn gate_renders_boundary() {
         let decision = AccuracyGateDecision {
             status: AccuracyGateStatus::WarningOnly,
             precision: 0.923,
@@ -1837,34 +1855,40 @@ mod tests {
     }
 
     #[test]
-    fn collects_gate_rollout_signal_from_file_results() {
+    fn collects_rollout_signal() {
         let results = vec![
             FileResult {
-                path: PathBuf::from("a.cpp"),
-                accuracy_gate: Some(AccuracyGateDecision {
-                    status: AccuracyGateStatus::WarningOnly,
-                    precision: 1.0,
-                    recall: 1.0,
-                    reasons: vec![AccuracyGateReason::SemanticRequiredUnmet],
-                }),
+                meta: FileMeta { path: PathBuf::from("a.cpp"), ..FileMeta::default() },
+                outcome: FormatOutcome {
+                    accuracy_gate: Some(AccuracyGateDecision {
+                        status: AccuracyGateStatus::WarningOnly,
+                        precision: 1.0,
+                        recall: 1.0,
+                        reasons: vec![AccuracyGateReason::SemanticRequiredUnmet],
+                    }),
+                    ..FormatOutcome::default()
+                },
                 ..FileResult::default()
             },
             FileResult {
-                path: PathBuf::from("b.cpp"),
-                accuracy_gate: Some(AccuracyGateDecision {
-                    status: AccuracyGateStatus::FailedClosed,
-                    precision: 0.3,
-                    recall: 0.2,
-                    reasons: vec![AccuracyGateReason::PrecisionBelowThreshold {
-                        actual: 0.3,
-                        minimum: 0.920,
-                    }],
-                }),
+                meta: FileMeta { path: PathBuf::from("b.cpp"), ..FileMeta::default() },
+                outcome: FormatOutcome {
+                    accuracy_gate: Some(AccuracyGateDecision {
+                        status: AccuracyGateStatus::FailedClosed,
+                        precision: 0.3,
+                        recall: 0.2,
+                        reasons: vec![AccuracyGateReason::PrecisionBelowThreshold {
+                            actual: 0.3,
+                            minimum: 0.920,
+                        }],
+                    }),
+                    ..FormatOutcome::default()
+                },
                 error: Some("pipeline failed: accuracy gate fail-closed for b.cpp".to_string()),
                 ..FileResult::default()
             },
             FileResult {
-                path: PathBuf::from("c.cpp"),
+                meta: FileMeta { path: PathBuf::from("c.cpp"), ..FileMeta::default() },
                 error: None,
                 ..FileResult::default()
             },
@@ -1881,7 +1905,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn worker_wait_timeout_reports_hung_worker() {
+    fn timeout_reports_hung() {
         let child = Command::new("sh")
             .arg("-c")
             .arg("sleep 2")
@@ -1900,7 +1924,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn worker_wait_timeout_collects_successful_output() {
+    fn timeout_collects_output() {
         let child = Command::new("sh")
             .arg("-c")
             .arg("printf ok")

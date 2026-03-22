@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -55,7 +55,7 @@ impl App {
         benchmark_config.root = input_root.clone();
         benchmark_config.check = false;
         benchmark_config.backup = false;
-        benchmark_config.check_result_cache_enabled = false;
+        benchmark_config.cache_enabled = false;
         benchmark_config.project_graph.enabled = false;
         benchmark_config.retry_strategy_optimizer.enabled = false;
         benchmark_config.accuracy_gate.enabled = false;
@@ -80,7 +80,7 @@ impl App {
         )?;
         benchmark_config.clang_compdb_path = Some(benchmark_compdb_path);
         benchmark_config.semantic_require_compdb = true;
-        benchmark_config.semantic_disable_inferred_includes = true;
+        benchmark_config.semantic_no_inferred = true;
 
         let benchmark_results = Self::run_processing_pass(
             &benchmark_config,
@@ -90,9 +90,9 @@ impl App {
             false,
             None,
         )?;
-        let mut by_path = HashMap::<PathBuf, FileResult>::new();
+        let mut by_path: FxHashMap<PathBuf, FileResult> = FxHashMap::default();
         for result in benchmark_results {
-            by_path.insert(result.path.clone(), result);
+            by_path.insert(result.meta.path.clone(), result);
         }
 
         for input_path in benchmark_files {
@@ -122,8 +122,8 @@ impl App {
             let actual_text = if result.error.is_some() {
                 stats.error_files = stats.error_files.saturating_add(1);
                 input_text.clone()
-            } else if result.changed {
-                result.pending_text.unwrap_or_else(|| input_text.clone())
+            } else if result.outcome.changed {
+                result.outcome.pending_text.unwrap_or_else(|| input_text.clone())
             } else {
                 input_text.clone()
             };
@@ -151,7 +151,7 @@ impl App {
         Ok(Some(stats))
     }
 
-    pub(crate) fn spawn_async_accuracy_benchmark(
+    pub(crate) fn spawn_benchmark(
         args: &CliArgs,
         config: &AppConfig,
     ) -> Result<bool> {
@@ -195,7 +195,7 @@ impl App {
         Ok(true)
     }
 
-    pub(crate) fn run_benchmark_only_entry(
+    pub(crate) fn run_benchmark(
         config: &mut AppConfig,
         accuracy_rollout_state: &mut AccuracyRolloutState,
         requested_rollout_profile: AccuracyRolloutProfile,
@@ -257,7 +257,7 @@ impl App {
             )?;
             let rollout_status = accuracy_rollout_state.status(requested_rollout_profile);
             config.accuracy_gate.profile = rollout_status.effective_profile;
-            Self::apply_accuracy_profile_thresholds(config);
+            Self::apply_profile(config);
             let gate_fail_closed_effective = accuracy_rollout_state.effective_fail_closed(
                 rollout_status.requested_profile,
                 requested_fail_closed,
@@ -311,7 +311,7 @@ impl App {
                 )?;
                 let rollout_status = accuracy_rollout_state.status(requested_rollout_profile);
                 config.accuracy_gate.profile = rollout_status.effective_profile;
-                Self::apply_accuracy_profile_thresholds(config);
+                Self::apply_profile(config);
                 let gate_fail_closed_effective = accuracy_rollout_state.effective_fail_closed(
                     rollout_status.requested_profile,
                     requested_fail_closed,
@@ -351,7 +351,7 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn apply_accuracy_profile_thresholds(config: &mut AppConfig) {
+    pub(crate) fn apply_profile(config: &mut AppConfig) {
         let defaults = Self::accuracy_profile_thresholds(config.accuracy_gate.profile);
         match config.accuracy_gate.profile {
             crate::config::rollout_profile::AccuracyRolloutProfile::Strict
@@ -463,6 +463,7 @@ impl App {
             .iter()
             .map(|result| {
                 result
+                    .outcome
                     .violations
                     .iter()
                     .filter(|violation| {

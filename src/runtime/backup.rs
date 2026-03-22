@@ -67,19 +67,20 @@ impl BackupManifest {
 
         let mut files = Vec::<ManifestFile>::new();
         for result in results {
-            let Some(backup_path) = result.backup_path.as_ref() else {
+            let Some(backup_path) = result.meta.backup_path.as_ref() else {
                 continue;
             };
             let Ok(stat) = std::fs::metadata(backup_path) else {
                 continue;
             };
             let relative_path = result
+                .meta
                 .path
                 .strip_prefix(config.root.as_path())
                 .ok()
                 .map(|item| item.to_string_lossy().to_string());
             files.push(ManifestFile {
-                source: normalize_path(result.path.as_path()),
+                source: normalize_path(result.meta.path.as_path()),
                 backup: normalize_path(backup_path),
                 size: stat.len(),
                 mtime_ns: stat

@@ -5,14 +5,14 @@ use crate::config::policy_config::PolicyConfig;
 use crate::policy::clang_format::ClangFormatPolicy;
 use crate::policy::class_layout::ClassLayoutPolicy;
 use crate::policy::compact_decls::CompactDeclarationsPolicy;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::policy::dash_comment::DashCommentNormalizerPolicy;
 use crate::policy::void_params::FunctionVoidParamsPolicy;
 use crate::policy::include_guards::{IncludeGuardMode, IncludeGuardsPolicy};
 use crate::policy::include_order::IncludeOrderPolicy;
 use crate::policy::keyword_operators::LogicalKeywordOperatorsPolicy;
 use crate::policy::macro_spacing::LuaMacroSpacingPolicy;
-use crate::policy::ns_comments::NamespaceEndCommentsPolicy;
+use crate::policy::ns_comments::NsCommentsPolicy;
 use crate::policy::naming_conventions::NamingConventionsPolicy;
 use crate::policy::numeric_suffix::NumericLiteralSuffixPolicy;
 use crate::policy::op_spacing::OperatorOverloadSpacingPolicy;
@@ -82,7 +82,7 @@ impl PolicyFactory {
                     .unwrap_or(48)
                     .max(8);
                 let replace_existing = settings.bool_value("replace_existing").unwrap_or(true);
-                Box::new(NamespaceEndCommentsPolicy::new(
+                Box::new(NsCommentsPolicy::new(
                     blocks,
                     control_block_kinds,
                     max_named_lines,
