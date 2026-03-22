@@ -27,6 +27,7 @@ shell-words = "1.1"
 toml = "1.0"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 walkdir = "2.5"
 tree-sitter = "0.26"
