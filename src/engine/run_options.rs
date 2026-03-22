@@ -63,10 +63,18 @@ pub struct PolicyRunOptions {
     pub allowed_edit_lines: Option<BTreeSet<usize>>,
     pub retry_scope_stage: RetryScopeStage,
     pub previous_contract_failures: BTreeSet<SemanticInvariantClause>,
+    pub skip_zero_edit_policies: Option<HashSet<String>>,
+    pub observation_only: bool,
 }
 
 impl PolicyRunOptions {
     pub fn is_policy_blocked(&self, policy_name: &str) -> bool {
         self.blocked_policies.contains(policy_name)
+    }
+
+    pub fn is_policy_skipped(&self, policy_name: &str) -> bool {
+        self.skip_zero_edit_policies
+            .as_ref()
+            .is_some_and(|set| set.contains(policy_name))
     }
 }
