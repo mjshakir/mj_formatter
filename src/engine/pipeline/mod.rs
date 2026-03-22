@@ -119,6 +119,7 @@ pub(super) struct PolicyPipelineRunState<'a> {
     rollback_count: usize,
     rename_coverage_signal: Option<f64>,
     checkpoint_retry_batch_size: Option<usize>,
+    prev_tree_for_text: Option<Tree>,
 }
 
 impl<'a> PolicyPipelineRunState<'a> {
@@ -138,10 +139,10 @@ impl<'a> PolicyPipelineRunState<'a> {
         self.cached_tree_error_lines.as_ref().unwrap()
     }
 
-    fn invalidate_semantic_state(&mut self, is_semantic_rewrite: bool) {
-        self.tree_for_text = None;
+    fn invalidate_semantic_state(&mut self, is_semantic_rewrite: bool, clang_invalidating: bool) {
+        self.prev_tree_for_text = self.tree_for_text.take();
         self.cached_tree_error_lines = None;
-        if is_semantic_rewrite {
+        if is_semantic_rewrite && clang_invalidating {
             self.clang_for_text = None;
             self.clang_structural_edits_since_parse = 0;
         } else {
@@ -200,6 +201,10 @@ struct CommitPolicyInput<'a> {
     policy_started: Instant,
     coordinated: CoordinatedPolicyStage,
     is_semantic_rewrite: bool,
+    clang_invalidating: bool,
+    parse_ms: f64,
+    execute_ms: f64,
+    checkpoint_ms: f64,
 }
 
 pub(super) struct PartialRollbackInput<'a> {
@@ -337,6 +342,7 @@ impl PolicyPipeline {
         options: &PolicyRunOptions,
     ) -> Result<FormatPassResult> {
         let mut state = self.initialize_run_state(text, path, options);
+        let boot_parse_started = Instant::now();
         // Eagerly compute certainty before the policy loop so that
         // fuzzy_execution_level() and all downstream gates
         // receive real Kalman state instead of None/defaults.
@@ -370,6 +376,15 @@ impl PolicyPipeline {
                 Some(&certainty),
             );
         }
+        let boot_parse_ms = boot_parse_started.elapsed().as_secs_f64() * 1000.0;
+        if options.observation_only {
+            PolicyTelemetry::record_batch(&state.telemetry_samples);
+            return Ok(FormatPassResult {
+                policy_certainty: state.cached_certainty,
+                boot_parse_ms,
+                ..Default::default()
+            });
+        }
         self.record_initial_fidelity_warnings(&mut state);
         for policy in &self.policies {
             self.run_policy_stage(&mut state, policy.as_ref())?;
@@ -402,6 +417,7 @@ impl PolicyPipeline {
             metrics: FormatPassMetrics::default(),
             policy_certainty: state.cached_certainty,
             rollback_count: state.rollback_count,
+            boot_parse_ms,
         })
     }
 
@@ -464,6 +480,7 @@ impl PolicyPipeline {
             rollback_count: 0,
             rename_coverage_signal: None,
             checkpoint_retry_batch_size: None,
+            prev_tree_for_text: None,
         }
     }
 
@@ -566,16 +583,38 @@ impl PolicyPipeline {
                 policy_name,
                 policy_started.elapsed(),
             ));
+            state.policy_traces.push(PolicyExecutionTrace {
+                policy: policy_name.into(),
+                parse_mode: "blocked".to_string(),
+                elapsed_ms: policy_started.elapsed().as_secs_f64() * 1000.0,
+                ..Default::default()
+            });
+            return Ok(());
+        }
+        if state.options.is_policy_skipped(policy_name) {
+            state.telemetry_samples.push(PolicyExecutionSample::blocked(
+                policy_name,
+                policy_started.elapsed(),
+            ));
+            state.policy_traces.push(PolicyExecutionTrace {
+                policy: policy_name.into(),
+                parse_mode: "skipped".to_string(),
+                elapsed_ms: policy_started.elapsed().as_secs_f64() * 1000.0,
+                ..Default::default()
+            });
             return Ok(());
         }
 
         self.ensure_policy_parse_stage(state, policy, policy_name, policy_started)?;
+        let parse_end = Instant::now();
         let Some(prepared) = self.prepare_policy_stage(state, policy_name, policy_started) else {
             return Ok(());
         };
         let is_semantic_rewrite = prepared.capability.semantic_rewrite;
+        let clang_invalidating = prepared.capability.clang_invalidating;
         let is_whitespace_safe = prepared.capability.whitespace_safe;
         let executed = self.execute_policy_stage(state, policy, prepared, policy_started)?;
+        let execute_end = Instant::now();
         if executed.result.edits.is_empty()
             && executed.result.violations.is_empty()
             && text_scan::TEXT_SCAN.strings_equal(&executed.result.text, &state.current)
@@ -586,19 +625,33 @@ impl PolicyPipeline {
                 0,
                 0,
             ));
-            return Ok(());
-        }
-        let coordinated = self.coordinate_policy_stage(state, policy_name, executed);
-        if is_whitespace_safe && coordinated.text_changed {
-            self.commit_policy_stage(state, CommitPolicyInput {
-                policy_name, policy_started, coordinated, is_semantic_rewrite,
+            state.policy_traces.push(PolicyExecutionTrace {
+                policy: policy_name.into(),
+                parse_mode: "n/a".to_string(),
+                elapsed_ms: policy_started.elapsed().as_secs_f64() * 1000.0,
+                parse_ms: parse_end.duration_since(policy_started).as_secs_f64() * 1000.0,
+                execute_ms: execute_end.duration_since(parse_end).as_secs_f64() * 1000.0,
+                ..Default::default()
             });
             return Ok(());
         }
+        let coordinated = self.coordinate_policy_stage(state, policy_name, executed);
+        let parse_ms = parse_end.duration_since(policy_started).as_secs_f64() * 1000.0;
+        let execute_ms = execute_end.duration_since(parse_end).as_secs_f64() * 1000.0;
+        if is_whitespace_safe && coordinated.text_changed {
+            self.commit_policy_stage(state, CommitPolicyInput {
+                policy_name, policy_started, coordinated, is_semantic_rewrite, clang_invalidating,
+                parse_ms, execute_ms, checkpoint_ms: 0.0,
+            });
+            return Ok(());
+        }
+        let checkpoint_started = Instant::now();
         match self.checkpoint_policy_stage(state, &coordinated, policy_name) {
             PolicyCheckpointResult::Accept { validated_tree } => {
+                let checkpoint_ms = checkpoint_started.elapsed().as_secs_f64() * 1000.0;
                 self.commit_policy_stage(state, CommitPolicyInput {
-                    policy_name, policy_started, coordinated, is_semantic_rewrite,
+                    policy_name, policy_started, coordinated, is_semantic_rewrite, clang_invalidating,
+                    parse_ms, execute_ms, checkpoint_ms,
                 });
                 if let Some(tree) = validated_tree {
                     state.tree_for_text = Some(tree);
@@ -610,6 +663,7 @@ impl PolicyPipeline {
                 validated_tree,
                 warning,
             } => {
+                let checkpoint_ms = checkpoint_started.elapsed().as_secs_f64() * 1000.0;
                 state.all_warnings.push(warning);
                 let edit_count = recovered_edits.len();
                 state.policy_traces.push(PolicyExecutionTrace {
@@ -624,6 +678,7 @@ impl PolicyPipeline {
                     confidence_threshold: coordinated.confidence_threshold,
                     executor_scope: state.options.retry_scope_stage,
                     elapsed_ms: policy_started.elapsed().as_secs_f64() * 1000.0,
+                    parse_ms, execute_ms, checkpoint_ms,
                     candidate_trace: Vec::new(),
                 });
                 state.telemetry_samples.push(PolicyExecutionSample::success(
@@ -639,7 +694,7 @@ impl PolicyPipeline {
                     state.tree_for_text = Some(tree);
                 }
                 if is_semantic_rewrite {
-                    state.invalidate_semantic_state(true);
+                    state.invalidate_semantic_state(true, clang_invalidating);
                 }
             }
             PolicyCheckpointResult::Rollback { reason, after_error_count } => {
@@ -664,7 +719,8 @@ impl PolicyPipeline {
                             match self.checkpoint_policy_stage(state, &retry_coordinated, policy_name) {
                                 PolicyCheckpointResult::Accept { validated_tree } => {
                                     self.commit_policy_stage(state, CommitPolicyInput {
-                                        policy_name, policy_started, coordinated: retry_coordinated, is_semantic_rewrite,
+                                        policy_name, policy_started, coordinated: retry_coordinated, is_semantic_rewrite, clang_invalidating,
+                                        parse_ms, execute_ms, checkpoint_ms: checkpoint_started.elapsed().as_secs_f64() * 1000.0,
                                     });
                                     if let Some(tree) = validated_tree {
                                         state.tree_for_text = Some(tree);
@@ -723,17 +779,16 @@ impl PolicyPipeline {
             && state.semantic_compdb_context_for_file;
 
         if needs_tree && needs_clang {
-            // Dispatch clang first (non-blocking), then parse tree-sitter (fast, local),
+            // Dispatch clang (non-blocking). Then parse tree-sitter (fast, local),
             // then collect clang result with bounded deadline.
-            let clang_handle = self
-                .parser_manager
-                .dispatch_clang(&state.current, state.path);
+            let clang_handle = self.parser_manager.dispatch_clang(&state.current, state.path);
             let tree_result = self
                 .parser_manager
-                .parse_tree_sitter(&state.current, state.path);
+                .parse_tree_sitter_with_old(&state.current, state.path, state.prev_tree_for_text.as_ref());
             match tree_result {
                 Ok(value) => {
                     state.tree_for_text = Some(value);
+                    state.prev_tree_for_text = None;
                 }
                 Err(err) => {
                     state.telemetry_samples.push(PolicyExecutionSample::failed(
@@ -774,7 +829,7 @@ impl PolicyPipeline {
         } else if needs_tree {
             let parsed = match self
                 .parser_manager
-                .parse_tree_sitter(&state.current, state.path)
+                .parse_tree_sitter_with_old(&state.current, state.path, state.prev_tree_for_text.as_ref())
             {
                 Ok(value) => value,
                 Err(err) => {
@@ -789,11 +844,9 @@ impl PolicyPipeline {
                 }
             };
             state.tree_for_text = Some(parsed);
+            state.prev_tree_for_text = None;
         } else if needs_clang {
-            let parsed = match self
-                .parser_manager
-                .parse_clang(&state.current, state.path)
-            {
+            let parsed = match self.parser_manager.parse_clang(&state.current, state.path) {
                 Ok(value) => value,
                 Err(err) => {
                     state.telemetry_samples.push(PolicyExecutionSample::failed(
@@ -1353,6 +1406,10 @@ impl PolicyPipeline {
             policy_started,
             coordinated,
             is_semantic_rewrite,
+            clang_invalidating,
+            parse_ms,
+            execute_ms,
+            checkpoint_ms,
         } = input;
         Self::append_selected_candidates(
             &mut state.selected_candidates,
@@ -1374,6 +1431,7 @@ impl PolicyPipeline {
             confidence_threshold: coordinated.confidence_threshold,
             executor_scope: state.options.retry_scope_stage,
             elapsed_ms: policy_started.elapsed().as_secs_f64() * 1000.0,
+            parse_ms, execute_ms, checkpoint_ms,
             candidate_trace: coordinated.candidate_trace,
         });
 
@@ -1408,7 +1466,7 @@ impl PolicyPipeline {
         state.all_edits.extend(coordinated.result.edits);
         state.all_warnings.extend(coordinated.result.warnings);
         if coordinated.text_changed {
-            state.invalidate_semantic_state(is_semantic_rewrite);
+            state.invalidate_semantic_state(is_semantic_rewrite, clang_invalidating);
         }
     }
 
