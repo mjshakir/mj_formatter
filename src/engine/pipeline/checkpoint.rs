@@ -25,9 +25,10 @@ impl PolicyPipeline {
 
         let after_tree = self
             .parser_manager
-            .parse_tree_sitter(
+            .parse_tree_sitter_with_old(
                 &coordinated.result.text,
                 state.path,
+                state.tree_for_text.as_ref(),
             );
 
         match after_tree {
@@ -38,12 +39,29 @@ impl PolicyPipeline {
                         validated_tree: Some(tree),
                     };
                 }
-                if let Ok(before_clang) = self.parser_manager.parse_clang(&state.current, state.path) {
+                let after_clang_handle = self.parser_manager.dispatch_clang(
+                    &coordinated.result.text,
+                    state.path,
+                ).ok().flatten();
+                let before_clang_result = state.clang_for_text.as_ref()
+                    .map(|c| Ok(std::sync::Arc::clone(c)))
+                    .unwrap_or_else(|| self.parser_manager.parse_clang(&state.current, state.path));
+                if let Ok(before_clang) = before_clang_result {
                     let before_clang_errors = before_clang.error_diagnostic_count();
-                    if let Ok(after_clang) = self.parser_manager.parse_clang(
-                        &coordinated.result.text,
-                        state.path,
-                    ) {
+                    let after_clang_result = if let Some(handle) = after_clang_handle {
+                        self.parser_manager.collect_clang(
+                            handle,
+                            &coordinated.result.text,
+                            state.path,
+                            std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        )
+                    } else {
+                        self.parser_manager.parse_clang(
+                            &coordinated.result.text,
+                            state.path,
+                        )
+                    };
+                    if let Ok(after_clang) = after_clang_result {
                         if after_clang.error_diagnostic_count() <= before_clang_errors {
                             tracing::info!(
                                 "checkpoint: '{}' tree-sitter +{} error(s) but clang OK — accepting (tree-sitter false positive)",
@@ -112,7 +130,7 @@ impl PolicyPipeline {
         let recovered_text = recovered?;
         let recovered_tree = self
             .parser_manager
-            .parse_tree_sitter(&recovered_text, state.path)
+            .parse_tree_sitter_with_old(&recovered_text, state.path, state.tree_for_text.as_ref())
             .ok()?;
         let recovered_errors =
             crate::parser::ts_traversal::tree_error_stats(&recovered_tree).error_nodes;
