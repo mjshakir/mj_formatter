@@ -1,24 +1,26 @@
 [package]
 name = "formatter"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "MJ Formatter — adaptive C++ code formatter with semantic policy pipeline"
+description = "Formatter — adaptive C++ code formatter with semantic policy pipeline"
 license = "MIT"
 default-run = "formatter"
 
 [dependencies]
 anyhow = "1.0"
-arc-swap = "1.7"
-bincode = { version = "2.0.1", features = ["serde"] }
+smallvec = { version = "1.15", features = ["serde"] }
+arc-swap = "1.9"
+bincode = { version = "2.0", features = ["serde"] }
 clang = { version = "2.0", features = ["runtime"] }
 clap = { version = "4", features = ["derive"] }
-crc32fast = "1.4"
+crc32fast = "1.5"
 crossbeam-channel = "0.5"
-dashmap = "6"
+dashmap = "6.1"
 globset = "0.4"
 libc = "0.2"
 memchr = "2"
-rayon = "1.10"
+rayon = "1.11"
+rustc-hash = "2"
 moka = { version = "0.12", features = ["sync"] }
 reed-solomon-erasure = "6"
 serde = { version = "1.0", features = ["derive"] }
