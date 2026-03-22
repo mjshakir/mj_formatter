@@ -85,22 +85,13 @@ struct PersistentWorkerProcess {
 
 impl App {
     fn encode_worker_payload<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-        bincode::serde::encode_to_vec(value, bincode::config::standard())
+        postcard::to_allocvec(value)
             .context("failed serializing worker payload")
     }
 
     fn decode_worker_payload<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-        let (decoded, consumed) =
-            bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-                .context("failed parsing worker payload")?;
-        if consumed != bytes.len() {
-            return Err(anyhow!(
-                "worker payload had trailing data: consumed {} of {} bytes",
-                consumed,
-                bytes.len()
-            ));
-        }
-        Ok(decoded)
+        postcard::from_bytes(bytes)
+            .context("failed parsing worker payload")
     }
 
     fn write_framed<W: Write, T: Serialize>(

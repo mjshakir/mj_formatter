@@ -232,11 +232,8 @@ impl DispatchFeatureCache {
                 };
             }
         };
-        let snapshot = match bincode::serde::decode_from_slice::<DispatchFeatureCacheSnapshot, _>(
-            bytes.as_slice(),
-            bincode::config::standard(),
-        ) {
-            Ok((snapshot, consumed)) if consumed == bytes.len() => snapshot,
+        let snapshot = match postcard::from_bytes::<DispatchFeatureCacheSnapshot>(bytes.as_slice()) {
+            Ok(snapshot) => snapshot,
             _ => {
                 return Self {
                     path,
@@ -286,7 +283,7 @@ impl DispatchFeatureCache {
             version: DISPATCH_FEATURE_CACHE_VERSION,
             entries: entries.into_iter().collect(),
         };
-        let bytes = bincode::serde::encode_to_vec(&snapshot, bincode::config::standard())
+        let bytes = postcard::to_allocvec(&snapshot)
             .context("failed serializing dispatch feature cache")?;
         AtomicWriter::write_bytes(self.path.as_path(), bytes.as_slice()).with_context(|| {
             format!(
@@ -345,11 +342,8 @@ impl DispatchHistoryStore {
                 };
             }
         };
-        let snapshot = match bincode::serde::decode_from_slice::<DispatchHistorySnapshot, _>(
-            bytes.as_slice(),
-            bincode::config::standard(),
-        ) {
-            Ok((snapshot, consumed)) if consumed == bytes.len() => snapshot,
+        let snapshot = match postcard::from_bytes::<DispatchHistorySnapshot>(bytes.as_slice()) {
+            Ok(snapshot) => snapshot,
             _ => {
                 return Self {
                     path,
@@ -432,7 +426,7 @@ impl DispatchHistoryStore {
             version: DISPATCH_HISTORY_VERSION,
             entries: entries.into_iter().collect(),
         };
-        let bytes = bincode::serde::encode_to_vec(&snapshot, bincode::config::standard())
+        let bytes = postcard::to_allocvec(&snapshot)
             .context("failed serializing dispatch history")?;
         AtomicWriter::write_bytes(self.path.as_path(), bytes.as_slice())
             .with_context(|| format!("failed writing dispatch history {}", self.path.display()))

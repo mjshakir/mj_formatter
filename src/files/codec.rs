@@ -137,8 +137,8 @@ impl StateCodec {
     where
         T: Serialize,
     {
-        let payload = bincode::serde::encode_to_vec(value, bincode::config::standard())
-            .context("failed bincode state encoding")?;
+        let payload = postcard::to_allocvec(value)
+            .context("failed postcard state encoding")?;
         let layout = EccLayout::for_payload_len(payload.len())?;
         let payload_len = u32::try_from(payload.len()).context("payload size exceeds u32")?;
         let payload_checksum = crc32fast::hash(payload.as_slice());
@@ -306,18 +306,8 @@ impl StateCodec {
             );
         }
 
-        let (decoded, consumed) = bincode::serde::decode_from_slice::<T, _>(
-            payload.as_slice(),
-            bincode::config::standard(),
-        )
-        .context("failed bincode state decoding")?;
-        if consumed != payload.len() {
-            anyhow::bail!(
-                "failed bincode state decoding: trailing bytes (consumed {}, total {})",
-                consumed,
-                payload.len()
-            );
-        }
+        let decoded = postcard::from_bytes::<T>(payload.as_slice())
+            .context("failed postcard state decoding")?;
         Ok(decoded)
     }
 }

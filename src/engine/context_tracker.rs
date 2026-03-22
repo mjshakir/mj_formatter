@@ -113,8 +113,8 @@ impl PolicyContextTracker {
     }
 
     pub fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
-        let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("bincode encode: {}", e))?;
+        let bytes = postcard::to_allocvec(self)
+            .map_err(|e| anyhow::anyhow!("postcard encode: {}", e))?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -124,8 +124,7 @@ impl PolicyContextTracker {
 
     pub fn load_from_path(path: &Path) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
-        let (tracker, _): (Self, _) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
+        let tracker = postcard::from_bytes::<Self>(&bytes).ok()?;
         Some(tracker)
     }
 

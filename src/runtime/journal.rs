@@ -103,7 +103,7 @@ impl RunJournal {
     }
 
     fn persist(&self) -> Result<()> {
-        let content = bincode::serde::encode_to_vec(&self.payload, bincode::config::standard())
+        let content = postcard::to_allocvec(&self.payload)
             .map_err(|err| anyhow!("failed serializing run journal: {err}"))?;
         AtomicWriter::write_bytes(self.path.as_path(), content.as_slice())?;
         Ok(())

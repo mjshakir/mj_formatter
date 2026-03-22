@@ -250,7 +250,7 @@ impl ClangParseService {
     }
 
     fn write_payload<T: Serialize, W: Write>(writer: &mut W, value: &T) -> Result<(), String> {
-        let payload = bincode::serde::encode_to_vec(value, bincode::config::standard())
+        let payload = postcard::to_allocvec(value)
             .map_err(|err| format!("failed serializing payload: {err}"))?;
         let len = u64::try_from(payload.len()).map_err(|_| "payload too large".to_string())?;
         writer
@@ -281,17 +281,8 @@ impl ClangParseService {
         reader
             .read_exact(payload.as_mut_slice())
             .map_err(|err| format!("failed reading payload body: {err}"))?;
-        let (decoded, consumed) = bincode::serde::decode_from_slice::<T, _>(
-            payload.as_slice(),
-            bincode::config::standard(),
-        )
-        .map_err(|err| format!("failed decoding payload: {err}"))?;
-        if consumed != payload.len() {
-            return Err(format!(
-                "payload decode consumed {consumed} of {} bytes",
-                payload.len()
-            ));
-        }
+        let decoded = postcard::from_bytes::<T>(payload.as_slice())
+            .map_err(|err| format!("failed decoding payload: {err}"))?;
         Ok(Some(decoded))
     }
 }

@@ -59,7 +59,7 @@ impl ReporterProcess {
             let mut writer = BufWriter::with_capacity(65536, child_stdin);
             while let Ok(record) = receiver.recv() {
                 let payload =
-                    match bincode::serde::encode_to_vec(&record, bincode::config::standard()) {
+                    match postcard::to_allocvec(&record) {
                         Ok(bytes) => bytes,
                         Err(err) => {
                             warn!("reporter: failed serializing record: {}", err);
@@ -168,11 +168,8 @@ pub fn run_reporter_entry(report_path: &Path) -> Result<()> {
             }
         };
 
-        let record: ReportRecord = match bincode::serde::decode_from_slice(
-            payload.as_slice(),
-            bincode::config::standard(),
-        ) {
-            Ok((record, _)) => record,
+        let record: ReportRecord = match postcard::from_bytes(payload.as_slice()) {
+            Ok(record) => record,
             Err(err) => {
                 warn!("reporter: deserialization error: {}", err);
                 continue;

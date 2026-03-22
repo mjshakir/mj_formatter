@@ -94,8 +94,8 @@ impl CertaintyFilterStore {
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
-        let bytes = bincode::serde::encode_to_vec(&map, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("bincode encode: {}", e))?;
+        let bytes = postcard::to_allocvec(&map)
+            .map_err(|e| anyhow::anyhow!("postcard encode: {}", e))?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -108,8 +108,8 @@ impl CertaintyFilterStore {
         population_context: Option<&crate::engine::population_context::PopulationContext>,
     ) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
-        let (map, _): (HashMap<String, CertaintyFilterState>, _) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
+        let map: HashMap<String, CertaintyFilterState> =
+            postcard::from_bytes(&bytes).ok()?;
         if map.is_empty() {
             return None;
         }
@@ -125,8 +125,8 @@ impl CertaintyFilterStore {
             .exists()
             .then(|| {
                 let bytes = std::fs::read(path.with_extension("adaptive_rules.bin")).ok()?;
-                let (rules, _): (AdaptiveRuleBases, _) =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
+                let rules: AdaptiveRuleBases =
+                    postcard::from_bytes(&bytes).ok()?;
                 Some(rules)
             })
             .flatten()
