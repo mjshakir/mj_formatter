@@ -47,14 +47,14 @@ impl CompdbIndex {
         self.key.as_ref()
     }
 
-    pub(crate) fn args_exact_for_path(&self, path: &Path) -> Option<Vec<String>> {
+    pub(crate) fn args_exact(&self, path: &Path) -> Option<Vec<String>> {
         let items = self.args_by_path.as_ref()?;
         let normalized = Self::normalize_path(path);
         items.get(normalized.as_str()).cloned()
     }
 
     pub(crate) fn has_exact_entry_for_path(&self, path: &Path) -> bool {
-        self.args_exact_for_path(path).is_some()
+        self.args_exact(path).is_some()
     }
 
     pub(crate) fn semantic_context_kind_for_path(&self, path: &Path) -> SemanticCompdbContextKind {
@@ -87,14 +87,14 @@ impl CompdbIndex {
     }
 
     pub(crate) fn header_consensus_arg_sets(&self, header_path: &Path) -> Vec<Vec<String>> {
-        Self::collect_header_arg_sets(
+        Self::header_arg_sets(
             self.header_consensus_candidates(header_path).into_iter(),
             false,
         )
     }
 
     pub(crate) fn header_paired_source_arg_sets(&self, header_path: &Path) -> Vec<Vec<String>> {
-        Self::collect_header_arg_sets(
+        Self::header_arg_sets(
             self.header_consensus_candidates(header_path).into_iter(),
             true,
         )
@@ -178,7 +178,7 @@ impl CompdbIndex {
         candidates
     }
 
-    fn collect_header_arg_sets(
+    fn header_arg_sets(
         candidates: impl Iterator<Item = HeaderConsensusCandidate>,
         paired_only: bool,
     ) -> Vec<Vec<String>> {

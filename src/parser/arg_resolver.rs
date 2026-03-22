@@ -300,7 +300,7 @@ mod tests {
     use super::{ClangArgumentResolver, ClangProbeOutputs};
 
     #[test]
-    fn probe_outputs_are_cached_per_binary() {
+    fn probes_cached_binary() {
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         let binary = format!("clang-probe-cache-test-{}", std::process::id());
 
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_outputs_are_isolated_by_binary() {
+    fn probes_isolated_binary() {
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         let first_binary = format!("clang-probe-a-{}", std::process::id());
         let second_binary = format!("clang-probe-b-{}", std::process::id());

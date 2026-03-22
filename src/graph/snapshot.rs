@@ -305,7 +305,7 @@ mod tests {
     use crate::graph::symbol_id::SymbolId;
 
     #[test]
-    fn affected_file_paths_returns_reference_neighbors_for_changed_file() {
+    fn returns_ref_neighbors() {
         let mut state = ProjectGraphState::new();
         let file_a = std::path::PathBuf::from("a.hpp");
         let file_b = std::path::PathBuf::from("b.cpp");
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn affected_file_paths_respects_max_files_cap() {
+    fn respects_max_files() {
         let mut state = ProjectGraphState::new();
         let changed = std::path::PathBuf::from("changed.hpp");
         let changed_id = file_symbol_id(changed.as_path());
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn affected_file_paths_prefers_tighter_high_consensus_symbols() {
+    fn prefers_tight_consensus() {
         let mut state = ProjectGraphState::new();
         let changed = std::path::PathBuf::from("changed.hpp");
         let changed_id = file_symbol_id(changed.as_path());

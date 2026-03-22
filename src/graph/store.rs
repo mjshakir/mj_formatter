@@ -15,10 +15,44 @@ use crate::graph::types::GraphEdge;
 use crate::graph::types::GraphNode;
 use crate::graph::types::GraphShape;
 use crate::graph::types::NodeMetrics;
-use crate::graph::persist_stats::ProjectGraphPersistStats;
 use crate::graph::snapshot::ProjectGraphSnapshot;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PersistStats {
+    pub generation: u64,
+    pub prune_enabled: bool,
+    pub tombstone_enabled: bool,
+    pub before: GraphShape,
+    pub after: GraphShape,
+}
+
+impl PersistStats {
+    pub fn nodes_removed(self) -> usize {
+        self.before.nodes.saturating_sub(self.after.nodes)
+    }
+
+    pub fn edges_removed(self) -> usize {
+        self.before.edges.saturating_sub(self.after.edges)
+    }
+
+    pub fn metrics_removed(self) -> usize {
+        self.before.metrics.saturating_sub(self.after.metrics)
+    }
+
+    pub fn tombstones_added(self) -> usize {
+        self.after.tombstones.saturating_sub(self.before.tombstones)
+    }
+
+    pub fn tombstones_removed(self) -> usize {
+        self.before.tombstones.saturating_sub(self.after.tombstones)
+    }
+
+    pub fn changed(self) -> bool {
+        self.before != self.after
+    }
+}
 use crate::graph::state::{
-    PolicyClusterLearningStats, ProjectGraphState, RetryStrategyLearningStats,
+    PolicyClusterLearningStats, ProjectGraphState, RetryStats,
     PROJECT_GRAPH_SCHEMA_VERSION,
 };
 use crate::graph::symbol_id::SymbolId;
@@ -53,20 +87,20 @@ struct ProjectGraphStateV6 {
     #[serde(default)]
     convergence_pairs: BTreeMap<String, u64>,
     #[serde(default)]
-    convergence_pair_last_seen_unix_ms: BTreeMap<String, u64>,
+    pair_last_seen_ms: BTreeMap<String, u64>,
     #[serde(default)]
     policy_cluster_learning: BTreeMap<String, PolicyClusterLearningStatsV6>,
     #[serde(default)]
-    retry_strategy_learning: BTreeMap<String, RetryStrategyLearningStats>,
+    retry_strategy_learning: BTreeMap<String, RetryStats>,
     #[serde(default)]
     retry_culprit_pairs: BTreeMap<String, u64>,
 }
 
 impl From<ProjectGraphStateV6> for ProjectGraphState {
     fn from(value: ProjectGraphStateV6) -> Self {
-        let mut policy_cluster_learning = BTreeMap::<String, PolicyClusterLearningStats>::new();
+        let mut cluster_learning = BTreeMap::<String, PolicyClusterLearningStats>::new();
         for (key, legacy_stats) in value.policy_cluster_learning {
-            policy_cluster_learning.insert(
+            cluster_learning.insert(
                 key,
                 PolicyClusterLearningStats {
                     decisions: legacy_stats.decisions,
@@ -91,10 +125,10 @@ impl From<ProjectGraphStateV6> for ProjectGraphState {
             metrics: value.metrics,
             tombstones: value.tombstones,
             convergence_pairs: value.convergence_pairs,
-            convergence_pair_last_seen_unix_ms: value.convergence_pair_last_seen_unix_ms,
-            policy_cluster_learning,
-            retry_strategy_learning: value.retry_strategy_learning,
-            retry_culprit_pairs: value.retry_culprit_pairs,
+            pair_last_seen_ms: value.pair_last_seen_ms,
+            cluster_learning,
+            retry_learning: value.retry_strategy_learning,
+            culprit_pairs: value.retry_culprit_pairs,
         }
     }
 }
@@ -181,14 +215,14 @@ impl ProjectGraphStore {
 
     #[cfg(test)]
     pub fn persist_state(&self, state: &ProjectGraphState) -> Result<ProjectGraphSnapshot> {
-        let (snapshot, _) = self.persist_state_with_stats(state)?;
+        let (snapshot, _) = self.persist_with_stats(state)?;
         Ok(snapshot)
     }
 
-    pub fn persist_state_with_stats(
+    pub fn persist_with_stats(
         &self,
         state: &ProjectGraphState,
-    ) -> Result<(ProjectGraphSnapshot, ProjectGraphPersistStats)> {
+    ) -> Result<(ProjectGraphSnapshot, PersistStats)> {
         let next_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let mut to_persist = state.clone();
         to_persist.normalize_schema();
@@ -226,7 +260,7 @@ impl ProjectGraphStore {
             Arc::new(payload.state),
             self.options.tombstone_decay_ms,
         );
-        let stats = ProjectGraphPersistStats {
+        let stats = PersistStats {
             generation: next_generation,
             prune_enabled: self.options.prune_enabled,
             tombstone_enabled: self.options.tombstone_enabled,
@@ -391,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn update_api_mutates_persisted_state() {
+    fn api_mutates_state() {
         let path = temp_graph_path();
         let store = ProjectGraphStore::open(path.as_path()).expect("open store");
 
@@ -417,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_applies_compaction_options() {
+    fn persist_compaction_options() {
         let path = temp_graph_path();
         let store = ProjectGraphStore::open_with_options(
             path.as_path(),
@@ -500,7 +534,7 @@ mod tests {
             },
         );
 
-        let (written, stats) = store.persist_state_with_stats(&state).expect("persist");
+        let (written, stats) = store.persist_with_stats(&state).expect("persist");
         assert_eq!(written.node_count(), 2);
         assert_eq!(written.edge_count(), 1);
         assert_eq!(written.state().metrics.len(), 1);
@@ -515,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_applies_convergence_decay_options() {
+    fn persist_decay_options() {
         let path = temp_graph_path();
         let store = ProjectGraphStore::open_with_options(
             path.as_path(),
@@ -535,7 +569,7 @@ mod tests {
         .expect("open store");
 
         let mut state = ProjectGraphState::new();
-        state.record_convergence_pair_at("naming_conventions", "clang_format", 100, 1);
+        state.record_pair_at("naming_conventions", "clang_format", 100, 1);
 
         let written = store.persist_state(&state).expect("persist");
         assert_eq!(
@@ -550,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn load_snapshot_decodes_legacy_v6_payload() {
+    fn decodes_legacy_v6() {
         let path = temp_graph_path();
         let mut legacy_state = super::ProjectGraphStateV6 {
             schema_version: 6,
@@ -574,7 +608,7 @@ mod tests {
 
         let store = ProjectGraphStore::open(path.as_path()).expect("open store");
         let snapshot = store.load_snapshot().expect("load legacy snapshot");
-        let clusters = snapshot.state().policy_cluster_learning_snapshot();
+        let clusters = snapshot.state().cluster_snapshot();
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].policy, "naming_conventions");
         assert_eq!(clusters[0].cluster, 42);

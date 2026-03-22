@@ -52,20 +52,23 @@ impl PolicyClusterLearningStats {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RetryStrategyLearningStats {
+#[serde(rename = "RetryStrategyLearningStats")]
+pub struct RetryStats {
     pub attempts: u64,
     pub successes: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PolicyClusterLearningSnapshotEntry {
+#[serde(rename = "PolicyClusterLearningSnapshotEntry")]
+pub struct ClusterSnapshot {
     pub policy: PolicyName,
     pub cluster: u64,
     pub stats: PolicyClusterLearningStats,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RetryCulpritPairSnapshotEntry {
+#[serde(rename = "RetryCulpritPairSnapshotEntry")]
+pub struct CulpritSnapshot {
     pub culprit_policy: PolicyName,
     pub peer_policy: PolicyName,
     pub count: u64,
@@ -81,14 +84,14 @@ pub struct ProjectGraphState {
     pub tombstones: BTreeMap<SymbolId, SymbolTombstone>,
     #[serde(default)]
     pub convergence_pairs: BTreeMap<String, u64>,
-    #[serde(default)]
-    pub convergence_pair_last_seen_unix_ms: BTreeMap<String, u64>,
-    #[serde(default)]
-    pub policy_cluster_learning: BTreeMap<String, PolicyClusterLearningStats>,
-    #[serde(default)]
-    pub retry_strategy_learning: BTreeMap<String, RetryStrategyLearningStats>,
-    #[serde(default)]
-    pub retry_culprit_pairs: BTreeMap<String, u64>,
+    #[serde(default, alias = "convergence_pair_last_seen_unix_ms")]
+    pub pair_last_seen_ms: BTreeMap<String, u64>,
+    #[serde(default, alias = "policy_cluster_learning")]
+    pub cluster_learning: BTreeMap<String, PolicyClusterLearningStats>,
+    #[serde(default, alias = "retry_strategy_learning")]
+    pub retry_learning: BTreeMap<String, RetryStats>,
+    #[serde(default, alias = "retry_culprit_pairs")]
+    pub culprit_pairs: BTreeMap<String, u64>,
 }
 
 impl ProjectGraphState {
@@ -100,10 +103,10 @@ impl ProjectGraphState {
             metrics: BTreeMap::new(),
             tombstones: BTreeMap::new(),
             convergence_pairs: BTreeMap::new(),
-            convergence_pair_last_seen_unix_ms: BTreeMap::new(),
-            policy_cluster_learning: BTreeMap::new(),
-            retry_strategy_learning: BTreeMap::new(),
-            retry_culprit_pairs: BTreeMap::new(),
+            pair_last_seen_ms: BTreeMap::new(),
+            cluster_learning: BTreeMap::new(),
+            retry_learning: BTreeMap::new(),
+            culprit_pairs: BTreeMap::new(),
         }
     }
 
@@ -165,10 +168,10 @@ impl ProjectGraphState {
     }
 
     pub fn record_convergence_pair(&mut self, loser: &str, winner: &str, count: u64) {
-        self.record_convergence_pair_at(loser, winner, count, current_unix_ms());
+        self.record_pair_at(loser, winner, count, current_unix_ms());
     }
 
-    pub fn record_convergence_pair_at(
+    pub fn record_pair_at(
         &mut self,
         loser: &str,
         winner: &str,
@@ -180,7 +183,7 @@ impl ProjectGraphState {
         }
         let key = Self::convergence_pair_key(loser, winner);
         *self.convergence_pairs.entry(key.clone()).or_insert(0) += count;
-        self.convergence_pair_last_seen_unix_ms
+        self.pair_last_seen_ms
             .insert(key, now_unix_ms);
     }
 
@@ -199,7 +202,7 @@ impl ProjectGraphState {
         let mut updated_last_seen = BTreeMap::<String, u64>::new();
         for (key, count) in &self.convergence_pairs {
             let last_seen = self
-                .convergence_pair_last_seen_unix_ms
+                .pair_last_seen_ms
                 .get(key)
                 .copied()
                 .unwrap_or(now_unix_ms);
@@ -216,11 +219,11 @@ impl ProjectGraphState {
             }
         }
         self.convergence_pairs = updated_pairs;
-        self.convergence_pair_last_seen_unix_ms = updated_last_seen;
+        self.pair_last_seen_ms = updated_last_seen;
     }
 
     #[cfg(test)]
-    pub fn record_policy_cluster_learning(
+    pub fn record_cluster(
         &mut self,
         policy: &str,
         cluster: u64,
@@ -230,7 +233,7 @@ impl ProjectGraphState {
             return;
         }
         let key = Self::policy_cluster_key(policy, cluster);
-        let entry = self.policy_cluster_learning.entry(key).or_default();
+        let entry = self.cluster_learning.entry(key).or_default();
         entry.decisions = entry.decisions.saturating_add(stats.decisions);
         entry.apply = entry.apply.saturating_add(stats.apply);
         entry.apply_partial = entry.apply_partial.saturating_add(stats.apply_partial);
@@ -242,26 +245,26 @@ impl ProjectGraphState {
         Self::merge_adaptive_hints(entry, stats);
     }
 
-    pub fn replace_policy_cluster_learning_entries(
+    pub fn replace_clusters(
         &mut self,
-        entries: &[PolicyClusterLearningSnapshotEntry],
+        entries: &[ClusterSnapshot],
     ) {
-        self.policy_cluster_learning.clear();
+        self.cluster_learning.clear();
         for entry in entries {
             if entry.policy.as_str().trim().is_empty() {
                 continue;
             }
             let key = Self::policy_cluster_key(entry.policy.as_str(), entry.cluster);
-            self.policy_cluster_learning
+            self.cluster_learning
                 .insert(key, entry.stats.clone());
         }
     }
 
-    pub fn policy_cluster_learning_snapshot(&self) -> Vec<PolicyClusterLearningSnapshotEntry> {
-        let mut snapshot = Vec::with_capacity(self.policy_cluster_learning.len());
-        for (key, stats) in &self.policy_cluster_learning {
+    pub fn cluster_snapshot(&self) -> Vec<ClusterSnapshot> {
+        let mut snapshot = Vec::with_capacity(self.cluster_learning.len());
+        for (key, stats) in &self.cluster_learning {
             if let Some((policy, cluster)) = Self::parse_policy_cluster_key(key.as_str()) {
-                snapshot.push(PolicyClusterLearningSnapshotEntry {
+                snapshot.push(ClusterSnapshot {
                     policy,
                     cluster,
                     stats: stats.clone(),
@@ -271,7 +274,7 @@ impl ProjectGraphState {
         snapshot
     }
 
-    pub fn record_retry_strategy_learning(
+    pub fn record_retry(
         &mut self,
         strategy: &str,
         context: &str,
@@ -282,16 +285,16 @@ impl ProjectGraphState {
             return;
         }
         let key = Self::retry_strategy_key(strategy, context);
-        let entry = self.retry_strategy_learning.entry(key).or_default();
+        let entry = self.retry_learning.entry(key).or_default();
         entry.attempts = entry.attempts.saturating_add(attempts);
         entry.successes = entry.successes.saturating_add(successes);
     }
 
-    pub fn retry_strategy_learning_snapshot(
+    pub fn retry_snapshot(
         &self,
-    ) -> Vec<(String, String, RetryStrategyLearningStats)> {
-        let mut snapshot = Vec::with_capacity(self.retry_strategy_learning.len());
-        for (key, stats) in &self.retry_strategy_learning {
+    ) -> Vec<(String, String, RetryStats)> {
+        let mut snapshot = Vec::with_capacity(self.retry_learning.len());
+        for (key, stats) in &self.retry_learning {
             if let Some((strategy, context)) = Self::parse_retry_strategy_key(key.as_str()) {
                 snapshot.push((strategy, context, stats.clone()));
             }
@@ -299,17 +302,17 @@ impl ProjectGraphState {
         snapshot
     }
 
-    pub fn record_retry_culprit_pair(&mut self, culprit: &str, peer: &str, count: u64) {
+    pub fn record_culprit(&mut self, culprit: &str, peer: &str, count: u64) {
         if culprit.trim().is_empty() || peer.trim().is_empty() || count == 0 {
             return;
         }
         let key = Self::retry_culprit_pair_key(culprit, peer);
-        *self.retry_culprit_pairs.entry(key).or_insert(0) += count;
+        *self.culprit_pairs.entry(key).or_insert(0) += count;
     }
 
-    pub fn record_retry_culprit_pairs(&mut self, pairs: &[RetryCulpritPairSnapshotEntry]) {
+    pub fn record_culprits(&mut self, pairs: &[CulpritSnapshot]) {
         for pair in pairs {
-            self.record_retry_culprit_pair(
+            self.record_culprit(
                 pair.culprit_policy.as_str(),
                 pair.peer_policy.as_str(),
                 pair.count,
@@ -317,11 +320,11 @@ impl ProjectGraphState {
         }
     }
 
-    pub fn retry_culprit_pairs_snapshot(&self) -> Vec<RetryCulpritPairSnapshotEntry> {
-        let mut snapshot = Vec::with_capacity(self.retry_culprit_pairs.len());
-        for (key, count) in &self.retry_culprit_pairs {
+    pub fn culprit_snapshot(&self) -> Vec<CulpritSnapshot> {
+        let mut snapshot = Vec::with_capacity(self.culprit_pairs.len());
+        for (key, count) in &self.culprit_pairs {
             if let Some((culprit, peer)) = Self::parse_retry_culprit_pair_key(key.as_str()) {
-                snapshot.push(RetryCulpritPairSnapshotEntry {
+                snapshot.push(CulpritSnapshot {
                     culprit_policy: culprit,
                     peer_policy: peer,
                     count: *count,
@@ -568,7 +571,7 @@ impl ProjectGraphState {
             .map(|(key, _)| key.clone())
             .collect::<BTreeSet<_>>();
         self.convergence_pairs = ranked.into_iter().collect();
-        self.convergence_pair_last_seen_unix_ms
+        self.pair_last_seen_ms
             .retain(|key, _| keep_keys.contains(key));
     }
 
@@ -578,9 +581,9 @@ impl ProjectGraphState {
         max_retry_entries: usize,
         max_retry_pairs: usize,
     ) {
-        if self.policy_cluster_learning.len() > max_cluster_entries {
+        if self.cluster_learning.len() > max_cluster_entries {
             let mut ranked = self
-                .policy_cluster_learning
+                .cluster_learning
                 .iter()
                 .map(|(key, stats)| {
                     (
@@ -597,13 +600,13 @@ impl ProjectGraphState {
                 .iter()
                 .map(|(key, _)| key.clone())
                 .collect::<BTreeSet<_>>();
-            self.policy_cluster_learning
+            self.cluster_learning
                 .retain(|key, _| keep.contains(key));
         }
 
-        if self.retry_strategy_learning.len() > max_retry_entries {
+        if self.retry_learning.len() > max_retry_entries {
             let mut ranked = self
-                .retry_strategy_learning
+                .retry_learning
                 .iter()
                 .map(|(key, stats)| (key.clone(), stats.attempts))
                 .collect::<Vec<_>>();
@@ -615,13 +618,13 @@ impl ProjectGraphState {
                 .iter()
                 .map(|(key, _)| key.clone())
                 .collect::<BTreeSet<_>>();
-            self.retry_strategy_learning
+            self.retry_learning
                 .retain(|key, _| keep.contains(key));
         }
 
-        if self.retry_culprit_pairs.len() > max_retry_pairs {
+        if self.culprit_pairs.len() > max_retry_pairs {
             let mut ranked = self
-                .retry_culprit_pairs
+                .culprit_pairs
                 .iter()
                 .map(|(key, count)| (key.clone(), *count))
                 .collect::<Vec<_>>();
@@ -629,7 +632,7 @@ impl ProjectGraphState {
                 right_count.cmp(left_count).then(left_key.cmp(right_key))
             });
             ranked.truncate(max_retry_pairs);
-            self.retry_culprit_pairs = ranked.into_iter().collect();
+            self.culprit_pairs = ranked.into_iter().collect();
         }
     }
 
@@ -738,7 +741,7 @@ mod tests {
     use crate::graph::types::SymbolTombstone;
 
     #[test]
-    fn upsert_edge_accumulates_weight() {
+    fn upsert_accumulates_weight() {
         let mut state = ProjectGraphState::new();
         let id_a = SymbolId::new("usr:a");
         let id_b = SymbolId::new("usr:b");
@@ -771,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_prunes_stale_nodes_edges_and_metrics() {
+    fn compact_prunes_stale() {
         let mut state = ProjectGraphState::new();
         let file_id = SymbolId::new("file|src/demo.cpp");
         let fresh = SymbolId::new("usr:fresh");
@@ -849,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_respects_node_and_edge_caps() {
+    fn compact_respects_caps() {
         let mut state = ProjectGraphState::new();
         let file_id = SymbolId::new("file|src/demo.cpp");
         let mut file_node = GraphNode::new(
@@ -899,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn symbol_signal_falls_back_to_tombstone_with_decay() {
+    fn signal_tombstone_decay() {
         let mut state = ProjectGraphState::new();
         let symbol = SymbolId::new("usr:stale");
         state.tombstones.insert(
@@ -921,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn records_and_exports_convergence_pairs() {
+    fn exports_convergence_pairs() {
         let mut state = ProjectGraphState::new();
         state.record_convergence_pair("naming_conventions", "clang_format", 3);
         state.record_convergence_pair("naming_conventions", "clang_format", 2);
@@ -939,9 +942,9 @@ mod tests {
     }
 
     #[test]
-    fn convergence_decay_initializes_timestamp_without_first_pass_loss() {
+    fn decay_init_timestamp() {
         let mut state = ProjectGraphState::new();
-        state.record_convergence_pair_at("naming_conventions", "clang_format", 10, 1_000);
+        state.record_pair_at("naming_conventions", "clang_format", 10, 1_000);
 
         state.decay_convergence_pairs(1_000, 1_000, 1);
         assert_eq!(
@@ -950,7 +953,7 @@ mod tests {
         );
         assert_eq!(
             state
-                .convergence_pair_last_seen_unix_ms
+                .pair_last_seen_ms
                 .get("naming_conventions|clang_format")
                 .copied(),
             Some(1_000)
@@ -958,9 +961,9 @@ mod tests {
     }
 
     #[test]
-    fn convergence_decay_applies_half_life_and_prunes_low_counts() {
+    fn decay_prunes_low() {
         let mut state = ProjectGraphState::new();
-        state.record_convergence_pair_at("naming_conventions", "clang_format", 3, 1_000);
+        state.record_pair_at("naming_conventions", "clang_format", 3, 1_000);
 
         state.decay_convergence_pairs(2_000, 1_000, 2);
         assert_eq!(
@@ -976,9 +979,9 @@ mod tests {
     }
 
     #[test]
-    fn records_policy_cluster_learning_entries() {
+    fn records_cluster_learning() {
         let mut state = ProjectGraphState::new();
-        state.record_policy_cluster_learning(
+        state.record_cluster(
             "naming_conventions",
             42,
             &super::PolicyClusterLearningStats {
@@ -992,7 +995,7 @@ mod tests {
                 ..super::PolicyClusterLearningStats::default()
             },
         );
-        state.record_policy_cluster_learning(
+        state.record_cluster(
             "naming_conventions",
             42,
             &super::PolicyClusterLearningStats {
@@ -1007,7 +1010,7 @@ mod tests {
             },
         );
 
-        let snapshot = state.policy_cluster_learning_snapshot();
+        let snapshot = state.cluster_snapshot();
         assert_eq!(snapshot.len(), 1);
         let stats = &snapshot[0].stats;
         assert_eq!(stats.decisions, 6);
@@ -1021,9 +1024,9 @@ mod tests {
     }
 
     #[test]
-    fn replace_policy_cluster_learning_entries_overwrites_previous_snapshot() {
+    fn clusters_overwrite_previous() {
         let mut state = ProjectGraphState::new();
-        state.record_policy_cluster_learning(
+        state.record_cluster(
             "naming_conventions",
             42,
             &super::PolicyClusterLearningStats {
@@ -1031,8 +1034,8 @@ mod tests {
                 ..super::PolicyClusterLearningStats::default()
             },
         );
-        state.replace_policy_cluster_learning_entries(&[
-            super::PolicyClusterLearningSnapshotEntry {
+        state.replace_clusters(&[
+            super::ClusterSnapshot {
                 policy: "include_order".into(),
                 cluster: 7,
                 stats: super::PolicyClusterLearningStats {
@@ -1045,7 +1048,7 @@ mod tests {
             },
         ]);
 
-        let snapshot = state.policy_cluster_learning_snapshot();
+        let snapshot = state.cluster_snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].policy, "include_order");
         assert_eq!(snapshot[0].cluster, 7);
@@ -1054,20 +1057,20 @@ mod tests {
     }
 
     #[test]
-    fn records_retry_learning_and_culprit_pairs() {
+    fn records_retry_culprits() {
         let mut state = ProjectGraphState::new();
-        state.record_retry_strategy_learning("block_culprit", "semantic", 3, 2);
-        state.record_retry_strategy_learning("block_culprit", "semantic", 1, 1);
-        state.record_retry_culprit_pair("naming_conventions", "clang_format", 2);
-        state.record_retry_culprit_pair("naming_conventions", "clang_format", 3);
+        state.record_retry("block_culprit", "semantic", 3, 2);
+        state.record_retry("block_culprit", "semantic", 1, 1);
+        state.record_culprit("naming_conventions", "clang_format", 2);
+        state.record_culprit("naming_conventions", "clang_format", 3);
 
-        let retry_snapshot = state.retry_strategy_learning_snapshot();
+        let retry_snapshot = state.retry_snapshot();
         assert_eq!(retry_snapshot.len(), 1);
         let (_, _, stats) = &retry_snapshot[0];
         assert_eq!(stats.attempts, 4);
         assert_eq!(stats.successes, 3);
 
-        let pair_snapshot = state.retry_culprit_pairs_snapshot();
+        let pair_snapshot = state.culprit_snapshot();
         assert_eq!(pair_snapshot.len(), 1);
         assert_eq!(pair_snapshot[0].count, 5);
     }

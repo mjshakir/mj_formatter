@@ -69,7 +69,7 @@ impl ParserManager {
         clang_compdb_path: Option<PathBuf>,
         clang_args_mode: ClangArgsMode,
     ) -> Self {
-        Self::with_clang_config_and_fidelity(
+        Self::with_clang_cfg(
             clang_binary,
             clang_args,
             clang_compdb_path,
@@ -79,7 +79,7 @@ impl ParserManager {
         )
     }
 
-    pub fn with_clang_config_and_fidelity(
+    pub fn with_clang_cfg(
         clang_binary: String,
         clang_args: Vec<String>,
         clang_compdb_path: Option<PathBuf>,
@@ -132,10 +132,10 @@ impl ParserManager {
     }
 
     pub fn parse_tree_sitter(&self, text: &str, path: &Path) -> Result<tree_sitter::Tree> {
-        self.parse_tree_sitter_with_old(text, path, None)
+        self.reparse_tree(text, path, None)
     }
 
-    pub fn parse_tree_sitter_with_old(
+    pub fn reparse_tree(
         &self,
         text: &str,
         path: &Path,
@@ -176,7 +176,7 @@ impl ParserManager {
     }
 
     pub fn parse_clang(&self, text: &str, path: &Path) -> Result<Arc<ClangParseResult>> {
-        if self.require_compdb && !self.has_semantic_compdb_context_for_path(path) {
+        if self.require_compdb && !self.has_semantic_compdb(path) {
             return Err(anyhow!(
                 "semantic parse fidelity requires compile_commands entry for {}",
                 path.display()
@@ -188,7 +188,7 @@ impl ParserManager {
         }
 
         let service = ClangParseService::global()?;
-        let exact_compdb = self.has_exact_compdb_entry_for_path(path);
+        let exact_compdb = self.has_exact_compdb(path);
         let result = if Self::is_header_path(path) && !exact_compdb {
             self.parse_clang_header_consensus(&service, text, path)?
         } else if !exact_compdb {
@@ -211,7 +211,7 @@ impl ParserManager {
     }
 
     pub fn dispatch_clang(&self, text: &str, path: &Path) -> Result<Option<ClangParseHandle>> {
-        if self.require_compdb && !self.has_semantic_compdb_context_for_path(path) {
+        if self.require_compdb && !self.has_semantic_compdb(path) {
             return Ok(None);
         }
         let cache_key = self.clang_cache_key(path, text);
@@ -241,27 +241,27 @@ impl ParserManager {
         Ok(arc)
     }
 
-    pub fn has_semantic_compdb_context_for_path(&self, path: &Path) -> bool {
+    pub fn has_semantic_compdb(&self, path: &Path) -> bool {
         !matches!(
-            self.semantic_compdb_context_kind_for_path(path),
+            self.semantic_compdb_kind(path),
             SemanticCompdbContextKind::None
         )
     }
 
-    pub fn has_exact_compdb_entry_for_path(&self, path: &Path) -> bool {
+    pub fn has_exact_compdb(&self, path: &Path) -> bool {
         self.compdb_index.has_exact_entry_for_path(path)
     }
 
-    pub fn semantic_compdb_context_kind_for_path(&self, path: &Path) -> SemanticCompdbContextKind {
+    pub fn semantic_compdb_kind(&self, path: &Path) -> SemanticCompdbContextKind {
         self.compdb_index.semantic_context_kind_for_path(path)
     }
 
     fn build_clang_arguments(&self, path: &Path) -> Vec<String> {
-        let compdb = self.compdb_args_for_path(path);
-        self.build_clang_arguments_with_compdb(path, compdb)
+        let compdb = self.compdb_args(path);
+        self.build_clang_args(path, compdb)
     }
 
-    fn build_clang_arguments_with_compdb(
+    fn build_clang_args(
         &self,
         path: &Path,
         compdb: Option<Vec<String>>,
@@ -269,12 +269,12 @@ impl ParserManager {
         self.arg_resolver.build(path, compdb)
     }
 
-    fn compdb_args_for_path(&self, path: &Path) -> Option<Vec<String>> {
-        self.compdb_args_exact_for_path(path)
+    fn compdb_args(&self, path: &Path) -> Option<Vec<String>> {
+        self.compdb_args_exact(path)
     }
 
-    fn compdb_args_exact_for_path(&self, path: &Path) -> Option<Vec<String>> {
-        self.compdb_index.args_exact_for_path(path)
+    fn compdb_args_exact(&self, path: &Path) -> Option<Vec<String>> {
+        self.compdb_index.args_exact(path)
     }
 
     fn parse_clang_header_consensus(
@@ -293,7 +293,7 @@ impl ParserManager {
         let source_path = path.to_string_lossy().to_string();
         let resolved_argument_sets = arg_sets
             .into_iter()
-            .map(|arguments| self.build_clang_arguments_with_compdb(path, Some(arguments)))
+            .map(|arguments| self.build_clang_args(path, Some(arguments)))
             .collect::<Vec<_>>();
         let mut failures = Vec::<String>::new();
         let mut parses = Vec::<ClangParseResult>::new();
@@ -334,7 +334,7 @@ impl ParserManager {
         let source_path = path.to_string_lossy().to_string();
         let resolved_argument_sets = arg_sets
             .into_iter()
-            .map(|arguments| self.build_clang_arguments_with_compdb(path, Some(arguments)))
+            .map(|arguments| self.build_clang_args(path, Some(arguments)))
             .collect::<Vec<_>>();
         let mut failures = Vec::<String>::new();
         let mut selected = None::<ClangParseResult>;
@@ -454,7 +454,7 @@ mod tests {
     use crate::parser::clang_types::ClangSymbolKind;
 
     #[test]
-    fn clang_parse_collects_semantic_symbols() {
+    fn parse_collects_symbols() {
         let manager = ParserManager::with_clang("clang".to_string(), Vec::new());
         let path = PathBuf::from("sample.cpp");
         let source = "int BadName() { int local_value = 0; return local_value; }\n";
@@ -473,7 +473,7 @@ mod tests {
             .iter()
             .any(|symbol| symbol.name == "local_value"
                 && matches!(symbol.kind, ClangSymbolKind::Variable)));
-        let offsets = result.rename_offsets_on_line("local_value", 1, &[ClangSymbolKind::Variable]);
+        let offsets = result.rename_offsets("local_value", 1, &[ClangSymbolKind::Variable]);
         assert!(
             offsets.len() >= 2,
             "expected declaration and reference offsets for local_value"
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn header_consensus_diagnostics_require_strict_majority() {
+    fn consensus_strict_majority() {
         let fatal_parse = ClangParseResult::new(
             false,
             vec!["fatal".to_string()],
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn header_consensus_ignores_symbol_votes_from_unrecoverable_failed_parses() {
+    fn consensus_ignores_unrecoverable() {
         let failed_symbol = ClangSymbol {
             name: "m_data".to_string(),
             kind: ClangSymbolKind::Field,
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn header_consensus_accepts_symbol_votes_from_recoverable_failed_parses() {
+    fn consensus_accepts_recoverable() {
         let failed_symbol = ClangSymbol {
             name: "m_data".to_string(),
             kind: ClangSymbolKind::Field,
@@ -611,8 +611,8 @@ mod tests {
     }
 
     #[test]
-    fn strict_fidelity_requires_compile_commands_entry() {
-        let manager = ParserManager::with_clang_config_and_fidelity(
+    fn fidelity_requires_compdb() {
+        let manager = ParserManager::with_clang_cfg(
             "clang".to_string(),
             Vec::new(),
             None,
@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_fidelity_uses_compdb_args_without_inferred_or_fallback_flags() {
+    fn fidelity_uses_compdb() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock drift")
@@ -658,7 +658,7 @@ mod tests {
         }]);
         fs::write(&compdb_path, compile_commands.to_string()).expect("write compdb");
 
-        let manager = ParserManager::with_clang_config_and_fidelity(
+        let manager = ParserManager::with_clang_cfg(
             "clang".to_string(),
             Vec::new(),
             Some(compdb_path.clone()),
@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_compdb_args_removes_compiler_and_build_outputs() {
+    fn sanitize_removes_compiler() {
         let file_path = PathBuf::from("/tmp/sample.cpp");
         let args = vec![
             "/usr/bin/clang++".to_string(),
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_system_include_dirs_extracts_paths() {
+    fn parse_extracts_paths() {
         let stderr = r#"
 clang version 19.1.0
 #include <...> search starts here:
@@ -722,7 +722,7 @@ End of search list.
     }
 
     #[test]
-    fn parse_system_include_dirs_deduplicates_entries() {
+    fn parse_deduplicates_entries() {
         let stderr = r#"
 #include <...> search starts here:
  /usr/include
@@ -734,7 +734,7 @@ End of search list.
     }
 
     #[test]
-    fn strict_fidelity_parses_header_with_compdb_consensus_context() {
+    fn fidelity_parses_header() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock drift")
@@ -782,7 +782,7 @@ End of search list.
         ]);
         fs::write(&compdb_path, compile_commands.to_string()).expect("write compdb");
 
-        let manager = ParserManager::with_clang_config_and_fidelity(
+        let manager = ParserManager::with_clang_cfg(
             "clang".to_string(),
             Vec::new(),
             Some(compdb_path.clone()),
@@ -791,15 +791,15 @@ End of search list.
             false,
         );
         assert!(
-            !manager.has_exact_compdb_entry_for_path(&header_path),
+            !manager.has_exact_compdb(&header_path),
             "header has no exact compile_commands entry"
         );
         assert_eq!(
-            manager.semantic_compdb_context_kind_for_path(&header_path),
+            manager.semantic_compdb_kind(&header_path),
             SemanticCompdbContextKind::PairedSourceHeuristic
         );
         assert!(
-            manager.has_semantic_compdb_context_for_path(&header_path),
+            manager.has_semantic_compdb(&header_path),
             "header should have consensus context from real TUs"
         );
         let arg_sets = manager.header_consensus_arg_sets(header_path.as_path());
@@ -829,7 +829,7 @@ End of search list.
     }
 
     #[test]
-    fn strict_fidelity_parses_source_with_compdb_derived_source_consensus() {
+    fn fidelity_parses_source() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock drift")
@@ -858,7 +858,7 @@ End of search list.
         }]);
         fs::write(&compdb_path, compile_commands.to_string()).expect("write compdb");
 
-        let manager = ParserManager::with_clang_config_and_fidelity(
+        let manager = ParserManager::with_clang_cfg(
             "clang".to_string(),
             Vec::new(),
             Some(compdb_path.clone()),
@@ -867,11 +867,11 @@ End of search list.
             false,
         );
         assert!(
-            !manager.has_exact_compdb_entry_for_path(&unknown_source),
+            !manager.has_exact_compdb(&unknown_source),
             "source should not have exact compile_commands entry"
         );
         assert!(
-            manager.has_semantic_compdb_context_for_path(&unknown_source),
+            manager.has_semantic_compdb(&unknown_source),
             "source should receive semantic context from related compdb TU entries"
         );
         let result = manager
@@ -886,7 +886,7 @@ End of search list.
     }
 
     #[test]
-    fn strict_fidelity_rejects_source_without_exact_compdb_entry() {
+    fn fidelity_rejects_nocompdb() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock drift")
@@ -914,7 +914,7 @@ End of search list.
         }]);
         fs::write(&compdb_path, compile_commands.to_string()).expect("write compdb");
 
-        let manager = ParserManager::with_clang_config_and_fidelity(
+        let manager = ParserManager::with_clang_cfg(
             "clang".to_string(),
             Vec::new(),
             Some(compdb_path.clone()),
@@ -923,7 +923,7 @@ End of search list.
             false,
         );
         assert!(
-            !manager.has_exact_compdb_entry_for_path(&unknown_source),
+            !manager.has_exact_compdb(&unknown_source),
             "source without exact compile_commands entry must be rejected"
         );
         let err = manager

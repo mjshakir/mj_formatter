@@ -90,10 +90,10 @@ impl ClangParseService {
                     request.arguments.as_slice(),
                 ),
             };
-            if let Err(_) = Self::write_payload(&mut writer, &response) {
+            if Self::write_payload(&mut writer, &response).is_err() {
                 return Ok(()); // Broken pipe at shutdown — parent dropped the pipe.
             }
-            if let Err(_) = writer.flush() {
+            if writer.flush().is_err() {
                 return Ok(());
             }
         }

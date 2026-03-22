@@ -47,7 +47,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compiles_and_caches_query() {
+    fn compiles_caches_query() {
         let language: Language = tree_sitter_cpp::LANGUAGE.into();
         let cache = TsQueryCache::new(language);
         let q1 = cache.get_or_compile("(comment) @c").expect("compile");
@@ -56,14 +56,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_query_returns_error() {
+    fn invalid_query_error() {
         let language: Language = tree_sitter_cpp::LANGUAGE.into();
         let cache = TsQueryCache::new(language);
         assert!(cache.get_or_compile("(nonexistent_node_xyz) @x").is_err());
     }
 
     #[test]
-    fn different_queries_cached_separately() {
+    fn different_queries_cached() {
         let language: Language = tree_sitter_cpp::LANGUAGE.into();
         let cache = TsQueryCache::new(language);
         let q1 = cache.get_or_compile("(comment) @c").expect("compile");

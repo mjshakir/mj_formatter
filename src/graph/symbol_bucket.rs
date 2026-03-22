@@ -36,34 +36,52 @@ fn sanitize_id_component(raw: &str) -> String {
     raw.replace('|', "%7C")
 }
 
-pub fn symbol_id_for_clang_symbol(symbol: &ClangSymbol) -> SymbolId {
-    if let Some(usr) = symbol
-        .usr
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return SymbolId::new(format!("usr|{}", sanitize_id_component(usr)));
-    }
-
-    if let Some(scope_usr) = symbol
-        .scope_usr
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return SymbolId::new(format!(
-            "scoped|{}|{}|{}",
-            kind_label(symbol.kind),
-            sanitize_id_component(scope_usr),
-            sanitize_id_component(symbol.name.as_str())
-        ));
-    }
-
-    legacy_symbol_bucket_id_for_clang_symbol(symbol)
+pub trait ToSymbolId {
+    fn symbol_id(&self) -> SymbolId;
 }
 
-pub fn legacy_symbol_bucket_id_for_clang_symbol(symbol: &ClangSymbol) -> SymbolId {
+impl ToSymbolId for ClangSymbol {
+    fn symbol_id(&self) -> SymbolId {
+        if let Some(usr) = self
+            .usr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return SymbolId::new(format!("usr|{}", sanitize_id_component(usr)));
+        }
+
+        if let Some(scope_usr) = self
+            .scope_usr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return SymbolId::new(format!(
+                "scoped|{}|{}|{}",
+                kind_label(self.kind),
+                sanitize_id_component(scope_usr),
+                sanitize_id_component(self.name.as_str())
+            ));
+        }
+
+        legacy_id(self)
+    }
+}
+
+impl ToSymbolId for ClangDeclKey {
+    fn symbol_id(&self) -> SymbolId {
+        SymbolId::new(format!(
+            "decl|{}|{}|{}|{}",
+            kind_label(self.kind),
+            sanitize_id_component(self.path.as_str()),
+            self.line,
+            self.column
+        ))
+    }
+}
+
+pub fn legacy_id(symbol: &ClangSymbol) -> SymbolId {
     SymbolId::new(format!(
         "bucket|{}|{}",
         kind_label(symbol.kind),
@@ -72,9 +90,9 @@ pub fn legacy_symbol_bucket_id_for_clang_symbol(symbol: &ClangSymbol) -> SymbolI
 }
 
 #[cfg(test)]
-pub fn symbol_id_candidates_for_clang_symbol(symbol: &ClangSymbol) -> Vec<SymbolId> {
-    let canonical = symbol_id_for_clang_symbol(symbol);
-    let legacy = legacy_symbol_bucket_id_for_clang_symbol(symbol);
+pub fn id_candidates(symbol: &ClangSymbol) -> Vec<SymbolId> {
+    let canonical = symbol.symbol_id();
+    let legacy = legacy_id(symbol);
     if canonical == legacy {
         vec![canonical]
     } else {
@@ -82,40 +100,32 @@ pub fn symbol_id_candidates_for_clang_symbol(symbol: &ClangSymbol) -> Vec<Symbol
     }
 }
 
-pub fn symbol_id_for_decl_key(decl_key: &ClangDeclKey) -> SymbolId {
-    SymbolId::new(format!(
-        "decl|{}|{}|{}|{}",
-        kind_label(decl_key.kind),
-        sanitize_id_component(decl_key.path.as_str()),
-        decl_key.line,
-        decl_key.column
-    ))
-}
-
-pub fn graph_node_kind_from_clang(kind: ClangSymbolKind) -> GraphNodeKind {
-    match kind {
-        ClangSymbolKind::Function
-        | ClangSymbolKind::FunctionTemplate
-        | ClangSymbolKind::Method
-        | ClangSymbolKind::Constructor
-        | ClangSymbolKind::Destructor => GraphNodeKind::Function,
-        ClangSymbolKind::Variable => GraphNodeKind::Variable,
-        ClangSymbolKind::Field => GraphNodeKind::Field,
-        ClangSymbolKind::Parameter => GraphNodeKind::Parameter,
-        ClangSymbolKind::Type
-        | ClangSymbolKind::Struct
-        | ClangSymbolKind::Class
-        | ClangSymbolKind::Union
-        | ClangSymbolKind::Enum
-        | ClangSymbolKind::Typedef
-        | ClangSymbolKind::TypeAlias => GraphNodeKind::Type,
-        ClangSymbolKind::Namespace => GraphNodeKind::Namespace,
-        ClangSymbolKind::Macro => GraphNodeKind::Macro,
-        ClangSymbolKind::ConversionFunction => GraphNodeKind::Function,
-        ClangSymbolKind::UsingDecl
-        | ClangSymbolKind::EnumConstant
-        | ClangSymbolKind::FriendDecl
-        | ClangSymbolKind::Other => GraphNodeKind::Variable,
+impl From<ClangSymbolKind> for GraphNodeKind {
+    fn from(kind: ClangSymbolKind) -> Self {
+        match kind {
+            ClangSymbolKind::Function
+            | ClangSymbolKind::FunctionTemplate
+            | ClangSymbolKind::Method
+            | ClangSymbolKind::Constructor
+            | ClangSymbolKind::Destructor => GraphNodeKind::Function,
+            ClangSymbolKind::Variable => GraphNodeKind::Variable,
+            ClangSymbolKind::Field => GraphNodeKind::Field,
+            ClangSymbolKind::Parameter => GraphNodeKind::Parameter,
+            ClangSymbolKind::Type
+            | ClangSymbolKind::Struct
+            | ClangSymbolKind::Class
+            | ClangSymbolKind::Union
+            | ClangSymbolKind::Enum
+            | ClangSymbolKind::Typedef
+            | ClangSymbolKind::TypeAlias => GraphNodeKind::Type,
+            ClangSymbolKind::Namespace => GraphNodeKind::Namespace,
+            ClangSymbolKind::Macro => GraphNodeKind::Macro,
+            ClangSymbolKind::ConversionFunction => GraphNodeKind::Function,
+            ClangSymbolKind::UsingDecl
+            | ClangSymbolKind::EnumConstant
+            | ClangSymbolKind::FriendDecl
+            | ClangSymbolKind::Other => GraphNodeKind::Variable,
+        }
     }
 }
 
@@ -129,13 +139,10 @@ mod tests {
     use crate::parser::clang_symbol::ClangSymbol;
     use crate::parser::clang_types::ClangSymbolKind;
 
-    use super::{
-        legacy_symbol_bucket_id_for_clang_symbol, symbol_id_candidates_for_clang_symbol,
-        symbol_id_for_clang_symbol, symbol_id_for_decl_key,
-    };
+    use super::{legacy_id, id_candidates, ToSymbolId};
 
     #[test]
-    fn canonical_uses_usr_when_present() {
+    fn canonical_uses_usr() {
         let symbol = ClangSymbol {
             name: "Foo".to_string(),
             kind: ClangSymbolKind::Type,
@@ -144,11 +151,11 @@ mod tests {
             usr: Some("c:@S@Foo".to_string()),
             scope_usr: None,
         };
-        assert_eq!(symbol_id_for_clang_symbol(&symbol).as_str(), "usr|c:@S@Foo");
+        assert_eq!(symbol.symbol_id().as_str(), "usr|c:@S@Foo");
     }
 
     #[test]
-    fn legacy_id_is_stable() {
+    fn legacy_id_stable() {
         let symbol = ClangSymbol {
             name: "Foo".to_string(),
             kind: ClangSymbolKind::Type,
@@ -157,14 +164,11 @@ mod tests {
             usr: None,
             scope_usr: None,
         };
-        assert_eq!(
-            legacy_symbol_bucket_id_for_clang_symbol(&symbol).as_str(),
-            "bucket|type|Foo"
-        );
+        assert_eq!(legacy_id(&symbol).as_str(), "bucket|type|Foo");
     }
 
     #[test]
-    fn candidates_include_legacy_for_migration() {
+    fn candidates_include_legacy() {
         let symbol = ClangSymbol {
             name: "Value".to_string(),
             kind: ClangSymbolKind::Variable,
@@ -173,14 +177,14 @@ mod tests {
             usr: Some("c:@value".to_string()),
             scope_usr: None,
         };
-        let ids = symbol_id_candidates_for_clang_symbol(&symbol);
+        let ids = id_candidates(&symbol);
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0].as_str(), "usr|c:@value");
         assert_eq!(ids[1].as_str(), "bucket|variable|Value");
     }
 
     #[test]
-    fn decl_key_symbol_id_is_stable() {
+    fn decl_key_stable() {
         let key = ClangDeclKey::new(
             "/tmp/demo.hpp".to_string(),
             12,
@@ -188,7 +192,7 @@ mod tests {
             ClangSymbolKind::Function,
         );
         assert_eq!(
-            symbol_id_for_decl_key(&key).as_str(),
+            key.symbol_id().as_str(),
             "decl|function|/tmp/demo.hpp|12|4"
         );
     }

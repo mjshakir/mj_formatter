@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,15 +11,12 @@ use crate::graph::types::GraphNode;
 use crate::graph::types::GraphNodeKind;
 use crate::graph::types::NodeMetrics;
 use crate::graph::state::ProjectGraphState;
-use crate::graph::symbol_bucket::{
-    file_symbol_id, graph_node_kind_from_clang, legacy_symbol_bucket_id_for_clang_symbol,
-    symbol_id_for_clang_symbol, symbol_id_for_decl_key,
-};
+use crate::graph::symbol_bucket::{file_symbol_id, legacy_id, ToSymbolId};
 use crate::graph::symbol_id::SymbolId;
 
-pub struct ProjectGraphStateUpdater;
+pub struct GraphUpdater;
 
-impl ProjectGraphStateUpdater {
+impl GraphUpdater {
     pub fn apply_clang_parse(state: &mut ProjectGraphState, path: &Path, parse: &ClangParseResult) {
         let now = current_unix_ms();
         let path_string = path.to_string_lossy().to_string();
@@ -42,20 +39,20 @@ impl ProjectGraphStateUpdater {
         state.upsert_node(file_node);
 
         let symbol_consensus = if parse.success { 1.0 } else { 0.5 };
-        let mut seen_symbols_for_file = HashSet::<SymbolId>::new();
-        let mut declaration_symbol_ids = HashMap::<ClangDeclKey, SymbolId>::new();
-        let mut alias_map = HashMap::<SymbolId, SymbolId>::new();
+        let mut seen_symbols_for_file: FxHashSet<SymbolId> = FxHashSet::default();
+        let mut declaration_symbol_ids: FxHashMap<ClangDeclKey, SymbolId> = FxHashMap::default();
+        let mut alias_map: FxHashMap<SymbolId, SymbolId> = FxHashMap::default();
 
         for symbol in &parse.symbols {
-            let symbol_id = symbol_id_for_clang_symbol(symbol);
-            let legacy_symbol_id = legacy_symbol_bucket_id_for_clang_symbol(symbol);
+            let symbol_id = symbol.symbol_id();
+            let legacy_symbol_id = legacy_id(symbol);
             let decl_key = ClangDeclKey::new(
                 canonical_path.clone(),
                 symbol.line,
                 symbol.column,
                 symbol.kind,
             );
-            let decl_symbol_id = symbol_id_for_decl_key(&decl_key);
+            let decl_symbol_id = decl_key.symbol_id();
             if decl_symbol_id != symbol_id {
                 alias_map.insert(decl_symbol_id, symbol_id.clone());
             }
@@ -72,13 +69,13 @@ impl ProjectGraphStateUpdater {
                 GraphNode::new(
                     symbol_id.clone(),
                     symbol.name.clone(),
-                    graph_node_kind_from_clang(symbol.kind),
+                    GraphNodeKind::from(symbol.kind),
                     path_string.clone(),
                     symbol.line,
                     symbol.column,
                 )
             });
-            node.kind = graph_node_kind_from_clang(symbol.kind);
+            node.kind = GraphNodeKind::from(symbol.kind);
             node.name = symbol.name.clone();
             node.file_path = path_string.clone();
             node.line = symbol.line;
@@ -113,7 +110,7 @@ impl ProjectGraphStateUpdater {
 
         Self::apply_aliases(state, &alias_map, now);
 
-        let mut reference_targets = HashMap::<SymbolId, u32>::new();
+        let mut reference_targets: FxHashMap<SymbolId, u32> = FxHashMap::default();
         for (decl_key, offsets) in parse.reference_offsets_map() {
             if offsets.is_empty() {
                 continue;
@@ -121,7 +118,7 @@ impl ProjectGraphStateUpdater {
             let symbol_id = declaration_symbol_ids
                 .get(decl_key)
                 .cloned()
-                .unwrap_or_else(|| symbol_id_for_decl_key(decl_key));
+                .unwrap_or_else(|| decl_key.symbol_id());
             Self::ensure_declaration_node(state, &symbol_id, decl_key, now, symbol_consensus);
             let weight = offsets.len().min(u32::MAX as usize) as u32;
             *reference_targets.entry(symbol_id).or_insert(0) += weight.max(1);
@@ -153,10 +150,10 @@ impl ProjectGraphStateUpdater {
     fn replace_file_contains_edges(
         state: &mut ProjectGraphState,
         file_id: &SymbolId,
-        symbol_ids: &HashSet<SymbolId>,
+        symbol_ids: &FxHashSet<SymbolId>,
         now: u64,
-    ) -> HashSet<SymbolId> {
-        let mut removed = HashSet::<SymbolId>::new();
+    ) -> FxHashSet<SymbolId> {
+        let mut removed: FxHashSet<SymbolId> = FxHashSet::default();
         state.edges.retain(|edge| {
             let is_file_contains = edge.kind == GraphEdgeKind::Contains && edge.from == *file_id;
             if is_file_contains {
@@ -181,10 +178,10 @@ impl ProjectGraphStateUpdater {
     fn replace_file_reference_edges(
         state: &mut ProjectGraphState,
         file_id: &SymbolId,
-        targets: &HashMap<SymbolId, u32>,
+        targets: &FxHashMap<SymbolId, u32>,
         now: u64,
-    ) -> HashSet<SymbolId> {
-        let mut removed = HashSet::<SymbolId>::new();
+    ) -> FxHashSet<SymbolId> {
+        let mut removed: FxHashSet<SymbolId> = FxHashSet::default();
         state.edges.retain(|edge| {
             let is_file_reference = edge.kind == GraphEdgeKind::Reference && edge.from == *file_id;
             if is_file_reference {
@@ -208,13 +205,13 @@ impl ProjectGraphStateUpdater {
 
     fn reference_counts_for_symbols(
         state: &ProjectGraphState,
-        symbol_ids: &HashSet<SymbolId>,
-    ) -> HashMap<SymbolId, u64> {
+        symbol_ids: &FxHashSet<SymbolId>,
+    ) -> FxHashMap<SymbolId, u64> {
         if symbol_ids.is_empty() {
-            return HashMap::new();
+            return FxHashMap::default();
         }
 
-        let mut counts = HashMap::<SymbolId, u64>::new();
+        let mut counts = FxHashMap::default();
         for edge in &state.edges {
             if edge.kind != GraphEdgeKind::Reference {
                 continue;
@@ -222,8 +219,8 @@ impl ProjectGraphStateUpdater {
             if !symbol_ids.contains(&edge.to) {
                 continue;
             }
-            let count = counts.entry(edge.to.clone()).or_insert(0);
-            *count = count.saturating_add(edge.weight as u64);
+            let count = counts.entry(edge.to.clone()).or_insert(0_u64);
+            *count = (*count).saturating_add(edge.weight as u64);
         }
         counts
     }
@@ -289,7 +286,7 @@ impl ProjectGraphStateUpdater {
 
     fn apply_aliases(
         state: &mut ProjectGraphState,
-        aliases: &HashMap<SymbolId, SymbolId>,
+        aliases: &FxHashMap<SymbolId, SymbolId>,
         now: u64,
     ) {
         if aliases.is_empty() {
@@ -354,13 +351,13 @@ impl ProjectGraphStateUpdater {
 
     fn contains_counts_for_symbols(
         state: &ProjectGraphState,
-        symbol_ids: &HashSet<SymbolId>,
-    ) -> HashMap<SymbolId, u32> {
+        symbol_ids: &FxHashSet<SymbolId>,
+    ) -> FxHashMap<SymbolId, u32> {
         if symbol_ids.is_empty() {
-            return HashMap::new();
+            return FxHashMap::default();
         }
 
-        let mut counts = HashMap::<SymbolId, u32>::new();
+        let mut counts = FxHashMap::default();
         for edge in &state.edges {
             if edge.kind != GraphEdgeKind::Contains {
                 continue;
@@ -368,8 +365,8 @@ impl ProjectGraphStateUpdater {
             if !symbol_ids.contains(&edge.to) {
                 continue;
             }
-            let count = counts.entry(edge.to.clone()).or_insert(0);
-            *count = count.saturating_add(1);
+            let count = counts.entry(edge.to.clone()).or_insert(0_u32);
+            *count = (*count).saturating_add(1);
         }
         counts
     }
@@ -393,12 +390,12 @@ mod tests {
     use crate::parser::clang_types::ClangSymbolKind;
     use crate::graph::types::GraphEdgeKind;
     use crate::graph::state::ProjectGraphState;
-    use crate::graph::state_updater::ProjectGraphStateUpdater;
-    use crate::graph::symbol_bucket::symbol_id_for_decl_key;
+    use crate::graph::state_updater::GraphUpdater;
+    use crate::graph::symbol_bucket::ToSymbolId;
     use crate::graph::symbol_id::SymbolId;
 
     #[test]
-    fn updater_adds_symbol_metrics() {
+    fn adds_symbol_metrics() {
         let path = PathBuf::from("src/demo.cpp");
         let parse = ClangParseResult::new(
             true,
@@ -415,14 +412,14 @@ mod tests {
             Vec::new(),
         );
         let mut state = ProjectGraphState::new();
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &path, &parse);
+        GraphUpdater::apply_clang_parse(&mut state, &path, &parse);
         let symbol = SymbolId::new("bucket|function|DemoFn");
         assert!(state.node(&symbol).is_some());
         assert!(state.symbol_reference_count(&symbol) > 0);
     }
 
     #[test]
-    fn updater_replaces_file_contains_edges_and_refreshes_file_counts() {
+    fn replaces_file_edges() {
         let path = PathBuf::from("src/demo.cpp");
         let first = ClangParseResult::new(
             true,
@@ -464,8 +461,8 @@ mod tests {
         );
 
         let mut state = ProjectGraphState::new();
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &path, &first);
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &path, &second);
+        GraphUpdater::apply_clang_parse(&mut state, &path, &first);
+        GraphUpdater::apply_clang_parse(&mut state, &path, &second);
 
         let file_id = SymbolId::new("file|src/demo.cpp");
         let demo = SymbolId::new("bucket|function|DemoFn");
@@ -486,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn updater_builds_cross_file_reference_edges_and_migrates_to_canonical_id() {
+    fn builds_reference_edges() {
         let decl_path = PathBuf::from("src/ref_target.cpp");
         let use_path = PathBuf::from("src/ref_user.cpp");
         let canonical_decl = std::fs::canonicalize(&decl_path)
@@ -523,13 +520,13 @@ mod tests {
         );
 
         let mut state = ProjectGraphState::new();
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &use_path, &use_parse);
+        GraphUpdater::apply_clang_parse(&mut state, &use_path, &use_parse);
 
-        let decl_symbol = symbol_id_for_decl_key(&decl_key);
+        let decl_symbol = decl_key.symbol_id();
         assert!(state.node(&decl_symbol).is_some());
         assert_eq!(state.symbol_reference_count(&decl_symbol), 2);
 
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &decl_path, &decl_parse);
+        GraphUpdater::apply_clang_parse(&mut state, &decl_path, &decl_parse);
 
         let canonical_symbol = SymbolId::new("bucket|function|TargetFn");
         assert!(state.node(&canonical_symbol).is_some());
@@ -541,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn updater_replaces_reference_edges_for_same_file() {
+    fn replaces_same_file() {
         let use_path = PathBuf::from("src/ref_refresh.cpp");
         let key_a = ClangDeclKey::new("src/a.hpp".to_string(), 1, 1, ClangSymbolKind::Function);
         let key_b = ClangDeclKey::new("src/b.hpp".to_string(), 2, 1, ClangSymbolKind::Function);
@@ -565,8 +562,8 @@ mod tests {
         );
 
         let mut state = ProjectGraphState::new();
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &use_path, &parse_a);
-        ProjectGraphStateUpdater::apply_clang_parse(&mut state, &use_path, &parse_b);
+        GraphUpdater::apply_clang_parse(&mut state, &use_path, &parse_a);
+        GraphUpdater::apply_clang_parse(&mut state, &use_path, &parse_b);
 
         let file_id = SymbolId::new("file|src/ref_refresh.cpp");
         let refs = state
@@ -575,7 +572,7 @@ mod tests {
             .filter(|edge| edge.kind == GraphEdgeKind::Reference && edge.from == file_id)
             .collect::<Vec<_>>();
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].to, symbol_id_for_decl_key(&key_b));
+        assert_eq!(refs[0].to, key_b.symbol_id());
         assert_eq!(refs[0].weight, 1);
     }
 }

@@ -192,7 +192,7 @@ impl ClangParseResult {
             })
     }
 
-    pub fn rename_offsets_on_line(
+    pub fn rename_offsets(
         &self,
         name: &str,
         line: usize,
@@ -224,13 +224,13 @@ impl ClangParseResult {
         offsets
     }
 
-    pub fn has_symbol_name_elsewhere(&self, name: &str, except_line: usize) -> bool {
+    pub fn has_name_elsewhere(&self, name: &str, except_line: usize) -> bool {
         self.symbols
             .iter()
             .any(|symbol| symbol.name == name && symbol.line != except_line)
     }
 
-    pub fn reference_offsets_for_decl(&self, decl_key: &ClangDeclKey) -> Vec<usize> {
+    pub fn ref_offsets(&self, decl_key: &ClangDeclKey) -> Vec<usize> {
         self.reference_offsets_by_decl
             .get(decl_key)
             .cloned()

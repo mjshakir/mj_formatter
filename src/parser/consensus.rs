@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use rustc_hash::FxHashMap;
+
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::clang_result::{
     ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
@@ -44,7 +46,7 @@ impl ParserConsensusSelector {
         let symbol_threshold = Self::strict_majority_threshold(semantic_vote_parse_count);
         let diagnostic_threshold = Self::strict_majority_threshold(parse_count);
 
-        let mut symbol_votes = HashMap::<
+        let mut symbol_votes: FxHashMap<
             (
                 String,
                 ClangSymbolKind,
@@ -54,7 +56,7 @@ impl ParserConsensusSelector {
                 Option<String>,
             ),
             usize,
-        >::new();
+        > = FxHashMap::default();
         let mut symbol_order = Vec::<(
             String,
             ClangSymbolKind,
@@ -63,7 +65,7 @@ impl ParserConsensusSelector {
             Option<String>,
             Option<String>,
         )>::new();
-        let mut symbol_exemplar = HashMap::<
+        let mut symbol_exemplar: FxHashMap<
             (
                 String,
                 ClangSymbolKind,
@@ -73,11 +75,11 @@ impl ParserConsensusSelector {
                 Option<String>,
             ),
             ClangSymbol,
-        >::new();
-        let mut rename_votes = HashMap::<(ClangSymbolKey, usize), usize>::new();
-        let mut ref_votes = HashMap::<(ClangDeclKey, usize), usize>::new();
-        let mut diag_votes = HashMap::<(usize, usize, ClangDiagnosticSeverity), usize>::new();
-        let mut diag_messages = HashMap::<(usize, usize, ClangDiagnosticSeverity), String>::new();
+        > = FxHashMap::default();
+        let mut rename_votes: FxHashMap<(ClangSymbolKey, usize), usize> = FxHashMap::default();
+        let mut ref_votes: FxHashMap<(ClangDeclKey, usize), usize> = FxHashMap::default();
+        let mut diag_votes: FxHashMap<(usize, usize, ClangDiagnosticSeverity), usize> = FxHashMap::default();
+        let mut diag_messages: FxHashMap<(usize, usize, ClangDiagnosticSeverity), String> = FxHashMap::default();
 
         for parse in &parses {
             if Self::header_semantic_vote_eligible(parse) {

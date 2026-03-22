@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -13,7 +13,7 @@ use crate::parser::clang_result::{
 use crate::parser::clang_symbol::ClangSymbol;
 use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
-use crate::text_scan;
+use crate::parser::text_scan;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticIdProvenance {
@@ -113,10 +113,10 @@ impl SemanticFileContext {
         tree: Option<&Tree>,
         clang: Option<&ClangParseResult>,
     ) -> Self {
-        Self::from_parses_with_cache(text, path, tree, clang, None)
+        Self::from_parses_cached(text, path, tree, clang, None)
     }
 
-    pub fn from_parses_with_cache(
+    pub fn from_parses_cached(
         text: &str,
         path: &Path,
         tree: Option<&Tree>,
@@ -145,7 +145,7 @@ impl SemanticFileContext {
         context.diagnostic_entries = parse.diagnostic_entries().to_vec();
 
         let line_starts = Self::line_starts(text);
-        let mut declaration_ids = HashMap::<ClangDeclKey, (String, SemanticIdProvenance)>::new();
+        let mut declaration_ids: FxHashMap<ClangDeclKey, (String, SemanticIdProvenance)> = FxHashMap::default();
         for symbol in &parse.symbols {
             let (stable_id, provenance) = Self::stable_id_for_symbol(path, symbol);
             context.declarations.push(SemanticDeclaration {
@@ -263,7 +263,7 @@ impl SemanticFileContext {
             .min_by_key(|declaration| declaration.column.abs_diff(location.column))
     }
 
-    pub fn references_for_stable_id(&self, stable_id: &str) -> Vec<&SemanticReference> {
+    pub fn refs_by_id(&self, stable_id: &str) -> Vec<&SemanticReference> {
         self.references
             .iter()
             .filter(|reference| reference.stable_id == stable_id)
@@ -790,7 +790,7 @@ mod tests {
     use crate::parser::node_kind;
 
     #[test]
-    fn stable_id_prefers_usr() {
+    fn stable_prefers_usr() {
         let path = PathBuf::from("semantic_usr.cpp");
         let parse = ClangParseResult::new(
             true,
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn references_resolve_to_declaration_identity() {
+    fn refs_resolve_identity() {
         let path = PathBuf::from("semantic_refs.cpp");
         let canonical_path = std::fs::canonicalize(&path)
             .unwrap_or_else(|_| path.clone())
@@ -852,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesizes_declaration_from_reference_map_when_symbols_missing() {
+    fn synthesizes_declaration_map() {
         let path = PathBuf::from("semantic_refs_fallback.cpp");
         let canonical_path = std::fs::canonicalize(&path)
             .unwrap_or_else(|_| path.clone())
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn collects_preprocessor_scopes_from_tree_sitter() {
+    fn collects_preprocessor_scopes() {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -900,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn source_location_queries_work() {
+    fn source_queries_work() {
         let context = SemanticFileContext {
             declarations: vec![crate::parser::file_context::SemanticDeclaration {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -935,7 +935,7 @@ mod tests {
             .declaration_at_location(SourceLocation::new(3, 5), &[ClangSymbolKind::Function])
             .expect("declaration by location");
         assert_eq!(declaration.name, "foo");
-        assert_eq!(context.references_for_stable_id("usr:c:@F@foo#").len(), 1);
+        assert_eq!(context.refs_by_id("usr:c:@F@foo#").len(), 1);
         assert!(context
             .scope_at_location(SourceLocation::new(1, 1))
             .is_some());
@@ -944,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_deterministic_regions_for_file_context() {
+    fn builds_deterministic_regions() {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -963,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn region_lookup_returns_smallest_covering_region() {
+    fn region_smallest_covering() {
         let context = SemanticFileContext {
             regions: vec![
                 SemanticRegion::new(
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_id_for_symbol_is_column_resilient() {
+    fn stable_id_resilient() {
         let path = PathBuf::from("column_resilience.cpp");
         let symbol_col5 = ClangSymbol {
             name: "value".to_string(),
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_id_for_symbol_differs_by_name() {
+    fn stable_id_differs() {
         let path = PathBuf::from("name_diff.cpp");
         let sym_a = ClangSymbol {
             name: "alpha".to_string(),
