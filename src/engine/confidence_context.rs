@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::parser::clang_result::ClangParseResult;
 use crate::parser::file_context::SemanticFileContext;
@@ -50,8 +50,8 @@ impl ConfidenceContext {
             }
 
             if let Some(ts) = ts_tree {
-                let excluded_ranges = crate::text_scan::collect_non_code_byte_ranges(ts);
-                let mut ref_counts: HashMap<&str, usize> = HashMap::new();
+                let excluded_ranges = crate::parser::text_scan::non_code_ranges(ts);
+                let mut ref_counts: FxHashMap<&str, usize> = FxHashMap::default();
                 for reference in &semantic_context.references {
                     *ref_counts.entry(reference.stable_id.as_str()).or_insert(0) += 1;
                 }
@@ -63,7 +63,7 @@ impl ConfidenceContext {
                         continue;
                     }
                     checked += 1;
-                    let text_count = crate::text_scan::count_identifier_occurrences_with_exclusions(
+                    let text_count = crate::parser::text_scan::count_id_excluded(
                         text, &decl.name, &excluded_ranges,
                     );
                     let agreement = if text_count <= semantic_count + 1 {
@@ -103,7 +103,7 @@ mod tests {
     use super::ConfidenceContext;
 
     #[test]
-    fn computes_tree_error_ratio_from_parse_tree() {
+    fn computes_error_ratio() {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -117,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_context_enriches_clang_success_and_usr_ratio() {
+    fn context_enriches_clang() {
         let semantic = SemanticFileContext {
             canonical_path: "src/demo.cpp".to_string(),
             clang_success: true,
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scan_agreement_perfect_when_text_matches_semantic() {
+    fn agreement_perfect_match() {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scan_agreement_low_when_text_has_extra_occurrences() {
+    fn agreement_low_extra() {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scan_agreement_partial_credit_for_moderate_excess() {
+    fn agreement_partial_credit() {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scan_agreement_neutral_when_no_refs_checked() {
+    fn agreement_neutral_norefs() {
         let semantic = SemanticFileContext {
             canonical_path: "test.cpp".to_string(),
             clang_success: true,

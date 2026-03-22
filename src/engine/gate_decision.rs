@@ -11,16 +11,20 @@ pub enum ConfidenceReasonCode {
     LowConfidence,
     LowConsensus,
     ParserConsensusStrict,
-    ParserConsensusAdaptiveHardened,
-    ParserConsensusAdaptiveRelaxed,
+    #[serde(alias = "ParserConsensusAdaptiveHardened")]
+    ParserHardened,
+    #[serde(alias = "ParserConsensusAdaptiveRelaxed")]
+    ParserRelaxed,
     SemanticConsensusLow,
     ProjectEvidenceLow,
     ContextCoverageLow,
-    SemanticEvidenceMissing,
+    #[serde(alias = "SemanticEvidenceMissing")]
+    SemanticMissing,
     ParserUnavailable,
     ParserDisagreement,
     ClangDiagnostics,
-    RecoverableHybridContext,
+    #[serde(alias = "RecoverableHybridContext")]
+    HybridRecovery,
     RetrySafetyHarden,
     ClusterAdaptiveRelaxed,
     ClusterAdaptiveHardened,
@@ -40,18 +44,16 @@ impl ConfidenceReasonCode {
             Self::LowConfidence => "low_confidence".to_string(),
             Self::LowConsensus => "low_consensus".to_string(),
             Self::ParserConsensusStrict => "parser_consensus_strict".to_string(),
-            Self::ParserConsensusAdaptiveHardened => {
-                "parser_consensus_adaptive_hardened".to_string()
-            }
-            Self::ParserConsensusAdaptiveRelaxed => "parser_consensus_adaptive_relaxed".to_string(),
+            Self::ParserHardened => "parser_hardened".to_string(),
+            Self::ParserRelaxed => "parser_relaxed".to_string(),
             Self::SemanticConsensusLow => "semantic_consensus_low".to_string(),
             Self::ProjectEvidenceLow => "project_evidence_low".to_string(),
             Self::ContextCoverageLow => "context_coverage_low".to_string(),
-            Self::SemanticEvidenceMissing => "semantic_evidence_missing".to_string(),
+            Self::SemanticMissing => "semantic_missing".to_string(),
             Self::ParserUnavailable => "parser_unavailable".to_string(),
             Self::ParserDisagreement => "parser_disagreement".to_string(),
             Self::ClangDiagnostics => "clang_diagnostics".to_string(),
-            Self::RecoverableHybridContext => "recoverable_hybrid_context".to_string(),
+            Self::HybridRecovery => "hybrid_recovery".to_string(),
             Self::RetrySafetyHarden => "retry_safety_harden".to_string(),
             Self::ClusterAdaptiveRelaxed => "cluster_adaptive_relaxed".to_string(),
             Self::ClusterAdaptiveHardened => "cluster_adaptive_hardened".to_string(),
@@ -104,7 +106,7 @@ mod tests {
     use crate::engine::gate_decision::ConfidenceReasonCode;
 
     #[test]
-    fn renders_tier_adjustment_reason() {
+    fn renders_tier_adjustment() {
         let reason = ConfidenceReasonCode::TierAdjusted {
             from: Enforcement::Hard,
             to: Enforcement::Soft,
@@ -113,8 +115,8 @@ mod tests {
     }
 
     #[test]
-    fn serializes_confidence_reason_codes() {
-        let reason = ConfidenceReasonCode::ParserConsensusAdaptiveHardened;
+    fn serializes_reason_codes() {
+        let reason = ConfidenceReasonCode::ParserHardened;
         let json = serde_json::to_string(&reason).expect("serialize confidence reason");
         let restored: ConfidenceReasonCode =
             serde_json::from_str(json.as_str()).expect("deserialize confidence reason");

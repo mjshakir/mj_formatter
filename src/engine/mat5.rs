@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn inverse_times_original_is_identity() {
+    fn inverse_is_identity() {
         // SPD matrix
         let mut a = mat5_diagonal(&[4.0, 3.0, 2.0, 5.0, 1.0]);
         a[0][1] = 0.5;
@@ -471,14 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn quadratic_form_matches_manual() {
+    fn quadratic_matches_manual() {
         let m = mat5_identity();
         let v = [1.0, 2.0, 3.0, 4.0, 5.0];
         assert!(approx_eq(mat5_quadratic(&m, &v), 55.0));
     }
 
     #[test]
-    fn outer_product_is_symmetric() {
+    fn outer_product_symmetric() {
         let v = [1.0, 2.0, 3.0, 4.0, 5.0];
         let outer = mat5_outer(&v);
         for i in 0..N {
@@ -507,14 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn enforce_spd_recovers_non_spd() {
+    fn enforce_recovers_nonspd() {
         let mut m = mat5_diagonal(&[-0.01, 0.5, 0.3, 0.2, 0.1]);
         enforce_spd(&mut m);
         assert!(mat5_cholesky(&m).is_some(), "enforce_spd must produce SPD matrix");
     }
 
     #[test]
-    fn enforce_spd_preserves_valid_spd() {
+    fn enforce_preserves_spd() {
         let original = mat5_diagonal(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         let mut m = original;
         enforce_spd(&mut m);
@@ -550,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn cholesky_fails_on_non_spd() {
+    fn cholesky_fails_nonspd() {
         let m = mat5_diagonal(&[-1.0, 1.0, 1.0, 1.0, 1.0]);
         assert!(mat5_cholesky(&m).is_none());
     }
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn neon_dot5_matches_scalar() {
+    fn neon_dot5_scalar() {
         let a = [0.123, 0.456, 0.789, 0.321, 0.654];
         let b = [0.987, 0.654, 0.321, 0.789, 0.456];
         let result = dot5(&a, &b);

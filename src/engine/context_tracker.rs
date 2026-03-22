@@ -372,14 +372,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn neutral_modifier_with_no_observations() {
+    fn neutral_no_observations() {
         let tracker = PolicyContextTracker::new();
         let m = tracker.context_modifier(0, FileContextKind::Header, BlockContextKind::Global);
         assert!((m - 1.0).abs() < 1e-6, "expected neutral modifier, got {}", m);
     }
 
     #[test]
-    fn modifier_increases_after_successes() {
+    fn modifier_increases_success() {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..10 {
             tracker.observe_file(0, FileContextKind::Header, true);
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn modifier_decreases_after_failures() {
+    fn modifier_decreases_failure() {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..10 {
             tracker.observe_file(0, FileContextKind::Implementation, false);
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_file_modifiers_neutral_initially() {
+    fn file_modifiers_neutral() {
         let tracker = PolicyContextTracker::new();
         let mods = tracker.batch_file_modifiers(FileContextKind::Header);
         for i in 0..NUM_POLICIES {
@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_file_modifiers_reflect_learning() {
+    fn file_modifiers_learning() {
         let mut tracker = PolicyContextTracker::new();
         // Policy 5 succeeds a lot in headers
         for _ in 0..10 {
@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_index_covers_all_known() {
+    fn index_covers_all() {
         assert_eq!(policy_index("dash_comment_normalizer"), Some(0));
         assert_eq!(policy_index("numeric_literal_suffix"), Some(15));
         assert_eq!(policy_index("unknown_policy"), None);
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_observe_outcomes_updates_both() {
+    fn observe_updates_both() {
         let mut tracker = PolicyContextTracker::new();
         let outcomes = vec![
             PolicyOutcomeRecord { policy_index: 0, block_kind: BlockContextKind::Global, success: true },
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_block_modifiers_neutral_initially() {
+    fn block_modifiers_neutral() {
         let tracker = PolicyContextTracker::new();
         let mods = tracker.batch_block_modifiers(BlockContextKind::Function);
         for p in 0..NUM_POLICIES {
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_block_modifiers_reflect_learning() {
+    fn block_modifiers_learning() {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..5 {
             tracker.observe_block(2, BlockContextKind::Function, true);

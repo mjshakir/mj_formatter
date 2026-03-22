@@ -144,7 +144,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rls_converges_to_true_consequents() {
+    fn rls_converges_true() {
         let initial = [0.5; NUM_RULES];
         let target = [0.1, 0.3, 0.5, 0.2, 0.4, 0.6, 0.3, 0.5, 0.8];
         let mut rb = AdaptiveTSRuleBase::new(initial, 0.97);
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn rls_evaluate_returns_weighted_average() {
+    fn rls_weighted_average() {
         let consequents = [0.1, 0.3, 0.5, 0.2, 0.4, 0.6, 0.3, 0.5, 0.8];
         let rb = AdaptiveTSRuleBase::new(consequents, 0.97);
         let firing = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn rls_evaluate_zero_firing_returns_default() {
+    fn rls_zero_default() {
         let rb = AdaptiveTSRuleBase::new([0.5; NUM_RULES], 0.97);
         let result = rb.evaluate(&[0.0; NUM_RULES]);
         assert!(
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_rule_bases_initializes_with_static_values() {
+    fn bases_init_static() {
         let bases = AdaptiveRuleBases::new();
         assert!((bases.failure_severity.consequents[0] - 0.00).abs() < 1e-12);
         assert!((bases.failure_severity.consequents[8] - 1.00).abs() < 1e-12);
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn rls_p_matrix_stays_reasonable() {
+    fn rls_p_reasonable() {
         let mut rb = AdaptiveTSRuleBase::new([0.5; NUM_RULES], 0.97);
         for step in 0..500 {
             let dominant = step % NUM_RULES;

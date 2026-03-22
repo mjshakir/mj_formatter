@@ -105,7 +105,7 @@ mod tests {
     use super::PolicySuppression;
 
     #[test]
-    fn supports_ignore_and_disable_enable_ranges() {
+    fn supports_disable_ranges() {
         let source = "\
 // mjf:ignore naming_conventions
 int BadName = 0;

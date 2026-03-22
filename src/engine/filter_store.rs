@@ -50,7 +50,7 @@ impl ProjectFilter {
         self.observation_count += 1;
     }
 
-    pub fn prior_for_new_file(&self) -> Option<([f64; NUM_DIMS], [f64; NUM_DIMS], u32)> {
+    pub fn new_file_prior(&self) -> Option<([f64; NUM_DIMS], [f64; NUM_DIMS], u32)> {
         if self.observation_count < 3 {
             return None;
         }
@@ -167,7 +167,7 @@ impl CertaintyFilterStore {
         content_hash: u64,
     ) -> CertaintyFilterResult {
         let priors = **self.population_priors.load();
-        let project_prior = self.project_filter.lock().ok().and_then(|pf| pf.prior_for_new_file());
+        let project_prior = self.project_filter.lock().ok().and_then(|pf| pf.new_file_prior());
         let mut entry = self
             .entries
             .entry(file_path.to_string())
@@ -195,7 +195,7 @@ impl CertaintyFilterStore {
         self.entries.get(file_path).and_then(|e| e.last_edit_outcome)
     }
 
-    pub fn current_edit_success_estimate(&self, file_path: &str) -> f64 {
+    pub fn edit_estimate(&self, file_path: &str) -> f64 {
         self.entries
             .get(file_path)
             .map(|e| {
@@ -208,21 +208,6 @@ impl CertaintyFilterStore {
             .unwrap_or(0.50)
     }
 
-    #[allow(dead_code)]
-    pub fn population_edit_success(&self) -> f64 {
-        let priors = **self.population_priors.load();
-        if let Some((estimates, _variances, obs)) = priors {
-            if obs >= 3 {
-                return estimates[4].clamp(0.0, 1.0);
-            }
-        }
-        if let Some(pf) = self.project_filter.lock().ok() {
-            if let Some((est, _var, _obs)) = pf.prior_for_new_file() {
-                return est[4].clamp(0.0, 1.0);
-            }
-        }
-        0.5
-    }
 
     pub fn record_edit_outcome(&self, file_path: &str, outcome: f64) {
         if let Some(mut entry) = self.entries.get_mut(file_path) {

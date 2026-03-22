@@ -92,7 +92,7 @@ impl CertaintyFilterResult {
     pub fn within_semantic_variance(&self) -> f64 { self.within_model_covariance[1][1] }
     pub fn within_coverage_variance(&self) -> f64 { self.within_model_covariance[2][2] }
     pub fn within_richness_variance(&self) -> f64 { self.within_model_covariance[3][3] }
-    pub fn within_edit_success_variance(&self) -> f64 { self.within_model_covariance[4][4] }
+    pub fn edit_variance(&self) -> f64 { self.within_model_covariance[4][4] }
 }
 
 // Full 5x5 Kalman update with Joseph form for numerical stability
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn first_observation_trusts_measurement() {
+    fn first_obs_trusts() {
         let mut state = CertaintyFilterState::new();
         let result = obs(&mut state, 0.95, 0.82, 0.70, 0.50, 123);
         assert!((result.structural() - 0.95).abs() < 1e-9);
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_change_resets_state() {
+    fn hash_resets_state() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.95, 0.82, 0.70, 0.50, 100);
         obs(&mut state, 0.95, 0.82, 0.70, 0.50, 100);
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn converges_to_stable_estimate() {
+    fn converges_stable() {
         let mut state = CertaintyFilterState::new();
         let mut result = obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
         for _ in 0..20 {
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn resists_single_outlier_after_convergence() {
+    fn resists_single_outlier() {
         let mut state = CertaintyFilterState::new();
         for _ in 0..10 {
             obs(&mut state, 0.95, 0.82, 0.70, 0.50, 42);
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn model_probs_shift_toward_stable_on_consistent_input() {
+    fn probs_shift_stable() {
         let mut state = CertaintyFilterState::new();
         let mut result = obs(&mut state, 0.95, 0.90, 0.80, 0.60, 42);
         for _ in 0..15 {
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn noisy_observations_increase_noisy_model_prob() {
+    fn noisy_increases_prob() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.90, 0.80, 0.65, 0.45, 42);
         obs(&mut state, 0.70, 0.90, 0.75, 0.55, 42);
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn variance_includes_model_spread() {
+    fn variance_model_spread() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
         let stable_result = obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn confidence_interval_narrows_with_convergence() {
+    fn interval_narrows_convergence() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
         let early = obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn all_five_dimensions_tracked_independently() {
+    fn five_dims_independent() {
         let mut state = CertaintyFilterState::new();
         obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
         let result = obs5(&mut state, 0.50, 0.80, 0.70, 0.50, 0.90, 42);
@@ -607,14 +607,14 @@ mod tests {
     }
 
     #[test]
-    fn five_dim_first_observation_trusts_measurement() {
+    fn five_dim_trusts() {
         let mut state = CertaintyFilterState::new();
         let result = obs5(&mut state, 0.95, 0.82, 0.70, 0.50, 0.90, 123);
         assert!((result.edit_success() - 0.90).abs() < 1e-9);
     }
 
     #[test]
-    fn edit_success_dimension_converges() {
+    fn edit_success_converges() {
         let mut state = CertaintyFilterState::new();
         let mut result = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
         for _ in 0..20 {
@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_success_resists_single_failure() {
+    fn edit_resists_failure() {
         let mut state = CertaintyFilterState::new();
         for _ in 0..10 {
             obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_success_variance_narrows_over_time() {
+    fn edit_variance_narrows() {
         let mut state = CertaintyFilterState::new();
         obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
         let early = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
@@ -643,15 +643,15 @@ mod tests {
         }
         let late = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
         assert!(
-            late.within_edit_success_variance() < early.within_edit_success_variance(),
+            late.edit_variance() < early.edit_variance(),
             "edit_success variance should narrow: early={}, late={}",
-            early.within_edit_success_variance(),
-            late.within_edit_success_variance()
+            early.edit_variance(),
+            late.edit_variance()
         );
     }
 
     #[test]
-    fn cross_covariance_emerges_with_correlated_observations() {
+    fn cross_covariance_emerges() {
         let mut state = CertaintyFilterState::new();
         // Feed observations where structural and semantic move together
         for _ in 0..20 {
@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_transition_matrix_updates() {
+    fn transition_matrix_updates() {
         let mut state = CertaintyFilterState::new();
         for _ in 0..20 {
             obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn prior_observation_count_preserved() {
+    fn prior_count_preserved() {
         let est = [0.90, 0.80, 0.70, 0.50, 0.65];
         let var = [0.01; NUM_DIMS];
         let mut state = CertaintyFilterState::new_with_prior(est, var, 5);

@@ -50,7 +50,7 @@ impl EditGuard {
 
         let (comments, strings, preprocessor) = Self::collect_protected_lines(tree, query_cache);
         let relax_comment_string =
-            structural_safe && crate::engine::fuzzy_inference::fuzzy_edit_guard_relax(certainty);
+            structural_safe && crate::engine::fuzzy_inference::fuzzy_guard_relax(certainty);
         match contract {
             TouchContract::CodeOnly => {
                 let blocked = changed_lines
@@ -246,7 +246,7 @@ mod tests {
     use super::EditGuard;
 
     #[test]
-    fn whitespace_only_blocks_non_whitespace_changes() {
+    fn whitespace_blocks_nonws() {
         let edits = vec![Edit {
             policy: "p".into(),
             line: 3,
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn code_only_blocks_comment_line_edits() {
+    fn blocks_comment_edits() {
         let source = "// comment\nint x = 1;\n";
         let mut parser = Parser::new();
         parser

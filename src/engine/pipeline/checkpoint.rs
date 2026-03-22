@@ -2,14 +2,14 @@ use std::collections::BTreeSet;
 
 use super::{
     CoordinatedPolicyStage, PartialRollbackInput, PolicyCheckpointResult,
-    PolicyPipeline, PolicyPipelineRunState,
+    PolicyPipeline, PipelineState,
 };
 use crate::model::edit::Edit;
 
 impl PolicyPipeline {
     pub(super) fn checkpoint_policy_stage(
         &self,
-        state: &PolicyPipelineRunState<'_>,
+        state: &PipelineState<'_>,
         coordinated: &CoordinatedPolicyStage,
         policy_name: &str,
     ) -> PolicyCheckpointResult {
@@ -17,18 +17,17 @@ impl PolicyPipeline {
             return PolicyCheckpointResult::Accept { validated_tree: None };
         }
 
-        let before_errors = state
-            .tree_for_text
+        let before_errors = state.parse.tree
             .as_ref()
             .map(|t| crate::parser::ts_traversal::tree_error_stats(t).error_nodes)
             .unwrap_or(0);
 
         let after_tree = self
             .parser_manager
-            .parse_tree_sitter_with_old(
+            .reparse_tree(
                 &coordinated.result.text,
                 state.path,
-                state.tree_for_text.as_ref(),
+                state.parse.tree.as_ref(),
             );
 
         match after_tree {
@@ -43,7 +42,7 @@ impl PolicyPipeline {
                     &coordinated.result.text,
                     state.path,
                 ).ok().flatten();
-                let before_clang_result = state.clang_for_text.as_ref()
+                let before_clang_result = state.parse.clang.as_ref()
                     .map(|c| Ok(std::sync::Arc::clone(c)))
                     .unwrap_or_else(|| self.parser_manager.parse_clang(&state.current, state.path));
                 if let Ok(before_clang) = before_clang_result {
@@ -104,7 +103,7 @@ impl PolicyPipeline {
 
     pub(super) fn attempt_partial_rollback(
         &self,
-        state: &PolicyPipelineRunState<'_>,
+        state: &PipelineState<'_>,
         input: PartialRollbackInput<'_>,
     ) -> Option<PolicyCheckpointResult> {
         let PartialRollbackInput {
@@ -126,11 +125,11 @@ impl PolicyPipeline {
         if safe_edits.is_empty() {
             return None;
         }
-        let recovered = Self::apply_synthesized_edits_best_effort(&state.current, &safe_edits);
+        let recovered = Self::apply_edits_lenient(&state.current, &safe_edits);
         let recovered_text = recovered?;
         let recovered_tree = self
             .parser_manager
-            .parse_tree_sitter_with_old(&recovered_text, state.path, state.tree_for_text.as_ref())
+            .reparse_tree(&recovered_text, state.path, state.parse.tree.as_ref())
             .ok()?;
         let recovered_errors =
             crate::parser::ts_traversal::tree_error_stats(&recovered_tree).error_nodes;

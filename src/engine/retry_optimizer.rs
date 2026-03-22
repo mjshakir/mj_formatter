@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::config::optimizer_config::RetryStrategyOptimizerConfig;
+use crate::config::types::RetryOptimizerConfig;
 use crate::files::atomic_writer::AtomicWriter;
 use crate::files::codec::StateCodec;
 
@@ -51,7 +51,7 @@ impl RetryStrategyOptimizer {
     pub fn merge_state_files(
         target_path: &Path,
         shard_paths: &[std::path::PathBuf],
-        config: &RetryStrategyOptimizerConfig,
+        config: &RetryOptimizerConfig,
     ) -> anyhow::Result<()> {
         let mut merged = Self::load_state(target_path);
         let mut merged_any = false;
@@ -135,7 +135,7 @@ impl RetryStrategyOptimizer {
         Ok(())
     }
 
-    fn bonus_bounds_for_config(config: &RetryStrategyOptimizerConfig) -> (i32, i32) {
+    fn bonus_bounds_for_config(config: &RetryOptimizerConfig) -> (i32, i32) {
         let min_bonus = config.auto_tune_min_bonus.max(0);
         let max_bonus = config.auto_tune_max_bonus_cap.max(min_bonus.max(1));
         (min_bonus, max_bonus)
@@ -144,7 +144,7 @@ impl RetryStrategyOptimizer {
     fn merge_states(
         mut base: PersistedRetryStrategyState,
         incoming: PersistedRetryStrategyState,
-        config: &RetryStrategyOptimizerConfig,
+        config: &RetryOptimizerConfig,
     ) -> PersistedRetryStrategyState {
         let base_obs = base.total_observations;
         let incoming_obs = incoming.total_observations;
@@ -216,7 +216,7 @@ fn weighted_average(a: f64, a_weight: u64, b: f64, b_weight: u64) -> f64 {
 mod tests {
     use std::{collections::BTreeMap, fs, path::PathBuf};
 
-    use crate::config::optimizer_config::RetryStrategyOptimizerConfig;
+    use crate::config::types::RetryOptimizerConfig;
     use crate::files::codec::StateCodec;
 
     use super::{PersistedRetryStrategyState, RetryStrategyOptimizer, StrategyStats};
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_state_files_accumulates_worker_shards() {
+    fn merge_accumulates_shards() {
         let target = temp_path("merge_target");
         let shard_a = temp_path("merge_a");
         let shard_b = temp_path("merge_b");
@@ -306,7 +306,7 @@ mod tests {
         )
         .expect("write shard b");
 
-        let config = RetryStrategyOptimizerConfig::default();
+        let config = RetryOptimizerConfig::default();
         RetryStrategyOptimizer::merge_state_files(
             target.as_path(),
             &[shard_a.clone(), shard_b.clone()],

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::gate_config::AccuracyGateConfig;
+use crate::config::types::AccuracyGateConfig;
 use crate::parser::manager::SemanticCompdbContextKind;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -262,13 +262,13 @@ impl AccuracyGate {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::gate_config::AccuracyGateConfig;
+    use crate::config::types::AccuracyGateConfig;
     use crate::engine::accuracy_gate::AccuracyGateReason;
     use crate::engine::accuracy_gate::{AccuracyGate, AccuracyGateInput, AccuracyGateStatus};
     use crate::parser::manager::SemanticCompdbContextKind;
 
     #[test]
-    fn passes_when_thresholds_are_met() {
+    fn passes_thresholds_met() {
         let config = AccuracyGateConfig {
             enabled: true,
             min_precision: 0.5,
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn warns_when_semantic_required_is_not_met_fail_open() {
+    fn warns_semantic_open() {
         let config = AccuracyGateConfig {
             semantic_required: true,
             fail_closed: false,
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn fail_closed_blocks_on_threshold_miss() {
+    fn fail_closed_blocks() {
         let config = AccuracyGateConfig {
             enabled: true,
             fail_closed: true,
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_edits_do_not_artificially_deflate_recall() {
+    fn grouped_no_deflate() {
         let config = AccuracyGateConfig {
             enabled: true,
             fail_closed: true,
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_edit_samples_do_not_fail_recall_threshold() {
+    fn zero_edits_pass() {
         let config = AccuracyGateConfig {
             enabled: true,
             fail_closed: true,
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_reason_enums_at_boundary() {
+    fn renders_enums_boundary() {
         let decision = crate::engine::accuracy_gate::AccuracyGateDecision {
             status: AccuracyGateStatus::WarningOnly,
             precision: 0.923,
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_accuracy_gate_reasons() {
+    fn serializes_gate_reasons() {
         let reason = AccuracyGateReason::RecallBelowThreshold {
             actual: 0.250,
             minimum: 0.600,
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn fail_closed_relaxes_for_consensus_contexts() {
+    fn fail_closed_relaxes() {
         let config = AccuracyGateConfig {
             enabled: true,
             fail_closed: true,
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_source_heuristic_still_fail_closes_on_strong_threshold_miss() {
+    fn heuristic_fail_closes() {
         let config = AccuracyGateConfig {
             enabled: true,
             fail_closed: true,
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_source_heuristic_relaxes_semantic_required_unmet() {
+    fn heuristic_relaxes_semantic() {
         let config = AccuracyGateConfig {
             semantic_required: true,
             fail_closed: true,

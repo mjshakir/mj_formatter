@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
 use crate::engine::edit_candidate::CandidateRiskTier;
-use crate::engine::zone::PolicyZone;
+use crate::policy::zone::PolicyZone;
 use crate::policy::id::PolicyId;
 
 const ZONES_CODE_ONLY: [PolicyZone; 1] = [PolicyZone::Code];
@@ -66,7 +66,7 @@ impl PolicyCertainty {
     }
 
     pub fn trust_for_semantic_rewrite(&self) -> f64 {
-        crate::engine::fuzzy_inference::fuzzy_trust_semantic_rewrite(self)
+        crate::engine::fuzzy_inference::fuzzy_trust_rewrite(self)
     }
 
     pub fn trust_for_structural(&self) -> f64 {
@@ -116,16 +116,16 @@ pub struct PolicyConvergenceDefaults {
     pub domain: String,
     pub priority: u16,
     pub impact_radius: usize,
-    pub semantic_priority_weight_bp: u16,
+    pub priority_weight_bp: u16,
     pub risk_tier: CatalogConvergenceRiskTier,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PolicyBehavior {
-    pub requires_exact_compdb_for_wide_structural: bool,
-    pub keeps_non_local_conflict_batch: bool,
-    pub advisory_on_semantic_retry: bool,
-    pub hard_invariant_by_default: bool,
+    pub needs_exact_compdb: bool,
+    pub keeps_nonlocal_batch: bool,
+    pub advisory_on_retry: bool,
+    pub hard_invariant: bool,
     pub bypasses_line_conflict: bool,
     pub execution_priority: u8,
 }
@@ -134,7 +134,7 @@ pub struct PolicyBehavior {
 struct PolicyConvergenceTemplate {
     priority: u16,
     impact_radius: usize,
-    semantic_priority_weight_bp: u16,
+    priority_weight_bp: u16,
     risk_tier: CatalogConvergenceRiskTier,
 }
 
@@ -143,7 +143,7 @@ impl Default for PolicyConvergenceTemplate {
         Self {
             priority: 700,
             impact_radius: 0,
-            semantic_priority_weight_bp: 240,
+            priority_weight_bp: 240,
             risk_tier: CatalogConvergenceRiskTier::Balanced,
         }
     }
@@ -152,10 +152,10 @@ impl Default for PolicyConvergenceTemplate {
 impl Default for PolicyBehavior {
     fn default() -> Self {
         Self {
-            requires_exact_compdb_for_wide_structural: false,
-            keeps_non_local_conflict_batch: false,
-            advisory_on_semantic_retry: false,
-            hard_invariant_by_default: false,
+            needs_exact_compdb: false,
+            keeps_nonlocal_batch: false,
+            advisory_on_retry: false,
+            hard_invariant: false,
             bypasses_line_conflict: false,
             execution_priority: 80,
         }
@@ -172,15 +172,28 @@ struct PolicyCatalogEntry {
 
 #[derive(Clone, Debug)]
 pub struct PolicyCatalog {
-    known: HashMap<PolicyId, PolicyCatalogEntry>,
+    known: FxHashMap<PolicyId, PolicyCatalogEntry>,
     default_capabilities: PolicyCapabilities,
     default_convergence: PolicyConvergenceTemplate,
     default_behavior: PolicyBehavior,
 }
 
+pub trait CatalogKey {
+    fn to_policy_id(&self) -> PolicyId;
+}
+impl CatalogKey for &str {
+    fn to_policy_id(&self) -> PolicyId { PolicyId::from_str_lossy(self) }
+}
+impl CatalogKey for &PolicyId {
+    fn to_policy_id(&self) -> PolicyId { (*self).clone() }
+}
+impl CatalogKey for PolicyId {
+    fn to_policy_id(&self) -> PolicyId { self.clone() }
+}
+
 impl PolicyCatalog {
     fn build() -> Self {
-        let mut known = HashMap::<PolicyId, PolicyCatalogEntry>::new();
+        let mut known: FxHashMap<PolicyId, PolicyCatalogEntry> = FxHashMap::default();
 
         for id in [
             PolicyId::DashCommentNormalizer,
@@ -219,60 +232,48 @@ impl PolicyCatalog {
         }
     }
 
-    pub fn capabilities_for_name(&self, policy_name: &str) -> PolicyCapabilities {
-        let id = PolicyId::from_str_lossy(policy_name);
-        self.capabilities_for_id(&id)
-    }
-
-    pub fn capabilities_for_id(&self, policy_id: &PolicyId) -> PolicyCapabilities {
+    pub fn capabilities(&self, key: impl CatalogKey) -> PolicyCapabilities {
+        let id = key.to_policy_id();
         self.known
-            .get(policy_id)
+            .get(&id)
             .map(|entry| entry.capabilities)
             .unwrap_or(self.default_capabilities)
     }
 
-    pub fn convergence_defaults_for_name(&self, policy_name: &str) -> PolicyConvergenceDefaults {
-        let policy_id = PolicyId::from_str_lossy(policy_name);
-        self.convergence_defaults_for_id(&policy_id)
-    }
-
-    pub fn convergence_defaults_for_id(&self, policy_id: &PolicyId) -> PolicyConvergenceDefaults {
-        if let Some(entry) = self.known.get(policy_id) {
+    pub fn convergence(&self, key: impl CatalogKey) -> PolicyConvergenceDefaults {
+        let id = key.to_policy_id();
+        if let Some(entry) = self.known.get(&id) {
             return PolicyConvergenceDefaults {
                 domain: entry.name.to_string(),
                 priority: entry.convergence.priority,
                 impact_radius: entry.convergence.impact_radius,
-                semantic_priority_weight_bp: entry.convergence.semantic_priority_weight_bp,
+                priority_weight_bp: entry.convergence.priority_weight_bp,
                 risk_tier: entry.convergence.risk_tier,
             };
         }
         PolicyConvergenceDefaults {
-            domain: policy_id.as_str().to_string(),
+            domain: id.as_str().to_string(),
             priority: self.default_convergence.priority,
             impact_radius: self.default_convergence.impact_radius,
-            semantic_priority_weight_bp: self.default_convergence.semantic_priority_weight_bp,
+            priority_weight_bp: self.default_convergence.priority_weight_bp,
             risk_tier: self.default_convergence.risk_tier,
         }
     }
 
-    pub fn behavior_for_name(&self, policy_name: &str) -> PolicyBehavior {
-        let policy_id = PolicyId::from_str_lossy(policy_name);
-        self.behavior_for_id(&policy_id)
-    }
-
-    pub fn behavior_for_id(&self, policy_id: &PolicyId) -> PolicyBehavior {
+    pub fn behavior(&self, key: impl CatalogKey) -> PolicyBehavior {
+        let id = key.to_policy_id();
         self.known
-            .get(policy_id)
+            .get(&id)
             .map(|entry| entry.behavior)
             .unwrap_or(self.default_behavior)
     }
 
     pub fn bypasses_line_conflict(&self, policy_name: &str) -> bool {
-        self.behavior_for_name(policy_name).bypasses_line_conflict
+        self.behavior(policy_name).bypasses_line_conflict
     }
 
-    pub fn is_semantic_rewrite_policy_name(&self, policy_name: &str) -> bool {
-        self.capabilities_for_name(policy_name).semantic_rewrite
+    pub fn is_semantic_rewrite(&self, key: impl CatalogKey) -> bool {
+        self.capabilities(key).semantic_rewrite
     }
 
     fn entry_for_known_policy(policy_id: PolicyId) -> PolicyCatalogEntry {
@@ -408,7 +409,7 @@ impl PolicyCatalog {
                 PolicyId::SectionTitleNormalizer => 1,
                 _ => 0,
             },
-            semantic_priority_weight_bp: match policy_id {
+            priority_weight_bp: match policy_id {
                 PolicyId::NamingConventions => 420,
                 PolicyId::FunctionVoidParams => 300,
                 _ => 240,
@@ -417,7 +418,7 @@ impl PolicyCatalog {
         };
 
         let behavior = PolicyBehavior {
-            requires_exact_compdb_for_wide_structural: matches!(
+            needs_exact_compdb: matches!(
                 policy_id,
                 PolicyId::ClangFormat
                     | PolicyId::IncludeOrder
@@ -425,9 +426,9 @@ impl PolicyCatalog {
                     | PolicyId::CompactDeclarations
                     | PolicyId::DashCommentNormalizer
             ),
-            keeps_non_local_conflict_batch: matches!(policy_id, PolicyId::ClangFormat),
-            advisory_on_semantic_retry: matches!(policy_id, PolicyId::ClangFormat),
-            hard_invariant_by_default: false,
+            keeps_nonlocal_batch: matches!(policy_id, PolicyId::ClangFormat),
+            advisory_on_retry: matches!(policy_id, PolicyId::ClangFormat),
+            hard_invariant: false,
             bypasses_line_conflict: matches!(
                 policy_id,
                 PolicyId::NumericLiteralSuffix | PolicyId::ClangFormat
@@ -474,7 +475,7 @@ mod tests {
     use crate::engine::edit_candidate::CandidateRiskTier;
     use crate::policy::id::PolicyId;
 
-    fn all_known_policy_ids() -> Vec<PolicyId> {
+    fn all_policy_ids() -> Vec<PolicyId> {
         vec![
             PolicyId::DashCommentNormalizer,
             PolicyId::SectionTitleNormalizer,
@@ -496,9 +497,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_contains_all_known_policy_ids() {
+    fn contains_all_ids() {
         let catalog = PolicyCatalog::build();
-        for id in all_known_policy_ids() {
+        for id in all_policy_ids() {
             assert!(
                 catalog.known.contains_key(&id),
                 "missing catalog entry for {}",
@@ -508,71 +509,71 @@ mod tests {
     }
 
     #[test]
-    fn catalog_behavior_flags_match_expected_policies() {
+    fn flags_match_expected() {
         let catalog = policy_catalog();
         assert!(
             catalog
-                .behavior_for_name("clang_format")
-                .requires_exact_compdb_for_wide_structural
+                .behavior("clang_format")
+                .needs_exact_compdb
         );
         assert_eq!(
             catalog
-                .behavior_for_name("naming_conventions")
+                .behavior("naming_conventions")
                 .execution_priority,
             10
         );
         assert_eq!(
-            catalog.behavior_for_name("clang_format").execution_priority,
+            catalog.behavior("clang_format").execution_priority,
             90
         );
         assert!(
             catalog
-                .behavior_for_name("clang_format")
-                .keeps_non_local_conflict_batch
+                .behavior("clang_format")
+                .keeps_nonlocal_batch
         );
         assert!(
             catalog
-                .behavior_for_name("clang_format")
-                .advisory_on_semantic_retry
+                .behavior("clang_format")
+                .advisory_on_retry
         );
         assert!(
             !catalog
-                .behavior_for_name("dash_comment_normalizer")
-                .keeps_non_local_conflict_batch
+                .behavior("dash_comment_normalizer")
+                .keeps_nonlocal_batch
         );
     }
 
     #[test]
-    fn semantic_rewrite_flag_is_source_of_truth_for_policy_capability() {
+    fn rewrite_flag_truth() {
         let catalog = policy_catalog();
-        let semantic = catalog.capabilities_for_name("naming_conventions");
+        let semantic = catalog.capabilities("naming_conventions");
         assert!(semantic.semantic_rewrite);
         assert_eq!(semantic.risk_tier, CandidateRiskTier::High);
 
-        let stable = catalog.capabilities_for_name("dash_comment_normalizer");
+        let stable = catalog.capabilities("dash_comment_normalizer");
         assert!(!stable.semantic_rewrite);
         assert_eq!(stable.risk_tier, CandidateRiskTier::Low);
     }
 
     #[test]
-    fn convergence_defaults_are_stable_for_anchor_policies() {
+    fn defaults_stable_anchors() {
         let catalog = policy_catalog();
-        let clang = catalog.convergence_defaults_for_name("clang_format");
+        let clang = catalog.convergence("clang_format");
         assert_eq!(clang.priority, 1_000);
         assert_eq!(clang.impact_radius, 2);
         assert_eq!(clang.risk_tier, CatalogConvergenceRiskTier::Stabilizer);
 
-        let naming = catalog.convergence_defaults_for_name("naming_conventions");
-        assert_eq!(naming.semantic_priority_weight_bp, 420);
+        let naming = catalog.convergence("naming_conventions");
+        assert_eq!(naming.priority_weight_bp, 420);
         assert_eq!(naming.risk_tier, CatalogConvergenceRiskTier::Rewrite);
 
-        let unknown = catalog.convergence_defaults_for_name("custom_policy");
+        let unknown = catalog.convergence("custom_policy");
         assert_eq!(unknown.priority, 700);
         assert_eq!(unknown.risk_tier, CatalogConvergenceRiskTier::Balanced);
     }
 
     #[test]
-    fn trust_zero_coverage_reduces_but_not_kills() {
+    fn zero_coverage_reduces() {
         use super::PolicyCertainty;
         let certainty = PolicyCertainty {
             semantic: 0.90,
@@ -590,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_high_confidence_yields_high() {
+    fn confidence_yields_high() {
         use super::PolicyCertainty;
         let certainty = PolicyCertainty {
             overall: 0.85,
@@ -614,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_stable_model_boosts() {
+    fn stable_model_boosts() {
         use super::PolicyCertainty;
         let base = PolicyCertainty {
             semantic: 0.70,
@@ -636,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_edit_success_boosts() {
+    fn edit_success_boosts() {
         use super::PolicyCertainty;
         let base = PolicyCertainty {
             semantic: 0.70,
@@ -659,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_both_bad_compounds_reduction() {
+    fn both_bad_compounds() {
         use super::PolicyCertainty;
         let good = PolicyCertainty {
             semantic: 0.80,
@@ -690,7 +691,7 @@ pub struct PolicyCapabilityMatrix;
 
 impl PolicyCapabilityMatrix {
     pub fn for_policy(policy_name: &str) -> PolicyCapabilities {
-        policy_catalog().capabilities_for_name(policy_name)
+        policy_catalog().capabilities(policy_name)
     }
 }
 
@@ -699,7 +700,7 @@ mod capability_tests {
     use super::{PolicyCapabilityMatrix, PolicyCertainty};
 
     #[test]
-    fn semantic_rewrite_low_trust_near_zero() {
+    fn rewrite_low_trust() {
         let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
         let certainty = PolicyCertainty {
             overall: 0.85,
@@ -712,7 +713,7 @@ mod capability_tests {
     }
 
     #[test]
-    fn whitespace_policy_high_trust_under_low_semantic() {
+    fn whitespace_low_semantic() {
         let capability = PolicyCapabilityMatrix::for_policy("dash_comment_normalizer");
         let certainty = PolicyCertainty {
             overall: 0.40,

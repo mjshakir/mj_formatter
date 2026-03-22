@@ -4,11 +4,11 @@ use crate::engine::catalog::PolicyCertainty;
 use crate::engine::catalog::policy_catalog;
 use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
 use crate::engine::run_options::RetryScopeStage;
-use crate::engine::zone::PolicyZone;
+use crate::policy::zone::PolicyZone;
 use crate::engine::semantic_contract::{SemanticContract, ALL_CLAUSES};
 
 #[derive(Clone, Debug, Default)]
-pub struct GlobalConflictSolveResult {
+pub struct ConflictResult {
     pub accepted: Vec<PolicyEditCandidate>,
     pub dropped_lines: BTreeSet<usize>,
     pub hard_blocked_lines: BTreeSet<usize>,
@@ -30,9 +30,9 @@ impl GlobalConflictSolver {
         already_selected: &[PolicyEditCandidate],
         certainty: &PolicyCertainty,
         scope_stage: RetryScopeStage,
-    ) -> GlobalConflictSolveResult {
+    ) -> ConflictResult {
         if incoming.is_empty() {
-            return GlobalConflictSolveResult::default();
+            return ConflictResult::default();
         }
 
         let consolidated = Self::consolidate_by_line(incoming, certainty, scope_stage);
@@ -80,7 +80,7 @@ impl GlobalConflictSolver {
             dropped_lines.insert(candidate.line);
         }
 
-        GlobalConflictSolveResult {
+        ConflictResult {
             accepted,
             dropped_lines,
             hard_blocked_lines,
@@ -223,7 +223,7 @@ impl GlobalConflictSolver {
     }
 
     fn is_semantic_rewrite_policy(policy: &str) -> bool {
-        policy_catalog().is_semantic_rewrite_policy_name(policy)
+        policy_catalog().is_semantic_rewrite(policy)
     }
 
     fn ranges_overlap(left: &[(usize, usize)], right: &[(usize, usize)]) -> bool {
@@ -528,11 +528,11 @@ mod tests {
     use crate::engine::catalog::PolicyCertainty;
     use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
     use crate::engine::run_options::RetryScopeStage;
-    use crate::engine::zone::PolicyZone;
+    use crate::policy::zone::PolicyZone;
     use crate::engine::semantic_contract::SemanticInvariantClause;
 
     #[test]
-    fn hard_constraint_candidates_are_rejected() {
+    fn hard_constraint_rejected() {
         let candidate = PolicyEditCandidate {
             policy: "naming_conventions".into(),
             line: 7,
@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_risk_candidate_is_preferred_in_uncertain_region() {
+    fn prefers_risk_uncertain() {
         let low = PolicyEditCandidate {
             policy: "compact_declarations".into(),
             line: 12,
@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_component_solver_prefers_global_utility_over_greedy_pick() {
+    fn solver_global_utility() {
         let high_single = PolicyEditCandidate {
             policy: "naming_conventions".into(),
             line: 20,
@@ -667,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn far_apart_structural_candidates_with_same_symbol_can_both_apply() {
+    fn far_apart_coexist() {
         let left = PolicyEditCandidate {
             policy: "clang_format".into(),
             line: 20,
@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_rewrite_candidates_from_same_policy_do_not_self_conflict() {
+    fn rewrite_no_selfconflict() {
         let left = PolicyEditCandidate {
             policy: "naming_conventions".into(),
             line: 41,
@@ -752,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn same_policy_same_line_candidates_conflict() {
+    fn same_line_conflicts() {
         let left = PolicyEditCandidate {
             policy: "naming_conventions".into(),
             line: 9,

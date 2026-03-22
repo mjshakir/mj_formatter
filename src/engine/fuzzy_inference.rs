@@ -267,7 +267,7 @@ fn modulation(certainty: &PolicyCertainty) -> f64 {
 
 /// Kalman-direct trust: weighted average of semantic + coverage estimates,
 /// damped by variance and modulated by stability/edit_success/richness.
-pub fn fuzzy_trust_semantic_rewrite(certainty: &PolicyCertainty) -> f64 {
+pub fn fuzzy_trust_rewrite(certainty: &PolicyCertainty) -> f64 {
     let mp = certainty.model_probs();
     let oc = certainty.observation_count;
     let sem = adaptive_variance_damp(certainty.semantic, certainty.semantic_variance, 1, mp, oc);
@@ -288,7 +288,7 @@ pub fn fuzzy_trust_structural(certainty: &PolicyCertainty) -> f64 {
 /// tree-sitter error node count to drive region splitting, modulated by Kalman
 /// structural trust. Files with zero errors use whole-file formatting. Files with
 /// errors get smaller regions to contain checkpoint blast radius.
-pub fn fuzzy_region_batch_lines(certainty: &PolicyCertainty, file_error_nodes: usize) -> usize {
+pub fn fuzzy_batch_lines(certainty: &PolicyCertainty, file_error_nodes: usize) -> usize {
     if file_error_nodes == 0 {
         return usize::MAX;
     }
@@ -345,24 +345,24 @@ pub fn fuzzy_conflict_neighborhood(trust: f64, is_semantic: bool) -> usize {
 
 pub const DEFAULT_TRUST: f64 = 0.5;
 
-pub fn fuzzy_diagnostic_error_cap(trust: f64) -> usize {
+pub fn fuzzy_error_cap(trust: f64) -> usize {
     let cap = 4.0 + 12.0 * trust;
     cap.round().clamp(4.0, 16.0) as usize
 }
 
-pub fn fuzzy_reference_count_radius(ref_count: usize, trust: f64) -> usize {
+pub fn fuzzy_ref_radius(ref_count: usize, trust: f64) -> usize {
     let normalized = (ref_count as f64 / 1024.0).clamp(0.0, 1.0);
     let raw = normalized * (1.2 - 0.4 * trust);
     kalman_interp(raw, 0.0, 1.0, 2.0).round().clamp(0.0, 2.0) as usize
 }
 
-pub fn fuzzy_edit_count_radius(edit_count: usize, trust: f64) -> usize {
+pub fn fuzzy_edit_radius(edit_count: usize, trust: f64) -> usize {
     let normalized = (edit_count as f64 / 48.0).clamp(0.0, 1.0);
     let raw = normalized * (1.2 - 0.4 * trust);
     kalman_interp(raw, 0.0, 1.0, 2.0).round().clamp(0.0, 2.0) as usize
 }
 
-pub fn fuzzy_edit_guard_relax(certainty: Option<&PolicyCertainty>) -> bool {
+pub fn fuzzy_guard_relax(certainty: Option<&PolicyCertainty>) -> bool {
     let cert = match certainty {
         Some(c) => c,
         None => return false,
@@ -375,7 +375,7 @@ pub fn fuzzy_edit_guard_relax(certainty: Option<&PolicyCertainty>) -> bool {
     score >= threshold
 }
 
-pub fn fuzzy_guardian_zone_relax(certainty: Option<&PolicyCertainty>) -> bool {
+pub fn fuzzy_zone_relax(certainty: Option<&PolicyCertainty>) -> bool {
     let cert = match certainty {
         Some(c) => c,
         None => return false,
@@ -388,7 +388,7 @@ pub fn fuzzy_guardian_zone_relax(certainty: Option<&PolicyCertainty>) -> bool {
     score >= threshold
 }
 
-pub fn fuzzy_hard_constraint_override(
+pub fn fuzzy_constraint_override(
     certainty: Option<&PolicyCertainty>,
     clause: crate::engine::semantic_contract::SemanticInvariantClause,
 ) -> bool {
@@ -479,7 +479,7 @@ pub fn fuzzy_fidelity_deduction(fidelity_score: f64, trust: f64) -> u16 {
     (base * trust_mod).round().max(0.0) as u16
 }
 
-pub fn fuzzy_diagnostic_relaxation_limits(
+pub fn fuzzy_relaxation_limits(
     context_kind_index: u8,
     certainty: Option<&PolicyCertainty>,
 ) -> (usize, u32) {
@@ -503,7 +503,7 @@ pub fn fuzzy_diagnostic_relaxation_limits(
     (adj_severe, adj_weighted)
 }
 
-pub fn fuzzy_tree_error_ratio_tolerance(
+pub fn fuzzy_error_tolerance(
     base: f64,
     certainty: Option<&PolicyCertainty>,
 ) -> f64 {
@@ -519,7 +519,7 @@ pub fn fuzzy_tree_error_ratio_tolerance(
     (base * tightness * variance_factor * noisy_factor).clamp(0.001, 0.20)
 }
 
-pub fn fuzzy_semantic_transition_tolerances(
+pub fn fuzzy_transition_tols(
     context_kind: SemanticCompdbContextKind,
     base_ref: usize,
     base_scope: usize,
@@ -571,8 +571,8 @@ pub struct PostEditObservation {
     pub clang_diagnostics_increased: bool,
     pub tree_error_regressed: bool,
     pub culprit_locality_ratio: f64,
-    pub has_semantic_rewrite_edits: bool,
-    pub all_edits_whitespace_safe: bool,
+    pub has_rewrite_edits: bool,
+    pub all_whitespace_safe: bool,
     pub exact_compdb: bool,
     pub identity_severity: f64,
     pub reference_severity: f64,
@@ -586,9 +586,9 @@ fn failure_severity_inputs(obs: &PostEditObservation) -> (f64, f64) {
         (false, true) => 0.75,
         (false, false) => 0.0,
     };
-    let edit_risk: f64 = if obs.has_semantic_rewrite_edits {
+    let edit_risk: f64 = if obs.has_rewrite_edits {
         1.0
-    } else if !obs.all_edits_whitespace_safe {
+    } else if !obs.all_whitespace_safe {
         0.6
     } else {
         0.2
@@ -599,9 +599,9 @@ fn failure_severity_inputs(obs: &PostEditObservation) -> (f64, f64) {
         let rf = 0.45 * obs.reference_severity;
         let sc = 0.25 * obs.scope_severity;
         let base = (id + rf + sc).clamp(0.0, 1.0);
-        if obs.has_semantic_rewrite_edits && base > 0.0 {
+        if obs.has_rewrite_edits && base > 0.0 {
             (base * 1.35).clamp(0.0, 1.0)
-        } else if obs.all_edits_whitespace_safe {
+        } else if obs.all_whitespace_safe {
             base * 0.35
         } else {
             base
@@ -676,13 +676,13 @@ const CONTEXT_MOD: [TsRule1; 3] = [
     TsRule1 { term: 2, consequent: 1.10 },
 ];
 
-pub fn fuzzy_edit_acceptance_adaptive(
+pub fn fuzzy_edit_acceptance(
     observation: &PostEditObservation,
     certainty: Option<&PolicyCertainty>,
     context_kind: SemanticCompdbContextKind,
     adaptive: Option<&AdaptiveRuleBases>,
 ) -> (f64, Option<AdaptiveFiringRecord>) {
-    if observation.tree_error_regressed && observation.exact_compdb && observation.has_semantic_rewrite_edits {
+    if observation.tree_error_regressed && observation.exact_compdb && observation.has_rewrite_edits {
         let trust = certainty.map(|c| c.trust_for_general()).unwrap_or(DEFAULT_TRUST);
         return ((0.001 + 0.009 * trust).clamp(0.001, 0.01), None);
     }
@@ -695,8 +695,8 @@ pub fn fuzzy_edit_acceptance_adaptive(
     }
 
     let trust = if let Some(c) = certainty {
-        if observation.has_semantic_rewrite_edits {
-            fuzzy_trust_semantic_rewrite(c)
+        if observation.has_rewrite_edits {
+            fuzzy_trust_rewrite(c)
         } else {
             fuzzy_trust_structural(c)
         }
@@ -758,7 +758,7 @@ const RELIABILITY_MOD: [TsRule1; 3] = [
     TsRule1 { term: 2, consequent: 1.15 },
 ];
 
-pub fn fuzzy_impact_radius_cap(
+pub fn fuzzy_radius_cap(
     stability_score: f64,
     uncertainty: f64,
     reliability_lower: f64,
@@ -809,7 +809,7 @@ pub fn fuzzy_impact_radius_cap(
 /// - `certainty`: optional Kalman filter state for trust modulation
 ///
 /// Returns: tolerance in lines (0 = exact match only, 16 = very permissive)
-pub fn fuzzy_identity_migration_tolerance(
+pub fn fuzzy_migration_tol(
     edit_count: usize,
     certainty: Option<&PolicyCertainty>,
 ) -> usize {
@@ -850,7 +850,7 @@ pub fn fuzzy_identity_migration_tolerance(
     tolerance.round() as usize
 }
 
-pub fn fuzzy_trust_deficit_penalty(trust: f64) -> f64 {
+pub fn fuzzy_deficit_penalty(trust: f64) -> f64 {
     let low_trust = GaussianMF::new(0.0, 0.07);
     low_trust.membership(trust) * 0.075
 }
@@ -889,7 +889,7 @@ fn parser_availability_score(has_compdb: bool, clang_success: bool, tree_availab
     }
 }
 
-pub fn fuzzy_raw_semantic_observation(
+pub fn fuzzy_semantic_obs(
     has_compdb: bool,
     clang_success: bool,
     usr_ratio: f64,
@@ -940,7 +940,7 @@ const PARSER_AGREEMENT_BASE: [TsRule2; 9] = [
     TsRule2 { term0: 2, term1: 2, consequent: 1.00 },
 ];
 
-pub fn fuzzy_parser_cross_validation(
+pub fn fuzzy_cross_validation(
     tree_scope_count: usize,
     clang_declaration_count: usize,
     tree_error_ratio: f64,
@@ -993,7 +993,7 @@ const PASS_MOD: [TsRule1; 3] = [
     TsRule1 { term: 2, consequent: 1.00 },   // first pass → full outcome
 ];
 
-pub fn fuzzy_edit_outcome_adaptive(
+pub fn fuzzy_edit_outcome(
     pass_number: usize,
     accepted: bool,
     acceptance_score: f64,
@@ -1044,15 +1044,15 @@ pub fn fuzzy_constraint_penalty(constraint_count: usize, trust: f64) -> f64 {
 // Design principle: at trust=0.5 (default), output ≈ old hardcoded value (±5%)
 // ---------------------------------------------------------------------------
 
-pub fn fuzzy_convergence_impact_cap(trust: f64) -> usize {
+pub fn fuzzy_impact_cap(trust: f64) -> usize {
     kalman_interp(trust, 128.0, 256.0, 512.0).round().max(64.0) as usize
 }
 
-pub fn fuzzy_convergence_scope_cap(trust: f64) -> usize {
+pub fn fuzzy_scope_cap(trust: f64) -> usize {
     kalman_interp(trust, 96.0, 192.0, 384.0).round().max(48.0) as usize
 }
 
-pub fn fuzzy_convergence_symbol_cap(trust: f64) -> usize {
+pub fn fuzzy_symbol_cap(trust: f64) -> usize {
     kalman_interp(trust, 64.0, 128.0, 256.0).round().max(32.0) as usize
 }
 
@@ -1064,7 +1064,7 @@ pub fn fuzzy_batch_dropped_cap(trust: f64) -> usize {
     kalman_interp(trust, 4.0, 8.0, 16.0).round().max(2.0) as usize
 }
 
-pub fn fuzzy_kalman_reobservation_interval(trust: f64) -> usize {
+pub fn fuzzy_reobs_interval(trust: f64) -> usize {
     kalman_interp(trust, 2.0, 3.0, 5.0).round().max(1.0) as usize
 }
 
@@ -1090,7 +1090,7 @@ pub fn fuzzy_footprint_weights(certainty: f64) -> (f64, f64) {
     )
 }
 
-pub fn fuzzy_diagnostic_severity_weight(severity_level: u8, trust: f64) -> u32 {
+pub fn fuzzy_severity_weight(severity_level: u8, trust: f64) -> u32 {
     let base = match severity_level {
         0 => 1.0,
         1 => 3.0,
@@ -1119,11 +1119,11 @@ pub fn fuzzy_locality_radius(certainty: Option<&PolicyCertainty>) -> usize {
     kalman_interp(trust, 2.0, 4.0, 7.0).round().max(1.0) as usize
 }
 
-pub fn fuzzy_richness_radius_multiplier(certainty: f64) -> f64 {
+pub fn fuzzy_richness_mult(certainty: f64) -> f64 {
     kalman_interp(certainty, 2.5, 4.0, 5.5).clamp(2.0, 6.0)
 }
 
-pub fn fuzzy_style_gain_weights(certainty: f64) -> (f64, f64, f64) {
+pub fn fuzzy_style_weights(certainty: f64) -> (f64, f64, f64) {
     (
         kalman_interp(certainty, 0.50, 0.60, 0.70).clamp(0.3, 0.8),
         kalman_interp(certainty, 0.50, 0.40, 0.30).clamp(0.2, 0.6),
@@ -1131,7 +1131,7 @@ pub fn fuzzy_style_gain_weights(certainty: f64) -> (f64, f64, f64) {
     )
 }
 
-pub fn fuzzy_context_tolerance_adjustment(kind: u8, trust: f64) -> (usize, usize) {
+pub fn fuzzy_context_tol(kind: u8, trust: f64) -> (usize, usize) {
     let (base_ref, base_scope) = match kind {
         0 => (0, 0),
         1 => (24, 4),
@@ -1149,7 +1149,7 @@ pub fn fuzzy_context_tolerance_adjustment(kind: u8, trust: f64) -> (usize, usize
 /// Semantic confidence bonus: replaces hardcoded bp additions (300, 250, 150, 180, 80)
 /// clause: 0=base(300), 1=clang_success(250), 2=tree_clean(150), 3=diagnostics_clean(180), 4=usr_backed(80)
 /// At trust=0.5: returns original hardcoded value.
-pub fn fuzzy_semantic_confidence_bonus(clause: u8, trust: f64) -> u16 {
+pub fn fuzzy_confidence_bonus(clause: u8, trust: f64) -> u16 {
     let base = match clause {
         0 => 300.0,
         1 => 250.0,
@@ -1160,7 +1160,7 @@ pub fn fuzzy_semantic_confidence_bonus(clause: u8, trust: f64) -> u16 {
     (base * kalman_interp(trust, 0.7, 1.0, 1.25)).round().max(0.0) as u16
 }
 
-pub fn fuzzy_contract_failure_deduction(clause: u8, trust: f64) -> u16 {
+pub fn fuzzy_failure_deduction(clause: u8, trust: f64) -> u16 {
     let base = match clause {
         0 => 120.0,
         1 => 260.0,
@@ -1190,7 +1190,7 @@ mod tests {
     ];
 
     #[test]
-    fn gaussian_peaks_at_center() {
+    fn gaussian_peaks_center() {
         let mf = GaussianMF::new(0.5, 0.20);
         assert!((mf.membership(0.5) - 1.0).abs() < 1e-9);
         assert!(mf.membership(0.3) > 0.3);
@@ -1198,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn gaussian_near_zero_far_from_center() {
+    fn gaussian_near_zero() {
         let mf = GaussianMF::new(0.5, 0.15);
         assert!(mf.membership(0.0) < 0.01);
         assert!(mf.membership(1.0) < 0.01);
@@ -1215,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_variable_low_coverage() {
+    fn ci_low_coverage() {
         let var = ci_variable();
         let m = var.memberships(0.05);
         assert!(m[0] > 0.9, "low membership should be high at 0.05, got {}", m[0]);
@@ -1224,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_variable_high_coverage() {
+    fn ci_high_coverage() {
         let var = ci_variable();
         let m = var.memberships(0.90);
         assert!(m[0] < 0.01, "low should be ~0 at 0.90, got {}", m[0]);
@@ -1233,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_variable_medium_coverage() {
+    fn ci_medium_coverage() {
         let var = ci_variable();
         let m = var.memberships(0.50);
         assert!(m[0] < 0.10, "low should be small at 0.50, got {}", m[0]);
@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn ts2_zero_firing_returns_zero() {
+    fn ts2_zero_returns() {
         let m0 = [0.0, 0.0, 0.0];
         let m1 = [0.0, 0.0, 0.0];
         let result = evaluate_ts2(&m0, &m1, &TEST_RULE_BASE);
@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn ts2_interpolation_between_rules() {
+    fn ts2_interpolates_rules() {
         let m0 = [0.0, 0.5, 0.5];
         let m1 = [0.0, 0.0, 1.0];
         let result = evaluate_ts2(&m0, &m1, &TEST_RULE_BASE);
@@ -1287,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_trust_zero_coverage_reduces_but_not_kills() {
+    fn trust_zero_coverage() {
         let c = PolicyCertainty {
             semantic: 0.90,
             coverage: 0.0,
@@ -1298,14 +1298,14 @@ mod tests {
             edit_success_variance: 0.002,
             ..default_certainty()
         };
-        let trust = fuzzy_trust_semantic_rewrite(&c);
+        let trust = fuzzy_trust_rewrite(&c);
         assert!(trust > 0.25 && trust < 0.65,
             "zero coverage should reduce trust but not kill it, got {}",
             trust);
     }
 
     #[test]
-    fn fuzzy_trust_high_everything_yields_high() {
+    fn trust_high_yields() {
         let c = PolicyCertainty {
             overall: 0.85,
             semantic: 0.90,
@@ -1323,16 +1323,16 @@ mod tests {
             edit_success_variance: 0.002,
             ..Default::default()
         };
-        assert!(fuzzy_trust_semantic_rewrite(&c) > 0.60,
+        assert!(fuzzy_trust_rewrite(&c) > 0.60,
             "high everything should yield high trust, got {}",
-            fuzzy_trust_semantic_rewrite(&c));
+            fuzzy_trust_rewrite(&c));
         assert!(fuzzy_trust_structural(&c) > 0.60,
             "structural trust should be high, got {}",
             fuzzy_trust_structural(&c));
     }
 
     #[test]
-    fn fuzzy_trust_stable_boosts() {
+    fn trust_stable_boosts() {
         let base = PolicyCertainty {
             semantic: 0.70,
             coverage: 0.70,
@@ -1347,11 +1347,11 @@ mod tests {
             stable_model_prob: 0.90,
             ..base
         };
-        assert!(fuzzy_trust_semantic_rewrite(&boosted) > fuzzy_trust_semantic_rewrite(&base));
+        assert!(fuzzy_trust_rewrite(&boosted) > fuzzy_trust_rewrite(&base));
     }
 
     #[test]
-    fn fuzzy_trust_edit_success_boosts() {
+    fn trust_edit_boosts() {
         let base = PolicyCertainty {
             semantic: 0.70,
             coverage: 0.70,
@@ -1371,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_trust_monotonic_semantic() {
+    fn trust_monotonic_semantic() {
         let low = PolicyCertainty {
             semantic: 0.30,
             semantic_variance: 0.01,
@@ -1382,7 +1382,7 @@ mod tests {
             semantic_variance: 0.002,
             ..default_certainty()
         };
-        assert!(fuzzy_trust_semantic_rewrite(&high) > fuzzy_trust_semantic_rewrite(&low));
+        assert!(fuzzy_trust_rewrite(&high) > fuzzy_trust_rewrite(&low));
     }
 
     fn default_observation() -> PostEditObservation {
@@ -1390,8 +1390,8 @@ mod tests {
             clang_diagnostics_increased: false,
             tree_error_regressed: false,
             culprit_locality_ratio: 0.8,
-            has_semantic_rewrite_edits: false,
-            all_edits_whitespace_safe: false,
+            has_rewrite_edits: false,
+            all_whitespace_safe: false,
             exact_compdb: false,
             identity_severity: 0.0,
             reference_severity: 0.0,
@@ -1400,38 +1400,38 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_no_failures_returns_one() {
+    fn acceptance_no_failures() {
         let obs = default_observation();
-        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
+        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!((score - 1.0).abs() < 1e-9, "no failures should yield 1.0, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_tree_error_exact_compdb_blocks_semantic_rewrites() {
+    fn acceptance_blocks_semantic() {
         let obs = PostEditObservation {
             tree_error_regressed: true,
             exact_compdb: true,
-            has_semantic_rewrite_edits: true,
+            has_rewrite_edits: true,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
+        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!(score < 0.02, "tree error + exact compdb + semantic rewrite should yield near-zero, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_tree_error_exact_compdb_allows_non_semantic() {
+    fn acceptance_allows_nonsemantic() {
         let obs = PostEditObservation {
             tree_error_regressed: true,
             exact_compdb: true,
-            has_semantic_rewrite_edits: false,
+            has_rewrite_edits: false,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
+        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!(score > 0.0, "tree error + exact compdb without semantic rewrites should not hard-block, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_high_identity_severity_with_clang_diag() {
+    fn acceptance_identity_clang() {
         let c = PolicyCertainty {
             semantic: 0.90,
             coverage: 0.90,
@@ -1449,16 +1449,16 @@ mod tests {
         let obs = PostEditObservation {
             identity_severity: 0.9,
             clang_diagnostics_increased: true,
-            has_semantic_rewrite_edits: true,
+            has_rewrite_edits: true,
             culprit_locality_ratio: 0.95,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance_adaptive(&obs, Some(&c), SemanticCompdbContextKind::Exact, None).0;
+        let score = fuzzy_edit_acceptance(&obs, Some(&c), SemanticCompdbContextKind::Exact, None).0;
         assert!(score < 1.0, "high identity severity + clang_diag should reduce score, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_high_severity_high_trust_still_rejects() {
+    fn acceptance_severity_rejects() {
         let c = PolicyCertainty {
             semantic: 0.90,
             coverage: 0.90,
@@ -1475,41 +1475,41 @@ mod tests {
         };
         let obs = PostEditObservation {
             identity_severity: 1.0,
-            has_semantic_rewrite_edits: true,
+            has_rewrite_edits: true,
             culprit_locality_ratio: 0.8,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance_adaptive(&obs, Some(&c), SemanticCompdbContextKind::Exact, None).0;
+        let score = fuzzy_edit_acceptance(&obs, Some(&c), SemanticCompdbContextKind::Exact, None).0;
         assert!(score < 0.80, "high severity should reduce score even with high trust, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_scope_severity_medium_trust_accepts() {
+    fn acceptance_scope_accepts() {
         let c = default_certainty();
         let obs = PostEditObservation {
             scope_severity: 0.5,
             culprit_locality_ratio: 0.7,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance_adaptive(&obs, Some(&c), SemanticCompdbContextKind::PairedSourceHeuristic, None).0;
+        let score = fuzzy_edit_acceptance(&obs, Some(&c), SemanticCompdbContextKind::PairedSourceHeuristic, None).0;
         assert!(score >= 0.50, "moderate scope severity with medium trust should accept, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_whitespace_safe_accepts() {
+    fn acceptance_whitespace_accepts() {
         let obs = PostEditObservation {
             scope_severity: 0.5,
             reference_severity: 0.5,
-            all_edits_whitespace_safe: true,
+            all_whitespace_safe: true,
             culprit_locality_ratio: 0.5,
             ..default_observation()
         };
-        let score = fuzzy_edit_acceptance_adaptive(&obs, None, SemanticCompdbContextKind::Exact, None).0;
+        let score = fuzzy_edit_acceptance(&obs, None, SemanticCompdbContextKind::Exact, None).0;
         assert!(score >= 0.50, "whitespace-safe edits should accept, got {score}");
     }
 
     #[test]
-    fn fuzzy_edit_acceptance_low_locality_penalizes() {
+    fn acceptance_low_locality() {
         let c = default_certainty();
         let high_loc = PostEditObservation {
             reference_severity: 1.0,
@@ -1521,8 +1521,8 @@ mod tests {
             culprit_locality_ratio: 0.1,
             ..default_observation()
         };
-        let high_score = fuzzy_edit_acceptance_adaptive(&high_loc, Some(&c), SemanticCompdbContextKind::Exact, None).0;
-        let low_score = fuzzy_edit_acceptance_adaptive(&low_loc, Some(&c), SemanticCompdbContextKind::Exact, None).0;
+        let high_score = fuzzy_edit_acceptance(&high_loc, Some(&c), SemanticCompdbContextKind::Exact, None).0;
+        let low_score = fuzzy_edit_acceptance(&low_loc, Some(&c), SemanticCompdbContextKind::Exact, None).0;
         assert!(high_score > low_score,
             "higher locality should yield higher acceptance ({high_score} vs {low_score})");
     }
@@ -1546,8 +1546,8 @@ mod tests {
             richness_variance: 0.001,
             ..low_rich
         };
-        let low_trust = fuzzy_trust_semantic_rewrite(&low_rich);
-        let high_trust = fuzzy_trust_semantic_rewrite(&high_rich);
+        let low_trust = fuzzy_trust_rewrite(&low_rich);
+        let high_trust = fuzzy_trust_rewrite(&high_rich);
         assert!(
             high_trust > low_trust,
             "high richness should yield higher trust ({high_trust}) than low richness ({low_trust})"
@@ -1555,39 +1555,39 @@ mod tests {
     }
 
     #[test]
-    fn impact_radius_cap_high_stability_low_uncertainty_uncapped() {
-        let cap = fuzzy_impact_radius_cap(0.90, 0.10, 0.80);
+    fn radius_high_stability() {
+        let cap = fuzzy_radius_cap(0.90, 0.10, 0.80);
         assert_eq!(cap, None, "stable + low uncertainty + high reliability should be uncapped");
     }
 
     #[test]
-    fn impact_radius_cap_low_stability_high_uncertainty_tight() {
-        let cap = fuzzy_impact_radius_cap(0.30, 0.60, 0.30);
+    fn radius_low_stability() {
+        let cap = fuzzy_radius_cap(0.30, 0.60, 0.30);
         assert_eq!(cap, Some(1), "unstable + high uncertainty + low reliability should cap to 1");
     }
 
     #[test]
-    fn impact_radius_cap_medium_values_intermediate() {
-        let cap = fuzzy_impact_radius_cap(0.55, 0.40, 0.50);
+    fn radius_medium_values() {
+        let cap = fuzzy_radius_cap(0.55, 0.40, 0.50);
         assert!(cap == Some(1) || cap == Some(2), "medium stability/uncertainty should cap to 1 or 2, got {cap:?}");
     }
 
     #[test]
-    fn trust_deficit_penalty_zero_trust_max_penalty() {
-        let p = fuzzy_trust_deficit_penalty(0.0);
+    fn deficit_zero_max() {
+        let p = fuzzy_deficit_penalty(0.0);
         assert!((p - 0.075).abs() < 1e-9, "zero trust should give max penalty 0.075, got {p}");
     }
 
     #[test]
-    fn trust_deficit_penalty_high_trust_no_penalty() {
-        let p = fuzzy_trust_deficit_penalty(0.50);
+    fn deficit_high_none() {
+        let p = fuzzy_deficit_penalty(0.50);
         assert!(p < 1e-6, "high trust should give negligible penalty, got {p}");
     }
 
     #[test]
-    fn trust_deficit_penalty_at_boundary_smooth() {
-        let p_at_015 = fuzzy_trust_deficit_penalty(0.15);
-        let p_at_020 = fuzzy_trust_deficit_penalty(0.20);
+    fn deficit_boundary_smooth() {
+        let p_at_015 = fuzzy_deficit_penalty(0.15);
+        let p_at_020 = fuzzy_deficit_penalty(0.20);
         assert!(p_at_015 > 0.0, "trust=0.15 should still have some penalty, got {p_at_015}");
         assert!(p_at_020 < 0.005, "trust=0.20 should have near-zero penalty, got {p_at_020}");
         assert!(p_at_015 > p_at_020, "penalty should decrease as trust increases");
@@ -1596,39 +1596,39 @@ mod tests {
     // --- Part 2 tests: raw semantic observation ---
 
     #[test]
-    fn raw_semantic_full_compdb_high_usr_low_errors() {
-        let result = fuzzy_raw_semantic_observation(true, true, 0.9, true, 0);
+    fn raw_full_compdb() {
+        let result = fuzzy_semantic_obs(true, true, 0.9, true, 0);
         assert!(result > 0.85, "full compdb + high USR + 0 errors → high quality, got {result}");
     }
 
     #[test]
-    fn raw_semantic_no_parser_returns_zero() {
-        let result = fuzzy_raw_semantic_observation(false, false, 0.0, false, 0);
+    fn raw_no_parser() {
+        let result = fuzzy_semantic_obs(false, false, 0.0, false, 0);
         assert!(result.abs() < 1e-9, "no parser → 0.0, got {result}");
     }
 
     #[test]
-    fn raw_semantic_tree_only_low() {
-        let result = fuzzy_raw_semantic_observation(false, false, 0.0, true, 0);
+    fn raw_tree_low() {
+        let result = fuzzy_semantic_obs(false, false, 0.0, true, 0);
         assert!(result < 0.25, "tree-only with no USR → low quality, got {result}");
     }
 
     #[test]
-    fn raw_semantic_errors_reduce_quality() {
-        let no_errors = fuzzy_raw_semantic_observation(true, true, 0.5, true, 0);
-        let many_errors = fuzzy_raw_semantic_observation(true, true, 0.5, true, 8);
+    fn raw_errors_reduce() {
+        let no_errors = fuzzy_semantic_obs(true, true, 0.5, true, 0);
+        let many_errors = fuzzy_semantic_obs(true, true, 0.5, true, 8);
         assert!(no_errors > many_errors, "errors should reduce quality: {no_errors} vs {many_errors}");
     }
 
     #[test]
-    fn raw_semantic_monotonic_in_usr() {
-        let low = fuzzy_raw_semantic_observation(true, true, 0.1, true, 0);
-        let high = fuzzy_raw_semantic_observation(true, true, 0.9, true, 0);
+    fn raw_monotonic_usr() {
+        let low = fuzzy_semantic_obs(true, true, 0.1, true, 0);
+        let high = fuzzy_semantic_obs(true, true, 0.9, true, 0);
         assert!(high > low, "higher USR ratio → higher quality: {high} vs {low}");
     }
 
     #[test]
-    fn coverage_weight_smooth_range() {
+    fn coverage_smooth_range() {
         let low = fuzzy_coverage_weight(0.0);
         let mid = fuzzy_coverage_weight(0.5);
         let high = fuzzy_coverage_weight(1.0);
@@ -1640,57 +1640,57 @@ mod tests {
     // --- Part 3 tests: edit outcome ---
 
     #[test]
-    fn edit_outcome_accepted_pass0_high_trust() {
-        let outcome = fuzzy_edit_outcome_adaptive(0, true, 0.95, 0.9, None).0;
+    fn outcome_pass0_high() {
+        let outcome = fuzzy_edit_outcome(0, true, 0.95, 0.9, None).0;
         assert!(outcome > 0.85, "accepted pass 0 high trust → high outcome, got {outcome}");
     }
 
     #[test]
-    fn edit_outcome_accepted_pass2_lower() {
-        let pass0 = fuzzy_edit_outcome_adaptive(0, true, 0.8, 0.7, None).0;
-        let pass2 = fuzzy_edit_outcome_adaptive(2, true, 0.8, 0.7, None).0;
+    fn outcome_pass2_lower() {
+        let pass0 = fuzzy_edit_outcome(0, true, 0.8, 0.7, None).0;
+        let pass2 = fuzzy_edit_outcome(2, true, 0.8, 0.7, None).0;
         assert!(pass0 > pass2, "pass 0 outcome > pass 2: {pass0} vs {pass2}");
     }
 
     #[test]
-    fn edit_outcome_rejected_low_range() {
-        let outcome = fuzzy_edit_outcome_adaptive(0, false, 0.3, 0.5, None).0;
+    fn outcome_rejected_low() {
+        let outcome = fuzzy_edit_outcome(0, false, 0.3, 0.5, None).0;
         assert!(outcome >= 0.05 && outcome <= 0.25, "rejected → [0.05,0.25], got {outcome}");
     }
 
     #[test]
-    fn edit_outcome_marginal_acceptance_lower_than_clean() {
-        let clean = fuzzy_edit_outcome_adaptive(0, true, 0.95, 0.8, None).0;
-        let marginal = fuzzy_edit_outcome_adaptive(0, true, 0.51, 0.8, None).0;
+    fn outcome_marginal_lower() {
+        let clean = fuzzy_edit_outcome(0, true, 0.95, 0.8, None).0;
+        let marginal = fuzzy_edit_outcome(0, true, 0.51, 0.8, None).0;
         assert!(clean > marginal, "clean acceptance > marginal: {clean} vs {marginal}");
     }
 
     // --- Part 5 tests: constraint penalty ---
 
     #[test]
-    fn constraint_penalty_zero_constraints() {
+    fn penalty_zero_constraints() {
         let p = fuzzy_constraint_penalty(0, 0.8);
         assert!(p < 0.02, "0 constraints → near-zero penalty, got {p}");
     }
 
     #[test]
-    fn constraint_penalty_many_constraints_low_trust() {
+    fn penalty_many_lowtrust() {
         let p = fuzzy_constraint_penalty(7, 0.0);
         assert!(p > 0.15, "7 constraints + low trust → high penalty, got {p}");
     }
 
     #[test]
-    fn constraint_penalty_trust_reduces_penalty() {
+    fn trust_reduces_penalty() {
         let low_trust = fuzzy_constraint_penalty(3, 0.1);
         let high_trust = fuzzy_constraint_penalty(3, 0.9);
         assert!(low_trust > high_trust, "low trust → higher penalty: {low_trust} vs {high_trust}");
     }
 
     #[test]
-    fn failure_severity_tree_error_no_semantic_reduced() {
+    fn severity_no_semantic() {
         let obs = PostEditObservation {
             tree_error_regressed: true,
-            has_semantic_rewrite_edits: false,
+            has_rewrite_edits: false,
             clang_diagnostics_increased: false,
             ..default_observation()
         };
@@ -1700,10 +1700,10 @@ mod tests {
     }
 
     #[test]
-    fn failure_severity_tree_error_with_semantic_full() {
+    fn severity_semantic_full() {
         let obs = PostEditObservation {
             tree_error_regressed: true,
-            has_semantic_rewrite_edits: true,
+            has_rewrite_edits: true,
             ..default_observation()
         };
         let severity = failure_severity_adaptive(&obs, None).0;
@@ -1712,10 +1712,10 @@ mod tests {
     }
 
     #[test]
-    fn failure_severity_tree_error_with_clang_diag_full() {
+    fn severity_clang_full() {
         let obs = PostEditObservation {
             tree_error_regressed: true,
-            has_semantic_rewrite_edits: false,
+            has_rewrite_edits: false,
             clang_diagnostics_increased: true,
             ..default_observation()
         };
@@ -1725,15 +1725,15 @@ mod tests {
     }
 
     #[test]
-    fn identity_migration_tolerance_low_edits_high_trust() {
+    fn migration_low_edits() {
         let certainty = PolicyCertainty::default();
-        let tolerance = fuzzy_identity_migration_tolerance(5, Some(&certainty));
+        let tolerance = fuzzy_migration_tol(5, Some(&certainty));
         assert!(tolerance >= 2 && tolerance <= 6,
             "low edits + default trust should give small tolerance, got {tolerance}");
     }
 
     #[test]
-    fn identity_migration_tolerance_high_edits_low_trust() {
+    fn migration_high_edits() {
         let certainty = PolicyCertainty {
             overall: 0.1,
             structural: 0.1,
@@ -1743,40 +1743,40 @@ mod tests {
             edit_success: 0.1,
             ..PolicyCertainty::default()
         };
-        let tolerance = fuzzy_identity_migration_tolerance(180, Some(&certainty));
+        let tolerance = fuzzy_migration_tol(180, Some(&certainty));
         assert!(tolerance >= 10,
             "high edits + low trust should give large tolerance, got {tolerance}");
     }
 
     #[test]
-    fn identity_migration_tolerance_no_certainty() {
-        let tolerance = fuzzy_identity_migration_tolerance(50, None);
+    fn migration_no_certainty() {
+        let tolerance = fuzzy_migration_tol(50, None);
         assert!(tolerance >= 2 && tolerance <= 16,
             "no certainty should use default trust (0.5), got {tolerance}");
     }
 
     #[test]
-    fn parser_cross_validation_matching_counts_high_agreement() {
-        let agreement = fuzzy_parser_cross_validation(20, 18, 0.0, 0, 0);
+    fn crossval_high_agreement() {
+        let agreement = fuzzy_cross_validation(20, 18, 0.0, 0, 0);
         assert!(agreement > 0.8, "matching scope/decl counts should yield high agreement, got {agreement}");
     }
 
     #[test]
-    fn parser_cross_validation_mismatched_counts_low_agreement() {
-        let agreement = fuzzy_parser_cross_validation(20, 2, 0.0, 0, 0);
+    fn crossval_low_agreement() {
+        let agreement = fuzzy_cross_validation(20, 2, 0.0, 0, 0);
         assert!(agreement < 0.5, "mismatched scope/decl counts should yield low agreement, got {agreement}");
     }
 
     #[test]
-    fn parser_cross_validation_staleness_degrades_agreement() {
-        let fresh = fuzzy_parser_cross_validation(15, 15, 0.0, 0, 0);
-        let stale = fuzzy_parser_cross_validation(15, 15, 0.0, 0, 5);
+    fn crossval_staleness_degrades() {
+        let fresh = fuzzy_cross_validation(15, 15, 0.0, 0, 0);
+        let stale = fuzzy_cross_validation(15, 15, 0.0, 0, 5);
         assert!(stale < fresh, "staleness should degrade agreement: fresh={fresh}, stale={stale}");
     }
 
     #[test]
-    fn parser_cross_validation_zero_staleness_no_change() {
-        let agreement = fuzzy_parser_cross_validation(10, 10, 0.0, 0, 0);
+    fn crossval_zero_staleness() {
+        let agreement = fuzzy_cross_validation(10, 10, 0.0, 0, 0);
         assert!(agreement > 0.9, "zero staleness + matching counts should yield near-1.0 agreement, got {agreement}");
     }
 
@@ -1803,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn severity_monotonic_in_parse_damage() {
+    fn severity_parse_monotonic() {
         for sem in [0.0, 0.3, 0.5, 0.7, 1.0] {
             let mut prev = -0.01;
             for pd in (0..=20).map(|i| i as f64 / 20.0) {
@@ -1816,7 +1816,7 @@ mod tests {
     }
 
     #[test]
-    fn severity_monotonic_in_semantic_damage() {
+    fn severity_semantic_monotonic() {
         for pd in [0.0, 0.3, 0.5, 0.7, 1.0] {
             let mut prev = -0.01;
             for sem in (0..=20).map(|i| i as f64 / 20.0) {
@@ -1829,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_decreases_with_severity() {
+    fn acceptance_decreases_severity() {
         for trust in [0.2, 0.5, 0.8] {
             let mut prev = 1.1;
             for sev in (0..=20).map(|i| i as f64 / 20.0) {
@@ -1842,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_increases_with_trust() {
+    fn acceptance_increases_trust() {
         for sev in [0.2, 0.5, 0.8] {
             let mut prev = -0.01;
             for trust in (0..=20).map(|i| i as f64 / 20.0) {
@@ -1855,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_increases_with_quality() {
+    fn outcome_increases_quality() {
         for trust in [0.2, 0.5, 0.8] {
             let mut prev = -0.01;
             for q in (0..=20).map(|i| i as f64 / 20.0) {
@@ -1868,7 +1868,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_increases_with_trust() {
+    fn outcome_increases_trust() {
         for q in [0.2, 0.5, 0.8] {
             let mut prev = -0.01;
             for trust in (0..=20).map(|i| i as f64 / 20.0) {
@@ -1881,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn entropy_regime_mod_uniform_is_higher() {
+    fn entropy_uniform_higher() {
         let dominant = compute_regime_mod(&[0.90, 0.05, 0.05]);
         let uniform = compute_regime_mod(&[0.34, 0.33, 0.33]);
         assert!(uniform > dominant,
@@ -1889,14 +1889,14 @@ mod tests {
     }
 
     #[test]
-    fn entropy_regime_mod_stable_dominant_is_low() {
+    fn entropy_stable_low() {
         let stable = compute_regime_mod(&[0.95, 0.03, 0.02]);
         assert!(stable < 0.85,
             "stable-dominant should have low regime mod, got {stable}");
     }
 
     #[test]
-    fn geometric_mean_modulation_less_harsh() {
+    fn geometric_mean_lenient() {
         let loc_mod: f64 = 0.50;
         let ctx_mod: f64 = 0.70;
         let multiplicative = loc_mod * ctx_mod;
@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     #[test]
-    fn neon_f64_matches_scalar() {
+    fn neon_f64_scalar() {
         let m0 = [0.3, 0.5, 0.2];
         let m1 = [0.1, 0.6, 0.3];
         let cons = [0.1, 0.3, 0.5, 0.2, 0.4, 0.6, 0.3, 0.5, 0.8];
@@ -1919,7 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn fidelity_increases_with_observation_maturity() {
+    fn fidelity_increases_maturity() {
         use crate::engine::catalog::PolicyCertainty;
         use crate::parser::manager::SemanticCompdbContextKind;
 
@@ -1954,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_zero_reduces_but_not_kills_trust() {
+    fn coverage_zero_reduces() {
         let c = PolicyCertainty {
             semantic: 0.85,
             coverage: 0.0,
@@ -1966,13 +1966,13 @@ mod tests {
             observation_count: 5,
             ..default_certainty()
         };
-        let trust = fuzzy_trust_semantic_rewrite(&c);
+        let trust = fuzzy_trust_rewrite(&c);
         assert!(trust > 0.25,
             "zero coverage should not kill trust, got {trust}");
     }
 
     #[test]
-    fn high_prior_obs_count_gives_mature_damping() {
+    fn high_prior_damping() {
         let low_obs = PolicyCertainty {
             semantic: 0.80,
             coverage: 0.70,
@@ -1988,8 +1988,8 @@ mod tests {
             observation_count: 5,
             ..low_obs
         };
-        let trust_low = fuzzy_trust_semantic_rewrite(&low_obs);
-        let trust_high = fuzzy_trust_semantic_rewrite(&high_obs);
+        let trust_low = fuzzy_trust_rewrite(&low_obs);
+        let trust_high = fuzzy_trust_rewrite(&high_obs);
         assert!(trust_high < trust_low,
             "higher obs_count with high variance should damp more: obs1={trust_low:.4}, obs5={trust_high:.4}");
     }

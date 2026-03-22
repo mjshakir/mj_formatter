@@ -8,14 +8,17 @@
 /// mechanisms tried to retroactively resolve conflicts created by sequential
 /// mutation. The correct answer is simpler: priority resolves conflict,
 /// the understanding gate (Phase 1-2) prevents unsafe edits.
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+use smallvec::SmallVec;
 
 use crate::engine::catalog::policy_catalog;
 use crate::model::edit::Edit;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::text_scan;
+use crate::parser::text_scan;
 
 // ── Public types (kept for pipeline compatibility) ─────────────────────────
 
@@ -31,7 +34,7 @@ pub struct ConvergencePolicyProfile {
     pub domain: String,
     pub priority: u16,
     pub impact_radius: usize,
-    pub semantic_priority_weight_bp: u16,
+    pub priority_weight_bp: u16,
     pub risk_tier: ConvergenceRiskTier,
 }
 
@@ -46,9 +49,9 @@ pub struct ConvergencePolicySignal {
     pub capability_macro_sensitive: bool,
     pub capability_whitespace_safe: bool,
     pub solver_dropped_lines: usize,
-    pub solver_hard_blocked_lines: usize,
-    pub semantic_impact_ranges_by_line: BTreeMap<usize, Vec<(usize, usize)>>,
-    pub semantic_symbol_ids_by_line: BTreeMap<usize, Vec<u64>>,
+    pub hard_blocked_lines: usize,
+    pub impact_ranges: BTreeMap<usize, SmallVec<[(usize, usize); 4]>>,
+    pub symbol_ids: BTreeMap<usize, SmallVec<[u64; 4]>>,
 }
 
 pub struct ConvergenceFinalizeResult {
@@ -68,13 +71,13 @@ struct LineClaim {
 // ── Controller ─────────────────────────────────────────────────────────────
 
 pub struct ConvergenceController {
-    policy_profiles: Arc<HashMap<String, ConvergencePolicyProfile>>,
+    policy_profiles: Arc<FxHashMap<String, ConvergencePolicyProfile>>,
     /// Which policy has claimed each line and at what priority.
-    claimed_lines: HashMap<usize, LineClaim>,
+    claimed_lines: FxHashMap<usize, LineClaim>,
     /// Lines suppressed from a policy's final edit list (previous policy was
     /// outranked by a later one; its text changes are already in state.current
     /// but the edit is excluded from the final report).
-    suppressed_lines_by_policy: HashMap<String, BTreeSet<usize>>,
+    suppressed_lines_by_policy: FxHashMap<String, BTreeSet<usize>>,
 }
 
 impl ConvergencePolicyProfile {
@@ -83,13 +86,13 @@ impl ConvergencePolicyProfile {
         domain: String,
         priority: u16,
         impact_radius: usize,
-        semantic_priority_weight_bp: u16,
+        priority_weight_bp: u16,
     ) -> Self {
         Self {
             domain,
             priority,
             impact_radius,
-            semantic_priority_weight_bp,
+            priority_weight_bp,
             risk_tier: ConvergenceRiskTier::Balanced,
         }
     }
@@ -98,14 +101,14 @@ impl ConvergencePolicyProfile {
         domain: String,
         priority: u16,
         impact_radius: usize,
-        semantic_priority_weight_bp: u16,
+        priority_weight_bp: u16,
         risk_tier: ConvergenceRiskTier,
     ) -> Self {
         Self {
             domain,
             priority,
             impact_radius,
-            semantic_priority_weight_bp,
+            priority_weight_bp,
             risk_tier,
         }
     }
@@ -113,16 +116,16 @@ impl ConvergencePolicyProfile {
 
 impl ConvergenceController {
     pub fn new() -> Self {
-        Self::with_profiles(Arc::new(HashMap::new()))
+        Self::with_profiles(Arc::new(FxHashMap::default()))
     }
 
     pub fn with_profiles(
-        policy_profiles: Arc<HashMap<String, ConvergencePolicyProfile>>,
+        policy_profiles: Arc<FxHashMap<String, ConvergencePolicyProfile>>,
     ) -> Self {
         Self {
             policy_profiles,
-            claimed_lines: HashMap::new(),
-            suppressed_lines_by_policy: HashMap::new(),
+            claimed_lines: FxHashMap::default(),
+            suppressed_lines_by_policy: FxHashMap::default(),
         }
     }
 
@@ -220,14 +223,14 @@ impl ConvergenceController {
 
     pub fn default_priority_for(policy_name: &str) -> u16 {
         policy_catalog()
-            .convergence_defaults_for_name(policy_name)
+            .convergence(policy_name)
             .priority
     }
 
     pub fn default_risk_tier_for(policy_name: &str) -> ConvergenceRiskTier {
         use crate::engine::catalog::CatalogConvergenceRiskTier;
         match policy_catalog()
-            .convergence_defaults_for_name(policy_name)
+            .convergence(policy_name)
             .risk_tier
         {
             CatalogConvergenceRiskTier::Stabilizer => ConvergenceRiskTier::Stabilizer,
@@ -238,14 +241,14 @@ impl ConvergenceController {
 
     pub fn default_impact_radius_for(policy_name: &str) -> usize {
         policy_catalog()
-            .convergence_defaults_for_name(policy_name)
+            .convergence(policy_name)
             .impact_radius
     }
 
-    pub fn default_semantic_priority_weight_bp_for(policy_name: &str) -> u16 {
+    pub fn default_priority_weight_bp_for(policy_name: &str) -> u16 {
         policy_catalog()
-            .convergence_defaults_for_name(policy_name)
-            .semantic_priority_weight_bp
+            .convergence(policy_name)
+            .priority_weight_bp
     }
 
     // ── Private helpers ────────────────────────────────────────────────────
@@ -261,12 +264,12 @@ impl ConvergenceController {
             .get(policy_name)
             .cloned()
             .unwrap_or_else(|| {
-                let defaults = policy_catalog().convergence_defaults_for_name(policy_name);
+                let defaults = policy_catalog().convergence(policy_name);
                 ConvergencePolicyProfile::with_risk_tier(
                     defaults.domain,
                     defaults.priority,
                     defaults.impact_radius,
-                    defaults.semantic_priority_weight_bp,
+                    defaults.priority_weight_bp,
                     match defaults.risk_tier {
                         crate::engine::catalog::CatalogConvergenceRiskTier::Stabilizer => {
                             ConvergenceRiskTier::Stabilizer
@@ -338,8 +341,9 @@ impl ConvergenceController {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
+
+    use rustc_hash::FxHashMap;
 
     use crate::model::edit::Edit;
     use crate::model::policy_result::PolicyResult;
@@ -373,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_prior_reversal_when_current_policy_wins() {
+    fn suppresses_prior_reversal() {
         // naming_conventions (priority 700) runs first, then clang_format (1000) reverses it.
         // clang_format has higher priority → wins. naming_conventions is suppressed.
         let mut controller = ConvergenceController::new();
@@ -413,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_lower_priority_current_reversal_immediately() {
+    fn drops_lower_priority() {
         // clang_format (1000) runs first, naming_conventions (700) reverses it.
         // naming_conventions has lower priority → its edit is dropped immediately.
         let mut controller = ConvergenceController::new();
@@ -445,9 +449,9 @@ mod tests {
     }
 
     #[test]
-    fn equal_priority_first_writer_wins() {
+    fn equal_priority_wins() {
         // Both policies have the same priority. The first one to claim the line wins.
-        let mut profiles = HashMap::new();
+        let mut profiles = FxHashMap::default();
         profiles.insert(
             "policy_a".to_string(),
             ConvergencePolicyProfile::new("layout".to_string(), 700, 0, 240),
@@ -471,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn unclaimed_lines_are_accepted_immediately() {
+    fn unclaimed_accepted_immediately() {
         let mut controller = ConvergenceController::new();
         let base = "int a=1;\nint b=2;\nint c=3;\n";
         // Policy A claims line 1; Policy B claims line 3. Line 2 is free.
@@ -486,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_filters_suppressed_edits_from_report() {
+    fn finalize_filters_suppressed() {
         let mut controller = ConvergenceController::new();
         let before = "int x = 1;\n";
         let align_text = "int x  = 1;\n";

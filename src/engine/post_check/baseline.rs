@@ -7,14 +7,14 @@ use crate::engine::semantic_contract::SemanticReadinessInput;
 use crate::parser::clang_result::ClangParseResult;
 use crate::parser::file_context::SemanticFileContext;
 
-use super::{PostEditCheckBaseline, PostEditChecker};
+use super::{CheckBaseline, PostEditChecker};
 
 pub(super) fn build(
     checker: &PostEditChecker,
     path: &Path,
     before_text: &str,
-) -> PostEditCheckBaseline {
-    let mut baseline = PostEditCheckBaseline::default();
+) -> CheckBaseline {
+    let mut baseline = CheckBaseline::default();
     let mut before_tree = None::<Tree>;
     let mut before_clang = None::<Arc<ClangParseResult>>;
     let run_clang_validation = !checker.should_skip_nonexact_consensus_clang_validation(path);

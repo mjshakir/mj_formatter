@@ -8,11 +8,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+use smallvec::{smallvec, SmallVec};
 use arc_swap::ArcSwap;
 use tree_sitter::StreamingIterator;
 use tracing::{debug, warn};
 
-use crate::config::confidence_config::ConfidenceConfig;
+use rustc_hash::FxHashMap;
+
+use crate::config::types::ConfidenceConfig;
 use crate::config::enums::Enforcement;
 use crate::config::policy_config::PolicyConfig;
 use crate::engine::confidence_context::ConfidenceContext;
@@ -32,7 +35,7 @@ use crate::engine::edit_candidate::PolicyDecisionOutcome;
 use crate::engine::edit_candidate::PolicyEditCandidate;
 use crate::engine::run_options::PolicyRunOptions;
 use crate::engine::suppression::PolicySuppression;
-use crate::engine::zone::PolicyZone;
+use crate::policy::zone::PolicyZone;
 use crate::engine::proposer::ProposerController;
 use crate::engine::semantic_contract::PolicyGuidanceMode;
 use crate::engine::semantic_contract::SemanticContract;
@@ -52,14 +55,14 @@ use crate::parser::query_cache::TsQueryCache;
 use crate::parser::manager::SemanticCompdbContextKind;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::file_context::SemanticSummary;
-use crate::policy::traits::Policy;
+use crate::policy::Policy;
 use crate::runtime::adaptive_telemetry::AdaptiveTelemetry;
 use crate::runtime::cluster_telemetry::ClusterEnforcementBias;
 use crate::runtime::cluster_telemetry::PolicyClusterTelemetry;
 use crate::runtime::telemetry::{
     PolicyConfidenceSample, PolicyExecutionSample, PolicyTelemetry,
 };
-use crate::text_scan;
+use crate::parser::text_scan;
 use tree_sitter::Tree;
 use crate::engine::filter_store::CertaintyFilterStore;
 use crate::engine::context_tracker::{
@@ -69,14 +72,14 @@ use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::ts_traversal;
 
 const CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE: usize = 6;
-type SemanticImpactRangesByLine = BTreeMap<usize, Vec<(usize, usize)>>;
-type SemanticImpactSymbolsByLine = BTreeMap<usize, Vec<u64>>;
+type SemanticImpactRangesByLine = BTreeMap<usize, SmallVec<[(usize, usize); 4]>>;
+type SemanticImpactSymbolsByLine = BTreeMap<usize, SmallVec<[u64; 4]>>;
 
 pub struct PolicyPipeline {
     policies: Vec<Box<dyn Policy>>,
     parser_manager: ParserManager,
     policy_settings: HashMap<String, PolicyConfig>,
-    convergence_profiles: Arc<HashMap<String, ConvergencePolicyProfile>>,
+    convergence_profiles: Arc<FxHashMap<String, ConvergencePolicyProfile>>,
     confidence_enabled: bool,
     confidence_default_enforcement: Enforcement,
     conflict_detection_enabled: bool,
@@ -87,80 +90,92 @@ pub struct PolicyPipeline {
 }
 
 
-pub(super) struct PolicyPipelineRunState<'a> {
-    path: &'a Path,
-    options: &'a PolicyRunOptions,
-    current: Arc<str>,
-    all_violations: Vec<Violation>,
-    all_edits: Vec<Edit>,
-    all_warnings: Vec<String>,
-    policy_traces: Vec<PolicyExecutionTrace>,
-    tree_for_text: Option<Tree>,
-    clang_for_text: Option<Arc<ClangParseResult>>,
-    semantic_for_text: Option<SemanticFileContext>,
-    comment_lines_for_text: Option<BTreeSet<usize>>,
-    semantic_summary: Option<SemanticSummary>,
-    internal_candidates: Vec<PolicyEditCandidate>,
-    selected_candidates: Vec<PolicyEditCandidate>,
-    convergence_controller: ConvergenceController,
-    telemetry_samples: Vec<PolicyExecutionSample>,
-    conflict_detector: PolicyConflictDetector,
-    proposer_controller: ProposerController,
-    exact_compdb_for_file: bool,
-    semantic_context_kind: SemanticCompdbContextKind,
-    semantic_compdb_context_for_file: bool,
-    semantic_fidelity_score: f64,
-    cached_certainty: Option<PolicyCertainty>,
-    cached_tree_error_lines: Option<BTreeSet<usize>>,
-    content_hash: u64,
-    clang_structural_edits_since_parse: usize,
-    context_modifiers: [f32; 24],
-    block_context_modifiers: [[f32; 24]; 6],
-    rollback_count: usize,
-    rename_coverage_signal: Option<f64>,
-    checkpoint_retry_batch_size: Option<usize>,
-    prev_tree_for_text: Option<Tree>,
+struct ParseCache {
+    tree: Option<Tree>,
+    prev_tree: Option<Tree>,
+    clang: Option<Arc<ClangParseResult>>,
+    semantic: Option<SemanticFileContext>,
+    comment_lines: Option<BTreeSet<usize>>,
+    summary: Option<SemanticSummary>,
+    error_lines: Option<BTreeSet<usize>>,
+    certainty: Option<PolicyCertainty>,
+    clang_edits_since: usize,
+    exact_compdb: bool,
+    semantic_kind: SemanticCompdbContextKind,
+    has_semantic_compdb: bool,
+    fidelity_score: f64,
 }
 
-impl<'a> PolicyPipelineRunState<'a> {
-    fn semantic_summary_or_default(&self) -> SemanticSummary {
-        self.semantic_summary.unwrap_or_default()
+impl ParseCache {
+    fn summary_or_default(&self) -> SemanticSummary {
+        self.summary.unwrap_or_default()
     }
 
-    fn tree_error_lines_cached(&mut self) -> &BTreeSet<usize> {
-        if self.cached_tree_error_lines.is_none() {
-            self.cached_tree_error_lines = Some(
-                self.tree_for_text
+    fn error_lines_cached(&mut self) -> &BTreeSet<usize> {
+        if self.error_lines.is_none() {
+            self.error_lines = Some(
+                self.tree
                     .as_ref()
                     .map(|t| ts_traversal::tree_error_stats(t).error_lines)
                     .unwrap_or_default(),
             );
         }
-        self.cached_tree_error_lines.as_ref().unwrap()
+        self.error_lines.as_ref().unwrap()
     }
 
-    fn invalidate_semantic_state(&mut self, is_semantic_rewrite: bool, clang_invalidating: bool) {
-        self.prev_tree_for_text = self.tree_for_text.take();
-        self.cached_tree_error_lines = None;
+    fn invalidate(&mut self, is_semantic_rewrite: bool, clang_invalidating: bool) {
+        self.prev_tree = self.tree.take();
+        self.error_lines = None;
         if is_semantic_rewrite && clang_invalidating {
-            self.clang_for_text = None;
-            self.clang_structural_edits_since_parse = 0;
+            self.clang = None;
+            self.clang_edits_since = 0;
         } else {
-            self.clang_structural_edits_since_parse += 1;
+            self.clang_edits_since += 1;
             let reobs_trust = self
-                .cached_certainty
+                .certainty
                 .map(|c| c.trust_for_general())
                 .unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
             let reobs_interval =
-                crate::engine::fuzzy_inference::fuzzy_kalman_reobservation_interval(reobs_trust);
-            if self.clang_structural_edits_since_parse.is_multiple_of(reobs_interval) {
-                self.cached_certainty = None;
+                crate::engine::fuzzy_inference::fuzzy_reobs_interval(reobs_trust);
+            if self.clang_edits_since.is_multiple_of(reobs_interval) {
+                self.certainty = None;
             }
         }
-        self.semantic_for_text = None;
-        self.comment_lines_for_text = None;
-        self.semantic_summary = None;
+        self.semantic = None;
+        self.comment_lines = None;
+        self.summary = None;
     }
+}
+
+struct CandidateState {
+    internal: Vec<PolicyEditCandidate>,
+    selected: Vec<PolicyEditCandidate>,
+    conflict: PolicyConflictDetector,
+    proposer: ProposerController,
+    rename_signal: Option<f64>,
+}
+
+struct TelemetryState {
+    samples: Vec<PolicyExecutionSample>,
+    context_mods: [f32; 24],
+    block_mods: [[f32; 24]; 6],
+}
+
+pub(super) struct PipelineState<'a> {
+    path: &'a Path,
+    options: &'a PolicyRunOptions,
+    current: Arc<str>,
+    content_hash: u64,
+    parse: ParseCache,
+    cand: CandidateState,
+    telem: TelemetryState,
+    all_violations: Vec<Violation>,
+    all_edits: Vec<Edit>,
+    all_warnings: Vec<String>,
+    policy_traces: Vec<PolicyExecutionTrace>,
+    convergence_controller: ConvergenceController,
+    rollback_count: usize,
+    retry_batch_size: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -285,13 +300,13 @@ impl PolicyPipeline {
         self.context_tracker.store(Arc::new(tracker));
     }
 
-    fn context_modifier_for_policy(&self, state: &PolicyPipelineRunState<'_>, policy_name: &str, block_kind: Option<BlockContextKind>) -> f64 {
+    fn context_modifier_for_policy(&self, state: &PipelineState<'_>, policy_name: &str, block_kind: Option<BlockContextKind>) -> f64 {
         let policy_idx = crate::engine::context_tracker::policy_index(policy_name)
             .unwrap_or(u8::MAX);
         if (policy_idx as usize) < 22 {
-            let file_mod = state.context_modifiers[policy_idx as usize] as f64;
+            let file_mod = state.telem.context_mods[policy_idx as usize] as f64;
             let block_mod = match block_kind {
-                Some(bk) => state.block_context_modifiers[bk as usize][policy_idx as usize] as f64,
+                Some(bk) => state.telem.block_mods[bk as usize][policy_idx as usize] as f64,
                 None => 1.0,
             };
             file_mod * block_mod
@@ -350,37 +365,37 @@ impl PolicyPipeline {
             let boot = Instant::now();
             self.ensure_policy_parse_stage(&mut state, first_policy.as_ref(), first_policy.name(), boot)?;
         }
-        if state.cached_certainty.is_none() {
+        if state.parse.certainty.is_none() {
             let mut confidence = ConfidenceContext::from_parsers_and_semantic(
-                state.tree_for_text.as_ref(),
-                state.clang_for_text.as_deref(),
-                state.semantic_for_text.as_ref(),
+                state.parse.tree.as_ref(),
+                state.parse.clang.as_deref(),
+                state.parse.semantic.as_ref(),
                 &state.current,
-                state.tree_for_text.as_ref(),
+                state.parse.tree.as_ref(),
             );
-            confidence.rename_coverage_signal = state.rename_coverage_signal;
+            confidence.rename_coverage_signal = state.cand.rename_signal;
             let measurement = Self::extract_raw_observation(
                 &confidence,
-                state.semantic_summary,
-                state.semantic_compdb_context_for_file,
-                state.clang_structural_edits_since_parse,
+                state.parse.summary,
+                state.parse.has_semantic_compdb,
+                state.parse.clang_edits_since,
             );
             let certainty = self.apply_certainty_filter(
                 state.path,
                 measurement,
                 state.content_hash,
             );
-            state.cached_certainty = Some(certainty);
-            state.semantic_fidelity_score = crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
-                state.semantic_context_kind,
+            state.parse.certainty = Some(certainty);
+            state.parse.fidelity_score = crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
+                state.parse.semantic_kind,
                 Some(&certainty),
             );
         }
         let boot_parse_ms = boot_parse_started.elapsed().as_secs_f64() * 1000.0;
         if options.observation_only {
-            PolicyTelemetry::record_batch(&state.telemetry_samples);
+            PolicyTelemetry::record_batch(&state.telem.samples);
             return Ok(FormatPassResult {
-                policy_certainty: state.cached_certainty,
+                policy_certainty: state.parse.certainty,
                 boot_parse_ms,
                 ..Default::default()
             });
@@ -390,7 +405,7 @@ impl PolicyPipeline {
             self.run_policy_stage(&mut state, policy.as_ref())?;
         }
 
-        PolicyTelemetry::record_batch(&state.telemetry_samples);
+        PolicyTelemetry::record_batch(&state.telem.samples);
         let finalized = state.convergence_controller.finalize(
             state.all_edits,
             state.all_violations,
@@ -415,7 +430,7 @@ impl PolicyPipeline {
             policy_traces: state.policy_traces,
             accuracy_gate: None,
             metrics: FormatPassMetrics::default(),
-            policy_certainty: state.cached_certainty,
+            policy_certainty: state.parse.certainty,
             rollback_count: state.rollback_count,
             boot_parse_ms,
         })
@@ -426,7 +441,7 @@ impl PolicyPipeline {
         text: &str,
         path: &'a Path,
         options: &'a PolicyRunOptions,
-    ) -> PolicyPipelineRunState<'a> {
+    ) -> PipelineState<'a> {
         let convergence_controller =
             if self.convergence_profiles.is_empty() {
                 ConvergenceController::new()
@@ -435,63 +450,69 @@ impl PolicyPipeline {
                     self.convergence_profiles.clone(),
                 )
             };
-        let exact_compdb_for_file = self.parser_manager.has_exact_compdb_entry_for_path(path);
+        let exact_compdb_for_file = self.parser_manager.has_exact_compdb(path);
         let semantic_context_kind = self
             .parser_manager
-            .semantic_compdb_context_kind_for_path(path);
+            .semantic_compdb_kind(path);
         let semantic_compdb_context_for_file = self
             .parser_manager
-            .has_semantic_compdb_context_for_path(path);
-        PolicyPipelineRunState {
+            .has_semantic_compdb(path);
+        PipelineState {
             path,
             options,
             current: Arc::from(text),
+            content_hash: crc32fast::hash(text.as_bytes()) as u64,
+            parse: ParseCache {
+                tree: None,
+                prev_tree: None,
+                clang: None,
+                semantic: None,
+                comment_lines: None,
+                summary: None,
+                error_lines: None,
+                certainty: None,
+                clang_edits_since: 0,
+                exact_compdb: exact_compdb_for_file,
+                semantic_kind: semantic_context_kind,
+                has_semantic_compdb: semantic_compdb_context_for_file,
+                fidelity_score: crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
+                    semantic_context_kind,
+                    None,
+                ),
+            },
+            cand: CandidateState {
+                internal: Vec::new(),
+                selected: Vec::new(),
+                conflict: PolicyConflictDetector::new(
+                    self.conflict_detection_enabled,
+                    self.conflict_touch_threshold,
+                ),
+                proposer: ProposerController::new(),
+                rename_signal: None,
+            },
+            telem: TelemetryState {
+                samples: Vec::with_capacity(self.policies.len()),
+                context_mods: self.batch_context_modifiers(path),
+                block_mods: self.batch_block_mods(),
+            },
             all_violations: Vec::new(),
             all_edits: Vec::new(),
             all_warnings: Vec::new(),
             policy_traces: Vec::with_capacity(self.policies.len()),
-            tree_for_text: None,
-            clang_for_text: None,
-            semantic_for_text: None,
-            comment_lines_for_text: None,
-            semantic_summary: None,
-            internal_candidates: Vec::new(),
-            selected_candidates: Vec::new(),
             convergence_controller,
-            telemetry_samples: Vec::with_capacity(self.policies.len()),
-            conflict_detector: PolicyConflictDetector::new(
-                self.conflict_detection_enabled,
-                self.conflict_touch_threshold,
-            ),
-            proposer_controller: ProposerController::new(),
-            exact_compdb_for_file,
-            semantic_context_kind,
-            semantic_compdb_context_for_file,
-            semantic_fidelity_score: crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
-                semantic_context_kind,
-                None,
-            ),
-            cached_certainty: None,
-            cached_tree_error_lines: None,
-            content_hash: crc32fast::hash(text.as_bytes()) as u64,
-            clang_structural_edits_since_parse: 0,
-            context_modifiers: self.batch_context_modifiers(path),
-            block_context_modifiers: self.batch_block_context_modifiers(),
             rollback_count: 0,
-            rename_coverage_signal: None,
-            checkpoint_retry_batch_size: None,
-            prev_tree_for_text: None,
+            retry_batch_size: None,
         }
     }
 
-    fn dominant_block_kind_for_edits(
-        state: &PolicyPipelineRunState<'_>,
+    fn dominant_block_kind(
+        state: &PipelineState<'_>,
         edits: &[Edit],
     ) -> BlockContextKind {
         if edits.is_empty() {
             return BlockContextKind::Global;
         }
-        let semantic = match &state.semantic_for_text {
+        let semantic = match &state.parse.semantic {
             Some(ctx) => ctx,
             None => return BlockContextKind::Global,
         };
@@ -528,7 +549,7 @@ impl PolicyPipeline {
         self.context_tracker.load().batch_file_modifiers(file_kind)
     }
 
-    fn batch_block_context_modifiers(&self) -> [[f32; 24]; 6] {
+    fn batch_block_mods(&self) -> [[f32; 24]; 6] {
         let guard = self.context_tracker.load();
         let mut result = [[1.0f32; 24]; 6];
         result[0] = guard.batch_block_modifiers(BlockContextKind::Namespace);
@@ -540,16 +561,16 @@ impl PolicyPipeline {
         result
     }
 
-    fn record_initial_fidelity_warnings(&self, state: &mut PolicyPipelineRunState<'_>) {
+    fn record_initial_fidelity_warnings(&self, state: &mut PipelineState<'_>) {
         debug!(
-            fidelity = state.semantic_fidelity_score,
+            fidelity = state.parse.fidelity_score,
             path = %state.path.display(),
             "semantic fidelity"
         );
-        if state.exact_compdb_for_file {
+        if state.parse.exact_compdb {
             return;
         }
-        let detail = match state.semantic_context_kind {
+        let detail = match state.parse.semantic_kind {
             SemanticCompdbContextKind::PairedSourceHeuristic => {
                 "using paired-source heuristic semantic context"
             }
@@ -570,7 +591,7 @@ impl PolicyPipeline {
 
     fn run_policy_stage(
         &self,
-        state: &mut PolicyPipelineRunState<'_>,
+        state: &mut PipelineState<'_>,
         policy: &dyn Policy,
     ) -> Result<()> {
         let policy_name = policy.name();
@@ -579,7 +600,7 @@ impl PolicyPipeline {
             state
                 .all_warnings
                 .push(format!("retry guard skipped policy '{}'", policy_name));
-            state.telemetry_samples.push(PolicyExecutionSample::blocked(
+            state.telem.samples.push(PolicyExecutionSample::blocked(
                 policy_name,
                 policy_started.elapsed(),
             ));
@@ -592,7 +613,7 @@ impl PolicyPipeline {
             return Ok(());
         }
         if state.options.is_policy_skipped(policy_name) {
-            state.telemetry_samples.push(PolicyExecutionSample::blocked(
+            state.telem.samples.push(PolicyExecutionSample::blocked(
                 policy_name,
                 policy_started.elapsed(),
             ));
@@ -619,7 +640,7 @@ impl PolicyPipeline {
             && executed.result.violations.is_empty()
             && text_scan::TEXT_SCAN.strings_equal(&executed.result.text, &state.current)
         {
-            state.telemetry_samples.push(PolicyExecutionSample::success(
+            state.telem.samples.push(PolicyExecutionSample::success(
                 policy_name,
                 policy_started.elapsed(),
                 0,
@@ -654,7 +675,7 @@ impl PolicyPipeline {
                     parse_ms, execute_ms, checkpoint_ms,
                 });
                 if let Some(tree) = validated_tree {
-                    state.tree_for_text = Some(tree);
+                    state.parse.tree = Some(tree);
                 }
             }
             PolicyCheckpointResult::PartialRollback {
@@ -681,31 +702,31 @@ impl PolicyPipeline {
                     parse_ms, execute_ms, checkpoint_ms,
                     candidate_trace: Vec::new(),
                 });
-                state.telemetry_samples.push(PolicyExecutionSample::success(
+                state.telem.samples.push(PolicyExecutionSample::success(
                     policy_name,
                     policy_started.elapsed(),
                     edit_count,
                     0,
                 ));
                 state.current = Arc::from(recovered_text.as_str());
-                state.cached_tree_error_lines = None;
+                state.parse.error_lines = None;
                 state.all_edits.extend(recovered_edits);
                 if let Some(tree) = validated_tree {
-                    state.tree_for_text = Some(tree);
+                    state.parse.tree = Some(tree);
                 }
                 if is_semantic_rewrite {
-                    state.invalidate_semantic_state(true, clang_invalidating);
+                    state.parse.invalidate(true, clang_invalidating);
                 }
             }
             PolicyCheckpointResult::Rollback { reason, after_error_count } => {
                 let mut retried = false;
-                if state.checkpoint_retry_batch_size.is_none() && after_error_count > 0 {
-                    let retry_batch = state.cached_certainty
+                if state.retry_batch_size.is_none() && after_error_count > 0 {
+                    let retry_batch = state.parse.certainty
                         .as_ref()
-                        .map(|c| crate::engine::fuzzy_inference::fuzzy_region_batch_lines(c, after_error_count))
+                        .map(|c| crate::engine::fuzzy_inference::fuzzy_batch_lines(c, after_error_count))
                         .unwrap_or(50);
                     if retry_batch < state.current.lines().count() {
-                        state.checkpoint_retry_batch_size = Some(retry_batch);
+                        state.retry_batch_size = Some(retry_batch);
                         self.ensure_policy_parse_stage(state, policy, policy_name, policy_started)?;
                         let Some(prepared) = self.prepare_policy_stage(state, policy_name, policy_started) else {
                             state.all_warnings.push(reason);
@@ -723,7 +744,7 @@ impl PolicyPipeline {
                                         parse_ms, execute_ms, checkpoint_ms: checkpoint_started.elapsed().as_secs_f64() * 1000.0,
                                     });
                                     if let Some(tree) = validated_tree {
-                                        state.tree_for_text = Some(tree);
+                                        state.parse.tree = Some(tree);
                                     }
                                     return Ok(());
                                 }
@@ -732,14 +753,14 @@ impl PolicyPipeline {
                                 } => {
                                     state.all_warnings.push(warning);
                                     let edit_count = recovered_edits.len();
-                                    state.telemetry_samples.push(PolicyExecutionSample::success(
+                                    state.telem.samples.push(PolicyExecutionSample::success(
                                         policy_name, policy_started.elapsed(), edit_count, 0,
                                     ));
                                     state.current = Arc::from(recovered_text.as_str());
-                                    state.cached_tree_error_lines = None;
+                                    state.parse.error_lines = None;
                                     state.all_edits.extend(recovered_edits);
                                     if let Some(tree) = validated_tree {
-                                        state.tree_for_text = Some(tree);
+                                        state.parse.tree = Some(tree);
                                     }
                                     return Ok(());
                                 }
@@ -753,7 +774,7 @@ impl PolicyPipeline {
                 if !retried {
                     state.all_warnings.push(reason);
                 }
-                state.telemetry_samples.push(PolicyExecutionSample::failed(
+                state.telem.samples.push(PolicyExecutionSample::failed(
                     policy_name,
                     policy_started.elapsed(),
                     false,
@@ -766,7 +787,7 @@ impl PolicyPipeline {
 
     fn ensure_policy_parse_stage(
         &self,
-        state: &mut PolicyPipelineRunState<'_>,
+        state: &mut PipelineState<'_>,
         _policy: &dyn Policy,
         policy_name: &str,
         policy_started: Instant,
@@ -774,9 +795,9 @@ impl PolicyPipeline {
         // Tree-sitter is always needed (all policies use structural parse context).
         // Clang is parsed eagerly when compdb context exists — all policies benefit from
         // fused clang+tree-sitter context (declarations, references, diagnostics).
-        let needs_tree = state.tree_for_text.is_none();
-        let needs_clang = state.clang_for_text.is_none()
-            && state.semantic_compdb_context_for_file;
+        let needs_tree = state.parse.tree.is_none();
+        let needs_clang = state.parse.clang.is_none()
+            && state.parse.has_semantic_compdb;
 
         if needs_tree && needs_clang {
             // Dispatch clang (non-blocking). Then parse tree-sitter (fast, local),
@@ -784,19 +805,19 @@ impl PolicyPipeline {
             let clang_handle = self.parser_manager.dispatch_clang(&state.current, state.path);
             let tree_result = self
                 .parser_manager
-                .parse_tree_sitter_with_old(&state.current, state.path, state.prev_tree_for_text.as_ref());
+                .reparse_tree(&state.current, state.path, state.parse.prev_tree.as_ref());
             match tree_result {
                 Ok(value) => {
-                    state.tree_for_text = Some(value);
-                    state.prev_tree_for_text = None;
+                    state.parse.tree = Some(value);
+                    state.parse.prev_tree = None;
                 }
                 Err(err) => {
-                    state.telemetry_samples.push(PolicyExecutionSample::failed(
+                    state.telem.samples.push(PolicyExecutionSample::failed(
                         policy_name,
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(&state.telemetry_samples);
+                    PolicyTelemetry::record_batch(&state.telem.samples);
                     warn!(policy = policy_name, error = %err, "tree-sitter parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
@@ -812,16 +833,16 @@ impl PolicyPipeline {
             };
             match clang_result {
                 Ok(value) => {
-                    state.clang_for_text = Some(value);
-                    state.clang_structural_edits_since_parse = 0;
+                    state.parse.clang = Some(value);
+                    state.parse.clang_edits_since = 0;
                 }
                 Err(err) => {
-                    state.telemetry_samples.push(PolicyExecutionSample::failed(
+                    state.telem.samples.push(PolicyExecutionSample::failed(
                         policy_name,
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(&state.telemetry_samples);
+                    PolicyTelemetry::record_batch(&state.telem.samples);
                     warn!(policy = policy_name, error = %err, "clang parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
@@ -829,93 +850,93 @@ impl PolicyPipeline {
         } else if needs_tree {
             let parsed = match self
                 .parser_manager
-                .parse_tree_sitter_with_old(&state.current, state.path, state.prev_tree_for_text.as_ref())
+                .reparse_tree(&state.current, state.path, state.parse.prev_tree.as_ref())
             {
                 Ok(value) => value,
                 Err(err) => {
-                    state.telemetry_samples.push(PolicyExecutionSample::failed(
+                    state.telem.samples.push(PolicyExecutionSample::failed(
                         policy_name,
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(&state.telemetry_samples);
+                    PolicyTelemetry::record_batch(&state.telem.samples);
                     warn!(policy = policy_name, error = %err, "tree-sitter parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
             };
-            state.tree_for_text = Some(parsed);
-            state.prev_tree_for_text = None;
+            state.parse.tree = Some(parsed);
+            state.parse.prev_tree = None;
         } else if needs_clang {
             let parsed = match self.parser_manager.parse_clang(&state.current, state.path) {
                 Ok(value) => value,
                 Err(err) => {
-                    state.telemetry_samples.push(PolicyExecutionSample::failed(
+                    state.telem.samples.push(PolicyExecutionSample::failed(
                         policy_name,
                         policy_started.elapsed(),
                         false,
                     ));
-                    PolicyTelemetry::record_batch(&state.telemetry_samples);
+                    PolicyTelemetry::record_batch(&state.telem.samples);
                     warn!(policy = policy_name, error = %err, "clang parse failed");
                     return Err(anyhow!("{policy_name}: {err}"));
                 }
             };
-            state.clang_for_text = Some(parsed);
-            state.clang_structural_edits_since_parse = 0;
+            state.parse.clang = Some(parsed);
+            state.parse.clang_edits_since = 0;
         }
-        if needs_clang && state.semantic_for_text.is_some() {
-            state.semantic_for_text = None;
-            state.semantic_summary = None;
-            state.cached_certainty = None;
+        if needs_clang && state.parse.semantic.is_some() {
+            state.parse.semantic = None;
+            state.parse.summary = None;
+            state.parse.certainty = None;
         }
-        if state.semantic_for_text.is_none() {
-            let semantic = SemanticFileContext::from_parses_with_cache(
+        if state.parse.semantic.is_none() {
+            let semantic = SemanticFileContext::from_parses_cached(
                 &state.current, state.path,
-                state.tree_for_text.as_ref(),
-                state.clang_for_text.as_deref(),
+                state.parse.tree.as_ref(),
+                state.parse.clang.as_deref(),
                 Some(&self.query_cache),
             );
-            state.semantic_summary = Some(semantic.summary());
-            state.semantic_for_text = Some(semantic);
+            state.parse.summary = Some(semantic.summary());
+            state.parse.semantic = Some(semantic);
         }
-        if state.comment_lines_for_text.is_none() {
-            state.comment_lines_for_text =
-                Some(Self::comment_lines_from_tree(state.tree_for_text.as_ref(), &self.query_cache));
+        if state.parse.comment_lines.is_none() {
+            state.parse.comment_lines =
+                Some(Self::comment_lines_from_tree(state.parse.tree.as_ref(), &self.query_cache));
         }
         Ok(())
     }
 
     fn prepare_policy_stage(
         &self,
-        state: &mut PolicyPipelineRunState<'_>,
+        state: &mut PipelineState<'_>,
         policy_name: &str,
         _policy_started: Instant,
     ) -> Option<PreparedPolicyStage> {
         let capability = PolicyCapabilityMatrix::for_policy(policy_name);
-        let policy_certainty = if let Some(cached) = state.cached_certainty {
+        let policy_certainty = if let Some(cached) = state.parse.certainty {
             cached
         } else {
             let mut confidence = ConfidenceContext::from_parsers_and_semantic(
-                state.tree_for_text.as_ref(),
-                state.clang_for_text.as_deref(),
-                state.semantic_for_text.as_ref(),
+                state.parse.tree.as_ref(),
+                state.parse.clang.as_deref(),
+                state.parse.semantic.as_ref(),
                 &state.current,
-                state.tree_for_text.as_ref(),
+                state.parse.tree.as_ref(),
             );
-            confidence.rename_coverage_signal = state.rename_coverage_signal;
+            confidence.rename_coverage_signal = state.cand.rename_signal;
             let measurement = Self::extract_raw_observation(
                 &confidence,
-                state.semantic_summary,
-                state.semantic_compdb_context_for_file,
-                state.clang_structural_edits_since_parse,
+                state.parse.summary,
+                state.parse.has_semantic_compdb,
+                state.parse.clang_edits_since,
             );
             let filtered = self.apply_certainty_filter(
                 state.path,
                 measurement,
                 state.content_hash,
             );
-            state.cached_certainty = Some(filtered);
-            state.semantic_fidelity_score = crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
-                state.semantic_context_kind,
+            state.parse.certainty = Some(filtered);
+            state.parse.fidelity_score = crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
+                state.parse.semantic_kind,
                 Some(&filtered),
             );
             filtered
@@ -934,7 +955,7 @@ impl PolicyPipeline {
 
     fn execute_policy_stage(
         &self,
-        state: &mut PolicyPipelineRunState<'_>,
+        state: &mut PipelineState<'_>,
         policy: &dyn Policy,
         prepared: PreparedPolicyStage,
         policy_started: Instant,
@@ -943,21 +964,21 @@ impl PolicyPipeline {
         let parser_trust = ParserTrust {
             semantic_rewrite: prepared.policy_certainty.trust_for_semantic_rewrite(),
         };
-        let tree_error_lines = state.tree_error_lines_cached().clone();
+        let tree_error_lines = state.parse.error_lines_cached().clone();
         let mut context = PolicyContext::new(&state.current, state.path)
-            .with_tree_sitter_tree(state.tree_for_text.as_ref())
-            .with_clang_parse_result(state.clang_for_text.as_deref())
-            .with_semantic_file_context(state.semantic_for_text.as_ref())
-            .with_project_graph_snapshot(state.options.project_graph_snapshot.as_deref())
+            .with_tree(state.parse.tree.as_ref())
+            .with_clang(state.parse.clang.as_deref())
+            .with_semantic(state.parse.semantic.as_ref())
+            .with_graph(state.options.project_graph_snapshot.as_deref())
             .with_parser_trust(parser_trust)
             .with_policy_certainty(Some(prepared.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
-        context.forced_batch_size = state.checkpoint_retry_batch_size.take();
+        context.forced_batch_size = state.retry_batch_size.take();
         let semantic_query = context.semantic_query();
         let project_query = context.project_query();
         let mut result = policy.apply(&context);
         if let Some(sig) = result.rename_coverage_signal() {
-            state.rename_coverage_signal = Some(sig);
+            state.cand.rename_signal = Some(sig);
         }
         let disabled_lines = PolicySuppression::disabled_lines(&state.current, policy_name);
         if !disabled_lines.is_empty() {
@@ -978,16 +999,16 @@ impl PolicyPipeline {
             .iter()
             .find(|warning| warning.starts_with("fatal:"))
         {
-            state.telemetry_samples.push(PolicyExecutionSample::failed(
+            state.telem.samples.push(PolicyExecutionSample::failed(
                 policy_name,
                 policy_started.elapsed(),
                 true,
             ));
-            PolicyTelemetry::record_batch(&state.telemetry_samples);
+            PolicyTelemetry::record_batch(&state.telem.samples);
             warn!(policy = policy_name, reason = %fatal, "policy produced fatal warning");
             return Err(anyhow!("{policy_name}: {fatal}"));
         }
-        result = Self::apply_semantic_guidance_mode(
+        result = Self::apply_semantic_mode(
             &state.current,
             result,
             &semantic_query,
@@ -995,8 +1016,8 @@ impl PolicyPipeline {
             SemanticGuidanceConfig {
                 policy_name,
                 guidance_mode: prepared.guidance_mode,
-                exact_compdb_for_file: state.exact_compdb_for_file,
-                semantic_context_kind: state.semantic_context_kind,
+                exact_compdb_for_file: state.parse.exact_compdb,
+                semantic_context_kind: state.parse.semantic_kind,
             },
         );
         result = Self::normalize_edit_coverage(policy_name, &state.current, result);
@@ -1014,8 +1035,7 @@ impl PolicyPipeline {
         if !result.edits.is_empty() {
             let excluded = if prepared.capability.semantic_rewrite {
                 // Semantic policies: also exclude lines in clang diagnostic-error regions
-                let regions = state
-                    .semantic_for_text
+                let regions = state.parse.semantic
                     .as_ref()
                     .map(|s| s.regions.as_slice())
                     .unwrap_or(&[]);
@@ -1044,7 +1064,7 @@ impl PolicyPipeline {
                     if result.edits.is_empty() {
                         result.text = state.current.to_string();
                     } else {
-                        let resynthesized = Self::apply_synthesized_edits_best_effort(
+                        let resynthesized = Self::apply_edits_lenient(
                             &state.current, &result.edits,
                         );
                         match resynthesized {
@@ -1082,7 +1102,7 @@ impl PolicyPipeline {
                 policy_name,
                 &settings.touch_contract,
                 result.edits.as_slice(),
-                state.tree_for_text.as_ref(),
+                state.parse.tree.as_ref(),
                 Some(&self.query_cache),
                 Some(&prepared.policy_certainty),
                 prepared.capability.structural_safe,
@@ -1099,10 +1119,10 @@ impl PolicyPipeline {
             }
             if self.confidence_enabled && !result.edits.is_empty() {
                 let is_semantic = prepared.capability.semantic_rewrite
-                    && state.semantic_compdb_context_for_file;
+                    && state.parse.has_semantic_compdb;
                 if is_semantic
-                    && state.tree_for_text.is_some()
-                    && state.clang_for_text.is_none()
+                    && state.parse.tree.is_some()
+                    && state.parse.clang.is_none()
                 {
                     result.warnings.push(
                         "policy confidence mode downgraded to 'tree-sitter' due unavailable clang semantic context".to_string(),
@@ -1128,7 +1148,7 @@ impl PolicyPipeline {
                     reason_codes: vec![ConfidenceReasonCode::Stable],
                     dropped_lines: BTreeSet::new(),
                 };
-                let adjusted_decision = Self::apply_cluster_enforcement_bias(
+                let adjusted_decision = Self::apply_cluster_bias(
                     decision,
                     cluster_controls.enforcement_bias,
                 );
@@ -1160,9 +1180,9 @@ impl PolicyPipeline {
 
         let convergence_signal = Self::build_convergence_signal(ConvergenceSignalInput {
             result: &result,
-            semantic: state.semantic_for_text.as_ref(),
-            summary: state.semantic_summary_or_default(),
-            semantic_fidelity_score: state.semantic_fidelity_score,
+            semantic: state.parse.semantic.as_ref(),
+            summary: state.parse.summary_or_default(),
+            semantic_fidelity_score: state.parse.fidelity_score,
             previous_contract_failures: &state.options.previous_contract_failures,
             capability: &prepared.capability,
             cluster_radius_cap: cluster_controls.max_impact_radius_cap,
@@ -1186,7 +1206,7 @@ impl PolicyPipeline {
 
     fn coordinate_policy_stage(
         &self,
-        state: &mut PolicyPipelineRunState<'_>,
+        state: &mut PipelineState<'_>,
         policy_name: &str,
         mut executed: ExecutedPolicyStage,
     ) -> CoordinatedPolicyStage {
@@ -1194,26 +1214,26 @@ impl PolicyPipeline {
             semantic_rewrite: executed.policy_certainty.trust_for_semantic_rewrite(),
         };
         let context = PolicyContext::new(&state.current, state.path)
-            .with_tree_sitter_tree(state.tree_for_text.as_ref())
-            .with_clang_parse_result(state.clang_for_text.as_deref())
-            .with_semantic_file_context(state.semantic_for_text.as_ref())
-            .with_project_graph_snapshot(state.options.project_graph_snapshot.as_deref())
+            .with_tree(state.parse.tree.as_ref())
+            .with_clang(state.parse.clang.as_deref())
+            .with_semantic(state.parse.semantic.as_ref())
+            .with_graph(state.options.project_graph_snapshot.as_deref())
             .with_parser_trust(parser_trust)
             .with_policy_certainty(Some(executed.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
         let project_query = context.project_query();
-        let edit_block_kind = Self::dominant_block_kind_for_edits(state, &executed.result.edits);
+        let edit_block_kind = Self::dominant_block_kind(state, &executed.result.edits);
         let context_mod = self.context_modifier_for_policy(state, policy_name, Some(edit_block_kind));
         let candidate_confidence = executed.confidence_score.unwrap_or(
             executed
                 .capability
                 .effective_certainty(&executed.policy_certainty),
         ) * context_mod;
-        let proposed_candidates = state.proposer_controller.propose(
+        let proposed_candidates = state.cand.proposer.propose(
             policy_name,
             &executed.result,
             &project_query,
-            state.comment_lines_for_text.as_ref(),
+            state.parse.comment_lines.as_ref(),
             &executed.convergence_signal,
             &executed.capability,
             candidate_confidence,
@@ -1222,14 +1242,14 @@ impl PolicyPipeline {
         let guardian_assessment = ProposerController::assess(
             proposed_candidates.as_slice(), &executed.capability, Some(&executed.policy_certainty));
         let disallowed_zone_lines = guardian_assessment.blocked_zone_lines;
-        let guardian_hard_blocked_lines = guardian_assessment.blocked_hard_constraint_lines;
+        let guardian_hard_blocked_lines = guardian_assessment.hard_blocked_lines;
         let mut guardian_suppressed_lines = BTreeSet::new();
         guardian_suppressed_lines.extend(disallowed_zone_lines.iter().copied());
         guardian_suppressed_lines.extend(guardian_hard_blocked_lines.iter().copied());
         let mut candidates = guardian_assessment.allowed;
         if !guardian_suppressed_lines.is_empty() {
             executed.result = if executed.capability.structural_safe {
-                Self::apply_line_suppression_structural(
+                Self::suppress_structural(
                     &state.current,
                     executed.result,
                     &guardian_suppressed_lines,
@@ -1263,7 +1283,7 @@ impl PolicyPipeline {
 
         let solve_result = GlobalConflictSolver::solve(
             candidates.as_slice(),
-            state.selected_candidates.as_slice(),
+            state.cand.selected.as_slice(),
             &executed.policy_certainty,
             state.options.retry_scope_stage,
         );
@@ -1280,7 +1300,7 @@ impl PolicyPipeline {
             .dropped_lines
             .len()
             .saturating_add(guardian_suppressed_lines.len());
-        executed.convergence_signal.solver_hard_blocked_lines = hard_blocked_lines.len();
+        executed.convergence_signal.hard_blocked_lines = hard_blocked_lines.len();
         if !solve_result.dropped_lines.is_empty() {
             if executed.capability.semantic_rewrite {
                 executed.dropped_line_count = executed
@@ -1299,9 +1319,9 @@ impl PolicyPipeline {
                     solve_result.dropped_lines.len()
                 ));
             } else if policy_catalog()
-                .behavior_for_name(policy_name)
-                .keeps_non_local_conflict_batch
-                && Self::has_non_local_text_shape_change(
+                .behavior(policy_name)
+                .keeps_nonlocal_batch
+                && Self::has_nonlocal_change(
                     &state.current,
                     executed.result.text.as_str(),
                 )
@@ -1316,7 +1336,7 @@ impl PolicyPipeline {
                 ));
             } else {
                 executed.result = if executed.capability.structural_safe {
-                    Self::apply_line_suppression_structural(
+                    Self::suppress_structural(
                         &state.current,
                         executed.result,
                         &solve_result.dropped_lines,
@@ -1375,8 +1395,7 @@ impl PolicyPipeline {
             &solve_result.dropped_lines,
             &kept_lines,
         );
-        let conflict_violations = state
-            .conflict_detector
+        let conflict_violations = state.cand.conflict
             .observe(policy_name, executed.result.edits.as_slice());
         let text_changed = !text_scan::TEXT_SCAN.strings_equal(&executed.result.text, &state.current);
 
@@ -1398,7 +1417,7 @@ impl PolicyPipeline {
 
     fn commit_policy_stage(
         &self,
-        state: &mut PolicyPipelineRunState<'_>,
+        state: &mut PipelineState<'_>,
         input: CommitPolicyInput<'_>,
     ) {
         let CommitPolicyInput {
@@ -1412,11 +1431,10 @@ impl PolicyPipeline {
             checkpoint_ms,
         } = input;
         Self::append_selected_candidates(
-            &mut state.selected_candidates,
+            &mut state.cand.selected,
             coordinated.accepted_candidates.as_slice(),
         );
-        state
-            .internal_candidates
+        state.cand.internal
             .extend(coordinated.accepted_candidates.iter().cloned());
 
         state.policy_traces.push(PolicyExecutionTrace {
@@ -1435,7 +1453,7 @@ impl PolicyPipeline {
             candidate_trace: coordinated.candidate_trace,
         });
 
-        let summary = state.semantic_summary_or_default();
+        let summary = state.parse.summary_or_default();
         let mut sample = PolicyExecutionSample::success(
             policy_name,
             policy_started.elapsed(),
@@ -1445,7 +1463,7 @@ impl PolicyPipeline {
         if let Some(confidence) = coordinated.confidence_sample {
             sample = sample.with_confidence(confidence);
         }
-        state.telemetry_samples.push(sample);
+        state.telem.samples.push(sample);
         debug!(
             policy = policy_name,
             edits = coordinated.result.edits.len(),
@@ -1457,7 +1475,7 @@ impl PolicyPipeline {
             semantic_preprocessor_scopes = summary.preprocessor_scope_count,
             semantic_usr_decls = summary.usr_backed_declaration_count,
             semantic_errors = summary.diagnostic_error_count,
-            internal_candidate_count = state.internal_candidates.len(),
+            internal_candidate_count = state.cand.internal.len(),
             "policy applied"
         );
         state.current = Arc::from(coordinated.result.text);
@@ -1466,7 +1484,7 @@ impl PolicyPipeline {
         state.all_edits.extend(coordinated.result.edits);
         state.all_warnings.extend(coordinated.result.warnings);
         if coordinated.text_changed {
-            state.invalidate_semantic_state(is_semantic_rewrite, clang_invalidating);
+            state.parse.invalidate(is_semantic_rewrite, clang_invalidating);
         }
     }
 
@@ -1579,14 +1597,14 @@ impl PolicyPipeline {
 
     fn build_convergence_profiles(
         policy_settings: &HashMap<String, PolicyConfig>,
-    ) -> HashMap<String, ConvergencePolicyProfile> {
-        let mut profiles = HashMap::new();
+    ) -> FxHashMap<String, ConvergencePolicyProfile> {
+        let mut profiles = FxHashMap::default();
         for (name, settings) in policy_settings {
             let mut domain = name.clone();
             let mut priority = ConvergenceController::default_priority_for(name.as_str());
             let mut impact_radius = ConvergenceController::default_impact_radius_for(name.as_str());
-            let mut semantic_priority_weight_bp =
-                ConvergenceController::default_semantic_priority_weight_bp_for(name.as_str());
+            let mut priority_weight_bp =
+                ConvergenceController::default_priority_weight_bp_for(name.as_str());
             let mut risk_tier = ConvergenceController::default_risk_tier_for(name.as_str());
             if let Some(table) = settings.table_value("convergence") {
                 if let Some(value) = table.get("domain").and_then(|item| item.as_str()) {
@@ -1609,11 +1627,11 @@ impl PolicyPipeline {
                     }
                 }
                 if let Some(value) = table
-                    .get("semantic_priority_weight_bp")
+                    .get("priority_weight_bp")
                     .and_then(|item| item.as_integer())
                 {
                     if value >= 0 {
-                        semantic_priority_weight_bp = value.min(1_000) as u16;
+                        priority_weight_bp = value.min(1_000) as u16;
                     }
                 } else if let Some(value) = table
                     .get("semantic_priority_weight")
@@ -1625,7 +1643,7 @@ impl PolicyPipeline {
                             .map(|item| item as f64)
                     })
                 {
-                    semantic_priority_weight_bp = (value.clamp(0.0, 1.0) * 1_000.0).round() as u16;
+                    priority_weight_bp = (value.clamp(0.0, 1.0) * 1_000.0).round() as u16;
                 }
                 if let Some(value) = table.get("risk_tier").and_then(|item| item.as_str()) {
                     let normalized = value.trim().to_ascii_lowercase();
@@ -1643,7 +1661,7 @@ impl PolicyPipeline {
                     domain,
                     priority,
                     impact_radius,
-                    semantic_priority_weight_bp,
+                    priority_weight_bp,
                     risk_tier,
                 ),
             );
@@ -1663,41 +1681,41 @@ impl PolicyPipeline {
             trust,
         } = input;
         let mut semantic_confidence_bp =
-            crate::engine::fuzzy_inference::fuzzy_semantic_confidence_bonus(0, trust);
+            crate::engine::fuzzy_inference::fuzzy_confidence_bonus(0, trust);
         let mut impact_radius = 0usize;
         if let Some(context) = semantic {
             if context.clang_success {
                 semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_semantic_confidence_bonus(1, trust),
+                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(1, trust),
                 );
             }
             if !context.tree_has_error {
                 semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_semantic_confidence_bonus(2, trust),
+                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(2, trust),
                 );
             }
             if context.diagnostic_summary.error_total() == 0 {
                 semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_semantic_confidence_bonus(3, trust),
+                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(3, trust),
                 );
             } else {
-                let error_cap = crate::engine::fuzzy_inference::fuzzy_diagnostic_error_cap(trust);
+                let error_cap = crate::engine::fuzzy_inference::fuzzy_error_cap(trust);
                 let penalty = context.diagnostic_summary.error_total().min(error_cap) as u16 * 20;
                 semantic_confidence_bp = semantic_confidence_bp.saturating_sub(penalty);
             }
             if summary.usr_backed_declaration_count > 0 {
                 semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_semantic_confidence_bonus(4, trust),
+                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(4, trust),
                 );
             }
-            let ref_radius = crate::engine::fuzzy_inference::fuzzy_reference_count_radius(
+            let ref_radius = crate::engine::fuzzy_inference::fuzzy_ref_radius(
                 summary.reference_count,
                 trust,
             );
             impact_radius = impact_radius.max(ref_radius);
         } else {
             semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_contract_failure_deduction(0, trust),
+                crate::engine::fuzzy_inference::fuzzy_failure_deduction(0, trust),
             );
         }
         let fidelity_deduction = crate::engine::fuzzy_inference::fuzzy_fidelity_deduction(
@@ -1712,22 +1730,22 @@ impl PolicyPipeline {
                 .contains(&SemanticInvariantClause::DeclarationReferenceIntegrity)
         {
             semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_contract_failure_deduction(2, trust),
+                crate::engine::fuzzy_inference::fuzzy_failure_deduction(2, trust),
             );
             impact_radius = impact_radius.max(2);
         }
         if previous_contract_failures.contains(&SemanticInvariantClause::ScopeIntegrity) {
             semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_contract_failure_deduction(3, trust),
+                crate::engine::fuzzy_inference::fuzzy_failure_deduction(3, trust),
             );
             impact_radius = impact_radius.max(2);
         }
         if previous_contract_failures.contains(&SemanticInvariantClause::EditSafety) {
             semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_contract_failure_deduction(4, trust),
+                crate::engine::fuzzy_inference::fuzzy_failure_deduction(4, trust),
             );
         }
-        let edit_radius = crate::engine::fuzzy_inference::fuzzy_edit_count_radius(
+        let edit_radius = crate::engine::fuzzy_inference::fuzzy_edit_radius(
             result.edits.len(),
             trust,
         );
@@ -1736,7 +1754,7 @@ impl PolicyPipeline {
         if let Some(cap) = cluster_radius_cap {
             resolved_radius = resolved_radius.min(cap.max(1));
         }
-        let (semantic_impact_ranges_by_line, semantic_symbol_ids_by_line) =
+        let (impact_ranges, symbol_ids) =
             Self::build_semantic_impact_maps(result, semantic, resolved_radius, trust);
         ConvergencePolicySignal {
             semantic_confidence_bp: semantic_confidence_bp.min(1_000),
@@ -1745,9 +1763,9 @@ impl PolicyPipeline {
             capability_macro_sensitive: capability.macro_sensitive,
             capability_whitespace_safe: capability.whitespace_safe,
             solver_dropped_lines: 0,
-            solver_hard_blocked_lines: 0,
-            semantic_impact_ranges_by_line,
-            semantic_symbol_ids_by_line,
+            hard_blocked_lines: 0,
+            impact_ranges,
+            symbol_ids,
         }
     }
 
@@ -1757,9 +1775,9 @@ impl PolicyPipeline {
         base_radius: usize,
         trust: f64,
     ) -> (SemanticImpactRangesByLine, SemanticImpactSymbolsByLine) {
-        let impact_cap = crate::engine::fuzzy_inference::fuzzy_convergence_impact_cap(trust);
-        let scope_cap = crate::engine::fuzzy_inference::fuzzy_convergence_scope_cap(trust);
-        let symbol_cap = crate::engine::fuzzy_inference::fuzzy_convergence_symbol_cap(trust);
+        let impact_cap = crate::engine::fuzzy_inference::fuzzy_impact_cap(trust);
+        let scope_cap = crate::engine::fuzzy_inference::fuzzy_scope_cap(trust);
+        let symbol_cap = crate::engine::fuzzy_inference::fuzzy_symbol_cap(trust);
         let fallback_radius = base_radius.max(1);
         let mut edit_lines = result
             .edits
@@ -1774,13 +1792,13 @@ impl PolicyPipeline {
             return (BTreeMap::new(), BTreeMap::new());
         }
 
-        let mut ranges_by_line = BTreeMap::<usize, Vec<(usize, usize)>>::new();
-        let mut symbols_by_line = BTreeMap::<usize, Vec<u64>>::new();
+        let mut ranges_by_line = BTreeMap::<usize, SmallVec<[(usize, usize); 4]>>::new();
+        let mut symbols_by_line = BTreeMap::<usize, SmallVec<[u64; 4]>>::new();
         let Some(semantic) = semantic else {
             for line in edit_lines {
                 ranges_by_line.insert(
                     line,
-                    vec![(
+                    smallvec![(
                         line.saturating_sub(fallback_radius).max(1),
                         line.saturating_add(fallback_radius).max(1),
                     )],
@@ -1790,7 +1808,7 @@ impl PolicyPipeline {
         };
 
         let mut symbol_lines = HashMap::<u64, (usize, usize)>::new();
-        let mut symbol_ids_by_line = HashMap::<usize, Vec<u64>>::new();
+        let mut symbol_ids_by_line = HashMap::<usize, SmallVec<[u64; 4]>>::new();
         for declaration in &semantic.declarations {
             if declaration.line == 0 {
                 continue;
@@ -1839,7 +1857,7 @@ impl PolicyPipeline {
         scopes_by_width.sort_unstable();
 
         for line in edit_lines {
-            let mut ranges = Vec::<(usize, usize)>::new();
+            let mut ranges = SmallVec::<[(usize, usize); 4]>::new();
             for &(width, start, end) in &scopes_by_width {
                 if width.saturating_add(1) > scope_cap {
                     break;
@@ -1885,15 +1903,15 @@ impl PolicyPipeline {
         (ranges_by_line, symbols_by_line)
     }
 
-    fn normalize_impact_ranges(ranges: &mut Vec<(usize, usize)>) {
+    fn normalize_impact_ranges(ranges: &mut SmallVec<[(usize, usize); 4]>) {
         if ranges.is_empty() {
             return;
         }
         ranges.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-        let mut merged = Vec::<(usize, usize)>::with_capacity(ranges.len());
-        for (start, end) in ranges.iter().copied() {
-            let start = start.max(1);
-            let end = end.max(start);
+        let mut merged = SmallVec::<[(usize, usize); 4]>::with_capacity(ranges.len());
+        for &(start, end) in ranges.iter() {
+            let start: usize = start.max(1);
+            let end: usize = end.max(start);
             if let Some(last) = merged.last_mut() {
                 if start <= last.1.saturating_add(1) {
                     last.1 = last.1.max(end);
@@ -1988,7 +2006,7 @@ impl PolicyPipeline {
         }
     }
 
-    fn apply_cluster_enforcement_bias(
+    fn apply_cluster_bias(
         mut decision: ConfidenceGateDecision,
         bias: ClusterEnforcementBias,
     ) -> ConfidenceGateDecision {
@@ -2050,7 +2068,7 @@ impl PolicyPipeline {
         }
     }
 
-    fn apply_semantic_guidance_mode(
+    fn apply_semantic_mode(
         before_text: &str,
         result: PolicyResult,
         semantic_query: &SemanticContextQuery<'_>,
@@ -2085,9 +2103,9 @@ impl PolicyPipeline {
                         && profile.reference_count == 0
                         && capability.structural_safe;
                     (capability.allows_zone(PolicyZone::Preprocessor)
-                        && semantic_query.is_safe_preprocessor_or_global_edit(line, 1))
+                        && semantic_query.is_safe_global(line, 1))
                         || (capability.allows_zone(PolicyZone::Comments)
-                            && !semantic_query.has_diagnostic_error_on_line(line))
+                            && !semantic_query.has_diag_error(line))
                         || consensus_diag_relax
                 } else {
                     false
@@ -2104,7 +2122,7 @@ impl PolicyPipeline {
             PolicyGuidanceMode::SoftGuideline => {
                 let dropped_count = unsafe_lines.len();
                 let mut suppressed = if capability.structural_safe {
-                    Self::apply_line_suppression_structural(before_text, result, &unsafe_lines)
+                    Self::suppress_structural(before_text, result, &unsafe_lines)
                 } else {
                     Self::apply_line_suppression(before_text, result, &unsafe_lines)
                 };
@@ -2176,7 +2194,7 @@ impl PolicyPipeline {
             return reverted;
         }
         let mut filtered = if config.capability.structural_safe {
-            Self::apply_line_suppression_structural(before_text, result, &blocked_lines)
+            Self::suppress_structural(before_text, result, &blocked_lines)
         } else {
             Self::apply_line_suppression(before_text, result, &blocked_lines)
         };
@@ -2194,18 +2212,18 @@ impl PolicyPipeline {
         result: PolicyResult,
         disabled_lines: &std::collections::BTreeSet<usize>,
     ) -> PolicyResult {
-        Self::apply_line_suppression_impl(before_text, result, disabled_lines)
+        Self::suppress_lines_impl(before_text, result, disabled_lines)
     }
 
-    fn apply_line_suppression_structural(
+    fn suppress_structural(
         before_text: &str,
         result: PolicyResult,
         disabled_lines: &std::collections::BTreeSet<usize>,
     ) -> PolicyResult {
-        Self::apply_line_suppression_impl(before_text, result, disabled_lines)
+        Self::suppress_lines_impl(before_text, result, disabled_lines)
     }
 
-    fn apply_line_suppression_impl(
+    fn suppress_lines_impl(
         before_text: &str,
         result: PolicyResult,
         disabled_lines: &std::collections::BTreeSet<usize>,
@@ -2267,7 +2285,7 @@ impl PolicyPipeline {
                 .filter(|edit| !disabled_lines.contains(&edit.line))
                 .collect::<Vec<_>>();
             let adjusted_text = Self::apply_synthesized_edits(before_text, &filtered)
-                .or_else(|| Self::apply_synthesized_edits_best_effort(before_text, &filtered));
+                .or_else(|| Self::apply_edits_lenient(before_text, &filtered));
             let Some(adjusted_text) = adjusted_text else {
                 warnings.push(
                     "line suppression escalated to full rollback due non-local line edits"
@@ -2338,7 +2356,7 @@ impl PolicyPipeline {
         }
     }
 
-    fn has_non_local_text_shape_change(before_text: &str, after_text: &str) -> bool {
+    fn has_nonlocal_change(before_text: &str, after_text: &str) -> bool {
         text_scan::TEXT_SCAN.has_line_count_changed(before_text, after_text)
     }
 
@@ -2428,7 +2446,7 @@ impl PolicyPipeline {
         error_lines
     }
 
-    fn apply_synthesized_edits_best_effort(before_text: &str, edits: &[Edit]) -> Option<String> {
+    fn apply_edits_lenient(before_text: &str, edits: &[Edit]) -> Option<String> {
         if edits.is_empty() {
             return Some(before_text.to_string());
         }
@@ -2522,7 +2540,7 @@ impl PolicyPipeline {
             .as_ref()
             .map(|s| s.diagnostic_error_count)
             .unwrap_or(0);
-        let semantic = crate::engine::fuzzy_inference::fuzzy_raw_semantic_observation(
+        let semantic = crate::engine::fuzzy_inference::fuzzy_semantic_obs(
             semantic_compdb_context_for_file,
             confidence.clang_success,
             confidence.semantic_usr_ratio,
@@ -2550,7 +2568,7 @@ impl PolicyPipeline {
         if clang_staleness > 0 {
             let tree_scope_count = semantic_summary.map(|s| s.scope_count).unwrap_or(0);
             let clang_decl_count = semantic_summary.map(|s| s.declaration_count).unwrap_or(0);
-            let agreement = crate::engine::fuzzy_inference::fuzzy_parser_cross_validation(
+            let agreement = crate::engine::fuzzy_inference::fuzzy_cross_validation(
                 tree_scope_count,
                 clang_decl_count,
                 confidence.tree_error_ratio,
@@ -2571,7 +2589,7 @@ impl PolicyPipeline {
     ) -> PolicyCertainty {
         let key = path.to_string_lossy();
         let edit_outcome = self.certainty_filter_store.last_edit_outcome(&key);
-        let fallback = self.certainty_filter_store.current_edit_success_estimate(&key);
+        let fallback = self.certainty_filter_store.edit_estimate(&key);
         let measurement: [f64; 5] = [
             parser_measurement[0],
             parser_measurement[1],
@@ -2597,7 +2615,7 @@ impl PolicyPipeline {
             coverage_variance: result.within_coverage_variance(),
             richness_variance: result.within_richness_variance(),
             edit_success: result.edit_success(),
-            edit_success_variance: result.within_edit_success_variance(),
+            edit_success_variance: result.edit_variance(),
             stable_model_prob: result.model_probs[0],
             transitional_model_prob: result.model_probs[1],
             noisy_model_prob: result.model_probs[2],
@@ -2607,10 +2625,10 @@ impl PolicyPipeline {
     }
 
     #[cfg(test)]
-    fn requires_exact_compdb_for_wide_structural(policy_name: &str) -> bool {
+    fn needs_exact_compdb(policy_name: &str) -> bool {
         policy_catalog()
-            .behavior_for_name(policy_name)
-            .requires_exact_compdb_for_wide_structural
+            .behavior(policy_name)
+            .needs_exact_compdb
     }
 
     fn append_selected_candidates(
@@ -2692,7 +2710,7 @@ mod tests {
     use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
     use crate::engine::pipeline::PolicyPipeline;
     use crate::engine::run_options::RetryScopeStage;
-    use crate::engine::zone::PolicyZone;
+    use crate::policy::zone::PolicyZone;
     use crate::engine::semantic_contract::{PolicyGuidanceMode, SemanticInvariantClause};
     use crate::model::edit::Edit;
     use crate::model::policy_result::PolicyResult;
@@ -2709,7 +2727,7 @@ mod tests {
     };
     use crate::parser::node_kind;
     #[test]
-    fn semantic_guideline_drops_unsafe_lines_only() {
+    fn guideline_drops_unsafe() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
@@ -2721,7 +2739,7 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let before = "line1\nline2\nline3\n";
         let result = PolicyResult {
             text: "line1\nunsafe\nsafe\n".to_string(),
@@ -2744,7 +2762,7 @@ mod tests {
         };
         let capability = PolicyCapabilityMatrix::for_policy("sample");
 
-        let adjusted = PolicyPipeline::apply_semantic_guidance_mode(
+        let adjusted = PolicyPipeline::apply_semantic_mode(
             before,
             result,
             &query,
@@ -2766,7 +2784,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_hard_invariant_blocks_unsafe_lines() {
+    fn invariant_blocks_unsafe() {
         let semantic = SemanticFileContext {
             diagnostic_entries: vec![ClangDiagnosticEntry {
                 line: 4,
@@ -2785,7 +2803,7 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let before = "line1\nline2\nline3\nline4\n";
         let result = PolicyResult {
             text: "line1\nline2\nline3\nunsafe\n".to_string(),
@@ -2800,7 +2818,7 @@ mod tests {
         };
         let capability = PolicyCapabilityMatrix::for_policy("sample");
 
-        let adjusted = PolicyPipeline::apply_semantic_guidance_mode(
+        let adjusted = PolicyPipeline::apply_semantic_mode(
             before,
             result,
             &query,
@@ -2821,7 +2839,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_guideline_allows_preprocessor_structural_edits() {
+    fn guideline_allows_structural() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
@@ -2833,7 +2851,7 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let before = "line1\n#include <a>\nline3\n";
         let result = PolicyResult {
             text: "line1\n#include <b>\nline3\n".to_string(),
@@ -2848,7 +2866,7 @@ mod tests {
         };
         let capability = PolicyCapabilityMatrix::for_policy("include_order");
 
-        let adjusted = PolicyPipeline::apply_semantic_guidance_mode(
+        let adjusted = PolicyPipeline::apply_semantic_mode(
             before,
             result,
             &query,
@@ -2869,7 +2887,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_filter_drops_edits_outside_retry_scope() {
+    fn scope_drops_outside() {
         let before = "l1\nl2\nl3\nl4\n";
         let result = PolicyResult {
             text: "l1\nx2\nx3\nx4\n".to_string(),
@@ -2916,7 +2934,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_filter_reverts_semantic_rewrite_when_out_of_scope_lines_exist() {
+    fn scope_reverts_rewrite() {
         let before = "a\nb\nc\n";
         let result = PolicyResult {
             text: "x\ny\nc\n".to_string(),
@@ -2962,7 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_filter_skips_saturated_non_local_structural_batches() {
+    fn scope_skips_saturated() {
         let before = "l1\nl2\nl3\n";
         let mut result = PolicyResult {
             text: "x1\nx2\nx3\nx4\nx5\nx6\n".to_string(),
@@ -2999,23 +3017,23 @@ mod tests {
     }
 
     #[test]
-    fn wide_structural_policies_require_exact_compdb() {
-        assert!(PolicyPipeline::requires_exact_compdb_for_wide_structural(
+    fn wide_requires_compdb() {
+        assert!(PolicyPipeline::needs_exact_compdb(
             "clang_format"
         ));
-        assert!(PolicyPipeline::requires_exact_compdb_for_wide_structural(
+        assert!(PolicyPipeline::needs_exact_compdb(
             "include_order"
         ));
-        assert!(PolicyPipeline::requires_exact_compdb_for_wide_structural(
+        assert!(PolicyPipeline::needs_exact_compdb(
             "class_layout"
         ));
-        assert!(PolicyPipeline::requires_exact_compdb_for_wide_structural(
+        assert!(PolicyPipeline::needs_exact_compdb(
             "compact_declarations"
         ));
     }
 
     #[test]
-    fn convergence_profile_reads_impact_radius_and_semantic_weight() {
+    fn profile_reads_radius() {
         let mut policy_table = Table::new();
         policy_table.insert(
             "name".to_string(),
@@ -3030,7 +3048,7 @@ mod tests {
         convergence.insert("priority".to_string(), toml::Value::Integer(777));
         convergence.insert("impact_radius".to_string(), toml::Value::Integer(3));
         convergence.insert(
-            "semantic_priority_weight_bp".to_string(),
+            "priority_weight_bp".to_string(),
             toml::Value::Integer(650),
         );
         policy_table.insert("convergence".to_string(), toml::Value::Table(convergence));
@@ -3043,11 +3061,11 @@ mod tests {
         assert_eq!(profile.domain, "layout");
         assert_eq!(profile.priority, 777);
         assert_eq!(profile.impact_radius, 3);
-        assert_eq!(profile.semantic_priority_weight_bp, 650);
+        assert_eq!(profile.priority_weight_bp, 650);
     }
 
     #[test]
-    fn convergence_signal_increases_radius_for_large_context_and_batch() {
+    fn signal_increases_radius() {
         let result = PolicyResult {
             text: "x".to_string(),
             violations: Vec::new(),
@@ -3096,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn convergence_signal_builds_scope_and_symbol_impact_maps() {
+    fn signal_builds_maps() {
         let result = PolicyResult {
             text: "void f() {}\n".to_string(),
             violations: Vec::new(),
@@ -3162,7 +3180,7 @@ mod tests {
         });
 
         let line10_ranges = signal
-            .semantic_impact_ranges_by_line
+            .impact_ranges
             .get(&10)
             .expect("line 10 ranges");
         assert!(line10_ranges
@@ -3170,7 +3188,7 @@ mod tests {
             .any(|(start, end)| *start <= 10 && *end >= 12));
 
         let line12_ranges = signal
-            .semantic_impact_ranges_by_line
+            .impact_ranges
             .get(&12)
             .expect("line 12 ranges");
         assert!(line12_ranges
@@ -3178,18 +3196,18 @@ mod tests {
             .any(|(start, end)| *start <= 10 && *end >= 12));
 
         let ids_line10 = signal
-            .semantic_symbol_ids_by_line
+            .symbol_ids
             .get(&10)
             .expect("line 10 symbol ids");
         let ids_line12 = signal
-            .semantic_symbol_ids_by_line
+            .symbol_ids
             .get(&12)
             .expect("line 12 symbol ids");
         assert!(ids_line10.iter().any(|id| ids_line12.contains(id)));
     }
 
     #[test]
-    fn convergence_signal_penalizes_previous_contract_failures() {
+    fn signal_penalizes_failures() {
         let result = PolicyResult {
             text: "x".to_string(),
             violations: Vec::new(),
@@ -3237,7 +3255,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_low_semantic_ci_yields_low_trust_for_semantic_rewrite() {
+    fn low_semantic_trust() {
         let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
         let certainty = PolicyCertainty {
             overall: 0.80,
@@ -3249,7 +3267,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_high_certainty_low_variance_yields_high_trust() {
+    fn certainty_yields_high() {
         let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
         let certainty = PolicyCertainty {
             overall: 0.74,
@@ -3268,7 +3286,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_high_variance_yields_lower_trust() {
+    fn variance_yields_lower() {
         let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
         let low_var = PolicyCertainty {
             semantic: 0.70,
@@ -3290,7 +3308,7 @@ mod tests {
     }
 
     #[test]
-    fn line_suppression_keeps_local_blank_line_edits_when_line_counts_match() {
+    fn suppression_keeps_local() {
         let before = "int x = 0;\n\nint y = 1;\n";
         let result = PolicyResult {
             text: "int x = 0;\n    \nint y = 1;\n".to_string(),
@@ -3315,7 +3333,7 @@ mod tests {
     }
 
     #[test]
-    fn line_suppression_best_effort_handles_non_local_line_count_changes() {
+    fn suppression_handles_nonlocal() {
         let before = "A\nB\nC\n";
         let result = PolicyResult {
             text: "A\nB\nX\nC\n".to_string(),
@@ -3338,7 +3356,7 @@ mod tests {
     }
 
     #[test]
-    fn line_suppression_no_threshold_revert_for_wide_non_local_batches() {
+    fn suppression_no_revert() {
         let before_lines: Vec<String> = (1..=70).map(|n| format!("{n}")).collect();
         let before = format!("{}\n", before_lines.join("\n"));
         let mut after_lines = before_lines.clone();
@@ -3364,7 +3382,7 @@ mod tests {
     }
 
     #[test]
-    fn line_suppression_structural_safe_skips_wide_batch_escalation() {
+    fn suppression_skips_escalation() {
         let before_lines: Vec<String> = (1..=70).map(|n| format!("{n}")).collect();
         let before = format!("{}\n", before_lines.join("\n"));
         let mut after_lines = before_lines.clone();
@@ -3383,7 +3401,7 @@ mod tests {
                 .collect(),
             warnings: vec![],
         };
-        let suppressed = PolicyPipeline::apply_line_suppression_structural(
+        let suppressed = PolicyPipeline::suppress_structural(
             before.as_str(),
             result,
             &BTreeSet::from([3usize]),
@@ -3398,7 +3416,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_conflict_model_prefers_lower_risk_when_confidence_is_close() {
+    fn prefers_lower_risk() {
         let existing = PolicyEditCandidate {
             policy: "naming_conventions".into(),
             line: 42,
@@ -3442,7 +3460,7 @@ mod tests {
     }
 
     #[test]
-    fn stabilize_output_text_reverts_untracked_delta_without_edits() {
+    fn stabilize_reverts_untracked() {
         let mut warnings = Vec::new();
         let output = PolicyPipeline::stabilize_output_text(
             "int value = 0;\n",
@@ -3457,7 +3475,7 @@ mod tests {
     }
 
     #[test]
-    fn stabilize_output_text_keeps_delta_when_edits_exist() {
+    fn stabilize_keeps_delta() {
         let mut warnings = Vec::new();
         let edits = vec![Edit {
             policy: "compact_declarations".into(),
@@ -3476,7 +3494,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_edit_coverage_expands_block_edit_metadata() {
+    fn coverage_expands_block() {
         let result = PolicyResult {
             text: "line1\nline2 changed\nline3 changed\n".to_string(),
             violations: Vec::new(),
@@ -3500,7 +3518,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_edit_coverage_clears_stale_edits_when_text_unchanged() {
+    fn coverage_clears_stale() {
         let result = PolicyResult {
             text: "line1\nline2\n".to_string(),
             violations: Vec::new(),
@@ -3522,7 +3540,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_edit_coverage_keeps_exact_multiline_declared_edits() {
+    fn coverage_keeps_multiline() {
         let result = PolicyResult {
             text: "line1\ncall(\n    first,\n    second\n);\nline3\n".to_string(),
             violations: Vec::new(),

@@ -40,7 +40,7 @@ pub struct PostEditCheckResult {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct PostEditCheckBaseline {
+pub struct CheckBaseline {
     before_tree_error: Option<bool>,
     before_tree_error_ratio: Option<f64>,
     before_clang_error_count: Option<usize>,
@@ -102,7 +102,7 @@ impl PostEditChecker {
         self.validate_with_baseline_for_edits(path, after_text, &baseline, edited_lines, certainty)
     }
 
-    pub fn build_baseline(&self, path: &Path, before_text: &str) -> PostEditCheckBaseline {
+    pub fn build_baseline(&self, path: &Path, before_text: &str) -> CheckBaseline {
         baseline::build(self, path, before_text)
     }
 
@@ -110,7 +110,7 @@ impl PostEditChecker {
         &self,
         path: &Path,
         after_text: &str,
-        baseline: &PostEditCheckBaseline,
+        baseline: &CheckBaseline,
         edited_lines: Option<&BTreeSet<usize>>,
         certainty: Option<&PolicyCertainty>,
     ) -> PostEditCheckResult {
@@ -121,7 +121,7 @@ impl PostEditChecker {
         &self,
         path: &Path,
         after_text: &str,
-        baseline: &PostEditCheckBaseline,
+        baseline: &CheckBaseline,
         certainty: Option<&PolicyCertainty>,
     ) -> PostEditCheckResult {
         delta::validate_structural_only(self, path, after_text, baseline, certainty)
@@ -129,7 +129,7 @@ impl PostEditChecker {
 
     pub(crate) fn semantic_context_kind_for_path(&self, path: &Path) -> SemanticCompdbContextKind {
         self.parser_manager
-            .semantic_compdb_context_kind_for_path(path)
+            .semantic_compdb_kind(path)
     }
 
     fn clang_error_count(parse: &ClangParseResult) -> usize {
@@ -151,10 +151,10 @@ impl PostEditChecker {
     }
 
     fn diagnostic_weighted_score_with_trust(summary: ClangDiagnosticSummary, trust: f64) -> u32 {
-        let note_w = crate::engine::fuzzy_inference::fuzzy_diagnostic_severity_weight(0, trust);
-        let warn_w = crate::engine::fuzzy_inference::fuzzy_diagnostic_severity_weight(1, trust);
-        let err_w = crate::engine::fuzzy_inference::fuzzy_diagnostic_severity_weight(2, trust);
-        let fatal_w = crate::engine::fuzzy_inference::fuzzy_diagnostic_severity_weight(3, trust);
+        let note_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(0, trust);
+        let warn_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(1, trust);
+        let err_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(2, trust);
+        let fatal_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(3, trust);
         (summary.note as u32).saturating_mul(note_w)
             .saturating_add((summary.warning as u32).saturating_mul(warn_w))
             .saturating_add((summary.error as u32).saturating_mul(err_w))
@@ -221,8 +221,8 @@ impl PostEditChecker {
         severe_delta: usize,
         weighted_delta: u32,
     ) -> bool {
-        let exact_compdb = parser_manager.has_exact_compdb_entry_for_path(path);
-        let context_kind = parser_manager.semantic_compdb_context_kind_for_path(path);
+        let exact_compdb = parser_manager.has_exact_compdb(path);
+        let context_kind = parser_manager.semantic_compdb_kind(path);
         Self::should_tolerate_nonlocal_diagnostic_delta_for_context(
             context_kind,
             exact_compdb,
@@ -269,7 +269,7 @@ impl PostEditChecker {
                 return false;
             }
         };
-        let (delta_limit, radius) = crate::engine::fuzzy_inference::fuzzy_context_tolerance_adjustment(
+        let (delta_limit, radius) = crate::engine::fuzzy_inference::fuzzy_context_tol(
             context_kind_index,
             crate::engine::fuzzy_inference::DEFAULT_TRUST,
         );
@@ -282,10 +282,10 @@ impl PostEditChecker {
     }
 
     fn should_skip_nonexact_consensus_clang_validation(&self, path: &Path) -> bool {
-        let exact_compdb = self.parser_manager.has_exact_compdb_entry_for_path(path);
+        let exact_compdb = self.parser_manager.has_exact_compdb(path);
         let context_kind = self
             .parser_manager
-            .semantic_compdb_context_kind_for_path(path);
+            .semantic_compdb_kind(path);
         Self::should_skip_nonexact_consensus_clang_validation_for_context(
             context_kind,
             exact_compdb,
@@ -328,11 +328,11 @@ impl PostEditChecker {
         {
             return false;
         }
-        let exact_compdb = parser_manager.has_exact_compdb_entry_for_path(path);
+        let exact_compdb = parser_manager.has_exact_compdb(path);
         if exact_compdb {
             return false;
         }
-        let context_kind = parser_manager.semantic_compdb_context_kind_for_path(path);
+        let context_kind = parser_manager.semantic_compdb_kind(path);
         let context_kind_index = match context_kind {
             SemanticCompdbContextKind::PairedSourceHeuristic => 0u8,
             SemanticCompdbContextKind::HeaderConsensus
@@ -340,7 +340,7 @@ impl PostEditChecker {
             SemanticCompdbContextKind::Exact | SemanticCompdbContextKind::None => return false,
         };
         let (severe_limit, weighted_limit) =
-            crate::engine::fuzzy_inference::fuzzy_diagnostic_relaxation_limits(
+            crate::engine::fuzzy_inference::fuzzy_relaxation_limits(
                 context_kind_index,
                 certainty,
             );
@@ -377,7 +377,7 @@ impl PostEditChecker {
             SemanticCompdbContextKind::Exact => 1,
             _ => 3,
         };
-        crate::engine::fuzzy_inference::fuzzy_semantic_transition_tolerances(
+        crate::engine::fuzzy_inference::fuzzy_transition_tols(
             context_kind,
             base_reference_drop_tolerance,
             base_scope_drift_tolerance,
@@ -411,7 +411,7 @@ impl PostEditChecker {
 
 }
 
-impl PostEditCheckBaseline {
+impl CheckBaseline {
     pub fn semantic_ready(&self) -> bool {
         self.before_semantic_ready
     }
@@ -432,16 +432,17 @@ mod tests {
 
     use crate::engine::catalog::PolicyCertainty;
     use crate::engine::semantic_contract::{
-        SemanticContract, SemanticContractSnapshot, SemanticScopeCounts,
+        ScopeStructure, SemanticContract, SemanticContractSnapshot, SemanticScopeCounts,
+        SymbolIdentity,
     };
     use crate::parser::clang_result::{ClangDiagnosticEntry, ClangDiagnosticSeverity};
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticSummary;
 
-    use super::{PostEditCheckBaseline, PostEditChecker, PostEditFailureKind};
+    use super::{CheckBaseline, PostEditChecker, PostEditFailureKind};
 
     #[test]
-    fn tree_error_ratio_regression_fails_and_collects_culprit_lines() {
+    fn tree_error_collects() {
         let checker = PostEditChecker::new(
             ParserManager::new(),
             true,
@@ -464,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_edit_keeps_post_edit_check_accepted() {
+    fn stable_keeps_accepted() {
         let checker = PostEditChecker::new(
             ParserManager::new(),
             true,
@@ -483,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_reference_integrity_regression_is_reported() {
+    fn reference_regression_reported() {
         let checker = PostEditChecker::new(
             ParserManager::new(),
             true,
@@ -500,7 +501,7 @@ mod tests {
             richness: 0.95, edit_success: 0.95, stable_model_prob: 0.90,
             ..crate::engine::catalog::PolicyCertainty::default()
         };
-        let baseline = PostEditCheckBaseline {
+        let baseline = CheckBaseline {
             before_tree_error: Some(false),
             before_tree_error_ratio: Some(0.0),
             before_clang_error_count: Some(0),
@@ -519,9 +520,11 @@ mod tests {
                     usr_backed_declaration_count: 1,
                     ..SemanticSummary::default()
                 },
-                usr_decl_reference_counts: reference_counts,
-                usr_decl_lines: reference_lines,
-                scope_counts: SemanticScopeCounts::default(),
+                identity: SymbolIdentity {
+                    usr_ref_counts: reference_counts,
+                    usr_decl_lines: reference_lines,
+                    ..SymbolIdentity::default()
+                },
                 ..SemanticContractSnapshot::default()
             }),
             before_semantic_ready: true,
@@ -540,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_scope_drift_is_reported() {
+    fn scope_drift_reported() {
         let checker = PostEditChecker::new(
             ParserManager::new(),
             true,
@@ -566,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_integrity_checks_are_skipped_when_baseline_not_ready() {
+    fn skips_unready_baseline() {
         let checker = PostEditChecker::new(
             ParserManager::new(),
             true,
@@ -578,23 +581,29 @@ mod tests {
         reference_counts.insert("usr:c:@F@foo#".to_string(), 3usize);
         let mut reference_lines = BTreeMap::new();
         reference_lines.insert("usr:c:@F@foo#".to_string(), 1usize);
-        let baseline = PostEditCheckBaseline {
+        let baseline = CheckBaseline {
             before_semantic_snapshot: Some(SemanticContractSnapshot {
                 summary: SemanticSummary {
                     usr_backed_declaration_count: 1,
                     ..SemanticSummary::default()
                 },
-                usr_decl_reference_counts: reference_counts,
-                usr_decl_lines: reference_lines,
-                scope_counts: SemanticScopeCounts {
-                    function: 1,
-                    ..SemanticScopeCounts::default()
+                identity: SymbolIdentity {
+                    usr_ref_counts: reference_counts,
+                    usr_decl_lines: reference_lines,
+                    ..SymbolIdentity::default()
+                },
+                scopes: ScopeStructure {
+                    counts: SemanticScopeCounts {
+                        function: 1,
+                        ..SemanticScopeCounts::default()
+                    },
+                    ..ScopeStructure::default()
                 },
                 ..SemanticContractSnapshot::default()
             }),
             before_semantic_ready: false,
             semantic_readiness_note: Some("clang fatals 1 exceed 0".to_string()),
-            ..PostEditCheckBaseline::default()
+            ..CheckBaseline::default()
         };
 
         let result = checker.validate_with_baseline_for_edits(
@@ -614,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_readiness_regression_is_reported() {
+    fn readiness_regression_reported() {
         let checker = PostEditChecker::new(
             ParserManager::new(),
             true,
@@ -642,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn clang_diagnostic_weighting_prioritizes_severity() {
+    fn weighting_prioritizes_severity() {
         let empty = PostEditChecker::diagnostic_weighted_score(
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
         );
@@ -670,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn clang_diagnostic_delta_lines_only_reports_new_entries() {
+    fn delta_reports_new() {
         let before = vec![ClangDiagnosticEntry {
             line: 4,
             column: 1,
@@ -694,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn consensus_nonlocal_diagnostic_delta_is_tolerated() {
+    fn nonlocal_delta_tolerated() {
         let edited = BTreeSet::from([20usize, 21usize, 22usize]);
         let deltas = BTreeSet::from([320usize, 321usize]);
         assert!(
@@ -710,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_compdb_diagnostic_delta_is_not_tolerated() {
+    fn exact_delta_rejected() {
         let edited = BTreeSet::from([20usize, 21usize, 22usize]);
         let deltas = BTreeSet::from([320usize, 321usize]);
         assert!(
@@ -726,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn nonexact_consensus_clang_validation_is_skipped() {
+    fn nonexact_skips_validation() {
         assert!(
             PostEditChecker::should_skip_nonexact_consensus_clang_validation_for_context(
                 crate::parser::manager::SemanticCompdbContextKind::HeaderConsensus,
@@ -760,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_transition_tolerances_respect_context_fidelity_order() {
+    fn tolerances_fidelity_order() {
         let lines = BTreeSet::from([1usize, 2, 3, 4, 5, 6, 7, 8]);
         let exact = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::Exact,

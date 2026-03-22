@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use crate::config::gate_config::AccuracyGateConfig;
-use crate::config::retry_config::RetryConfig;
+use crate::config::types::AccuracyGateConfig;
+use crate::config::types::RetryConfig;
 use crate::engine::accuracy_gate::{
     AccuracyGate, AccuracyGateFailure, AccuracyGateInput, AccuracyGateStatus,
 };
@@ -14,7 +14,7 @@ use crate::engine::catalog::PolicyCapabilityMatrix;
 use crate::engine::catalog::PolicyCertainty;
 use crate::engine::pipeline::PolicyPipeline;
 use crate::engine::run_options::PolicyRunOptions;
-use crate::engine::post_check::PostEditCheckBaseline;
+use crate::engine::post_check::CheckBaseline;
 use crate::engine::post_check::PostEditCheckResult;
 use crate::engine::post_check::PostEditChecker;
 use crate::engine::post_check::PostEditFailureKind;
@@ -27,7 +27,7 @@ use crate::model::violation::Violation;
 use crate::parser::manager::{ParserManager, SemanticCompdbContextKind};
 use crate::runtime::cluster_telemetry::{ClusterOutcome, PolicyClusterTelemetry};
 use crate::runtime::graph_runtime::ProjectGraphRuntime;
-use crate::text_scan;
+use crate::parser::text_scan;
 
 const UNTRACKED_TEXT_DELTA_SYNTHESIS_CAP: usize = 256;
 
@@ -116,17 +116,17 @@ impl FormatterEngine {
             || self.accuracy_gate.semantic_required
             || self.accuracy_gate.enabled;
         let semantic_context_kind = self.post_edit_checker.semantic_context_kind_for_path(path);
-        let post_edit_baseline: Option<PostEditCheckBaseline> =
+        let post_edit_baseline: Option<CheckBaseline> =
             baseline_required.then(|| self.post_edit_checker.build_baseline(path, text));
         let semantic_ready = post_edit_baseline
             .as_ref()
-            .map(PostEditCheckBaseline::semantic_ready)
+            .map(CheckBaseline::semantic_ready)
             .unwrap_or(false);
 
         if self.accuracy_gate.semantic_required && !semantic_ready {
             let detail = post_edit_baseline
                 .as_ref()
-                .and_then(PostEditCheckBaseline::semantic_readiness_note)
+                .and_then(CheckBaseline::semantic_readiness_note)
                 .unwrap_or("semantic baseline unavailable");
             let decision = AccuracyGate::evaluate(
                 &self.accuracy_gate,
@@ -166,14 +166,14 @@ impl FormatterEngine {
         Self::normalize_untracked_text_delta(text, &mut pass_result);
 
         // Quick accept: no edits were produced
-        if crate::text_scan::TEXT_SCAN.strings_equal(&pass_result.policy_result.text, text) {
+        if crate::parser::text_scan::TEXT_SCAN.strings_equal(&pass_result.policy_result.text, text) {
             pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
                 pass_result.policy_result.warnings.as_slice(),
             ]);
             let attempted_edits = pass_result.policy_result.edits.len();
             let attempted_violations = pass_result.policy_result.violations.len();
-            self.apply_accuracy_gate_to_result(
+            self.apply_gate(
                 &mut pass_result,
                 path,
                 AccuracyGateEvaluation {
@@ -201,7 +201,7 @@ impl FormatterEngine {
                 .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
             let adaptive_outcome_base = self.pipeline.adaptive_rules();
             let (edit_outcome, _) =
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
                     0, true, 1.0, trust_no_check, Some(&adaptive_outcome_base.edit_outcome),
                 );
             drop(adaptive_outcome_base);
@@ -214,7 +214,7 @@ impl FormatterEngine {
             ]);
             let attempted_edits = pass_result.policy_result.edits.len();
             let attempted_violations = pass_result.policy_result.violations.len();
-            self.apply_accuracy_gate_to_result(
+            self.apply_gate(
                 &mut pass_result,
                 path,
                 AccuracyGateEvaluation {
@@ -283,7 +283,7 @@ impl FormatterEngine {
         let scope_ranges = post_edit_baseline
             .as_ref()
             .and_then(|b| b.before_semantic_snapshot())
-            .map(|s| &s.scope_ranges_by_kind);
+            .map(|s| &s.scopes.ranges_by_kind);
 
         let trust_1 = pass_result.policy_certainty.as_ref()
             .map(|c| c.trust_for_general()).unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
@@ -302,7 +302,7 @@ impl FormatterEngine {
             ]);
             let attempted_edits = pass_result.policy_result.edits.len();
             let attempted_violations = pass_result.policy_result.violations.len();
-            self.apply_accuracy_gate_to_result(
+            self.apply_gate(
                 &mut pass_result,
                 path,
                 AccuracyGateEvaluation {
@@ -320,7 +320,7 @@ impl FormatterEngine {
             };
             let adaptive_outcome_base = self.pipeline.adaptive_rules();
             let (edit_outcome, outcome_firing) =
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
                     0, true, acceptance_score_1, trust_1, Some(&adaptive_outcome_base.edit_outcome),
                 );
             drop(adaptive_outcome_base);
@@ -358,7 +358,7 @@ impl FormatterEngine {
         if culprit_policies.is_empty() {
             let adaptive_outcome_base = self.pipeline.adaptive_rules();
             let (edit_outcome, _) =
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
                     0, false, 0.0, trust_1, Some(&adaptive_outcome_base.edit_outcome),
                 );
             drop(adaptive_outcome_base);
@@ -445,7 +445,7 @@ impl FormatterEngine {
             ]);
             let attempted_edits = pass_2.policy_result.edits.len();
             let attempted_violations = pass_2.policy_result.violations.len();
-            self.apply_accuracy_gate_to_result(
+            self.apply_gate(
                 &mut pass_2,
                 path,
                 AccuracyGateEvaluation {
@@ -458,7 +458,7 @@ impl FormatterEngine {
             )?;
             let adaptive_outcome_base = self.pipeline.adaptive_rules();
             let (edit_outcome, outcome_firing) =
-                crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+                crate::engine::fuzzy_inference::fuzzy_edit_outcome(
                     1, true, acceptance_score_2, trust_2, Some(&adaptive_outcome_base.edit_outcome),
                 );
             drop(adaptive_outcome_base);
@@ -479,7 +479,7 @@ impl FormatterEngine {
         // Both passes failed → revert all edits
         let adaptive_outcome_base = self.pipeline.adaptive_rules();
         let (edit_outcome, _) =
-            crate::engine::fuzzy_inference::fuzzy_edit_outcome_adaptive(
+            crate::engine::fuzzy_inference::fuzzy_edit_outcome(
                 1, false, 0.0, trust_2, Some(&adaptive_outcome_base.edit_outcome),
             );
         drop(adaptive_outcome_base);
@@ -501,10 +501,10 @@ impl FormatterEngine {
         context_kind: SemanticCompdbContextKind,
         certainty: Option<&PolicyCertainty>,
     ) -> Option<(f64, Option<crate::engine::fuzzy_inference::AdaptiveFiringRecord>)> {
-        let has_semantic_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
+        let has_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
             PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
         });
-        if has_semantic_rewrite_edits {
+        if has_rewrite_edits {
             warnings.extend(
                 check.messages.iter()
                     .filter(|m| !m.contains("semantic identity signature changed"))
@@ -523,7 +523,7 @@ impl FormatterEngine {
             context_kind = ?context_kind,
             "post-edit accept_pass_result: computing acceptance score (informational)"
         );
-        let all_edits_whitespace_safe = !pass.policy_result.edits.is_empty()
+        let all_whitespace_safe = !pass.policy_result.edits.is_empty()
             && pass.policy_result.edits.iter().all(|edit| {
                 !PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
                     && edit.before != edit.after
@@ -548,8 +548,8 @@ impl FormatterEngine {
                     .failure_kinds
                     .contains(&PostEditFailureKind::TreeErrorRatioRegressed),
             culprit_locality_ratio: locality_ratio,
-            has_semantic_rewrite_edits,
-            all_edits_whitespace_safe,
+            has_rewrite_edits,
+            all_whitespace_safe,
             exact_compdb: matches!(context_kind, SemanticCompdbContextKind::Exact),
             identity_severity: check.identity_severity,
             reference_severity: check.reference_severity,
@@ -557,7 +557,7 @@ impl FormatterEngine {
         };
         let adaptive_bases = self.pipeline.adaptive_rules();
         let (acceptance_score, firing_record) =
-            crate::engine::fuzzy_inference::fuzzy_edit_acceptance_adaptive(
+            crate::engine::fuzzy_inference::fuzzy_edit_acceptance(
                 &observation, certainty, context_kind, Some(&adaptive_bases),
             );
         drop(adaptive_bases);
@@ -634,7 +634,7 @@ impl FormatterEngine {
         })
     }
 
-    fn apply_accuracy_gate_to_result(
+    fn apply_gate(
         &self,
         pass_result: &mut FormatPassResult,
         path: &Path,
@@ -788,16 +788,16 @@ impl FormatterEngine {
         };
         let mut declaration_lines = BTreeSet::new();
         for culprit_line in &check.culprit_lines {
-            if let Some(stable_ids) = snapshot.declaration_stable_ids_by_line.get(culprit_line) {
+            if let Some(stable_ids) = snapshot.identity.decl_ids_by_line.get(culprit_line) {
                 for sid in stable_ids {
-                    if let Some(&decl_line) = snapshot.stable_id_decl_lines.get(sid) {
+                    if let Some(&decl_line) = snapshot.identity.id_decl_lines.get(sid) {
                         declaration_lines.insert(decl_line);
                     }
                 }
             }
-            for (ref_sid, &ref_first_line) in &snapshot.reference_stable_id_first_line {
+            for (ref_sid, &ref_first_line) in &snapshot.identity.ref_first_line {
                 if ref_first_line == *culprit_line {
-                    if let Some(&decl_line) = snapshot.stable_id_decl_lines.get(ref_sid) {
+                    if let Some(&decl_line) = snapshot.identity.id_decl_lines.get(ref_sid) {
                         declaration_lines.insert(decl_line);
                     }
                 }
@@ -903,7 +903,7 @@ mod tests {
     use super::FormatterEngine;
 
     #[test]
-    fn normalize_untracked_text_delta_synthesizes_edits_when_possible() {
+    fn normalize_synthesizes_edits() {
         let mut pass_result = FormatPassResult::default();
         pass_result.policy_result.text = "changed".to_string();
         let normalized =
@@ -920,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_untracked_text_delta_synthesizes_eof_newline_diff() {
+    fn normalize_synthesizes_eof() {
         let mut pass_result = FormatPassResult::default();
         pass_result.policy_result.text = "baseline\n".to_string();
         let normalized =
@@ -936,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_untracked_text_delta_discards_oversized_delta() {
+    fn normalize_discards_oversized() {
         let mut pass_result = FormatPassResult::default();
         let mut changed = String::new();
         for index in 0..=super::UNTRACKED_TEXT_DELTA_SYNTHESIS_CAP {
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_untracked_text_delta_keeps_tracked_edit_output() {
+    fn normalize_keeps_tracked() {
         let mut pass_result = FormatPassResult::default();
         pass_result.policy_result.text = "changed".to_string();
         pass_result.policy_result.edits.push(Edit {
@@ -972,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn causal_culprit_traces_declaration_line_from_reference_culprit() {
+    fn culprit_traces_declaration() {
         use crate::engine::semantic_contract::SemanticContractSnapshot;
 
         let edits = vec![
@@ -995,10 +995,10 @@ mod tests {
         };
         let mut snapshot = SemanticContractSnapshot::default();
         snapshot
-            .declaration_stable_ids_by_line
+            .identity.decl_ids_by_line
             .insert(20, BTreeSet::from(["sid_myVar".to_string()]));
         snapshot
-            .stable_id_decl_lines
+            .identity.id_decl_lines
             .insert("sid_myVar".to_string(), 10);
         let result =
             FormatterEngine::causal_culprit_policies(&edits, &check, Some(&snapshot));
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn causal_culprit_falls_back_to_direct_match_without_snapshot() {
+    fn culprit_direct_fallback() {
         let edits = vec![
             Edit {
                 policy: "compact_declarations".into(),
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn causal_culprit_union_includes_both_direct_and_backtracked() {
+    fn culprit_union_both() {
         use crate::engine::semantic_contract::SemanticContractSnapshot;
 
         let edits = vec![
@@ -1060,10 +1060,10 @@ mod tests {
         };
         let mut snapshot = SemanticContractSnapshot::default();
         snapshot
-            .declaration_stable_ids_by_line
+            .identity.decl_ids_by_line
             .insert(20, BTreeSet::from(["sid_myVar".to_string()]));
         snapshot
-            .stable_id_decl_lines
+            .identity.id_decl_lines
             .insert("sid_myVar".to_string(), 10);
         let result =
             FormatterEngine::causal_culprit_policies(&edits, &check, Some(&snapshot));
@@ -1072,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_aware_locality_accepts_culprit_in_same_function_beyond_numeric_radius() {
+    fn scope_accepts_same() {
         use std::collections::BTreeMap;
 
         let check = PostEditCheckResult {
@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_aware_locality_rejects_culprit_in_different_scope_within_numeric_radius() {
+    fn scope_rejects_different() {
         use std::collections::BTreeMap;
 
         let check = PostEditCheckResult {
@@ -1132,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_aware_locality_falls_back_to_numeric_when_no_scope_match() {
+    fn scope_numeric_fallback() {
         use std::collections::BTreeMap;
 
         let check = PostEditCheckResult {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::engine::zone::PolicyZone;
+use crate::policy::zone::PolicyZone;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum CandidateRiskTier {

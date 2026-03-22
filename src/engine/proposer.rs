@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use crate::engine::convergence::ConvergencePolicySignal;
 use crate::engine::catalog::{PolicyCapabilities, PolicyCertainty};
 use crate::engine::edit_candidate::PolicyEditCandidate;
-use crate::engine::zone::PolicyZone;
+use crate::policy::zone::PolicyZone;
 use crate::engine::semantic_contract::{SemanticContract, SemanticInvariantClause, ALL_CLAUSES};
 use crate::model::policy_result::PolicyResult;
 use crate::model::project_query::ProjectContextQuery;
@@ -16,7 +18,7 @@ use crate::parser::semantic_region::SemanticRegionKind;
 pub struct GuardianAssessment {
     pub allowed: Vec<PolicyEditCandidate>,
     pub blocked_zone_lines: BTreeSet<usize>,
-    pub blocked_hard_constraint_lines: BTreeSet<usize>,
+    pub hard_blocked_lines: BTreeSet<usize>,
 }
 
 #[derive(Default)]
@@ -60,18 +62,18 @@ impl ProposerController {
             }
             let trust_deficit_penalty = if capability.semantic_rewrite {
                 let trust = capability.policy_trust(certainty);
-                crate::engine::fuzzy_inference::fuzzy_trust_deficit_penalty(trust)
+                crate::engine::fuzzy_inference::fuzzy_deficit_penalty(trust)
             } else {
                 0.0
             };
-            let mut symbol_footprint = convergence_signal
-                .semantic_symbol_ids_by_line
+            let mut symbol_footprint: SmallVec<[u64; 8]> = convergence_signal
+                .symbol_ids
                 .get(&edit.line)
-                .cloned()
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             if let Some(symbol) = project_query.symbol_at(edit.line, 1, &[]) {
                 if project_query
-                    .declaration_by_stable_id(symbol.stable_id.as_str())
+                    .decl_by_id(symbol.stable_id.as_str())
                     .is_some()
                 {
                     symbol_footprint.push(Self::text_fingerprint(symbol.stable_id.as_str()));
@@ -88,11 +90,11 @@ impl ProposerController {
             }
             symbol_footprint.sort_unstable();
             symbol_footprint.dedup();
-            let range_footprint = convergence_signal
-                .semantic_impact_ranges_by_line
+            let range_footprint: SmallVec<[(usize, usize); 4]> = convergence_signal
+                .impact_ranges
                 .get(&edit.line)
                 .cloned()
-                .unwrap_or_else(|| vec![(edit.line, edit.line)]);
+                .unwrap_or_else(|| smallvec::smallvec![(edit.line, edit.line)]);
             let trust_for_penalty = certainty.trust_for_general();
             let confidence_penalty = crate::engine::fuzzy_inference::fuzzy_constraint_penalty(
                 hard_constraints_touched.count_ones() as usize, trust_for_penalty,
@@ -103,11 +105,11 @@ impl ProposerController {
             let project_signal = project_query
                 .symbol_at(edit.line, 1, &[])
                 .and_then(|symbol| {
-                    project_query.project_signal_for_stable_id(symbol.stable_id.as_str())
+                    project_query.signal(symbol.stable_id.as_str())
                 })
-                .or_else(|| project_query.project_signal_for_line(edit.line, 1));
+                .or_else(|| project_query.signal((edit.line, 1)));
             let richness_multiplier =
-                crate::engine::fuzzy_inference::fuzzy_richness_radius_multiplier(certainty.trust_for_general());
+                crate::engine::fuzzy_inference::fuzzy_richness_mult(certainty.trust_for_general());
             let richness_radius =
                 (certainty.richness_lower_ci() * richness_multiplier).round().clamp(1.0, 3.0) as usize;
             impact_radius = impact_radius.max(richness_radius);
@@ -128,8 +130,8 @@ impl ProposerController {
                 confidence: resolved_confidence,
                 risk_tier: capability.risk_tier,
                 impact_radius,
-                symbol_footprint: symbol_footprint.into(),
-                range_footprint: range_footprint.into(),
+                symbol_footprint: symbol_footprint.into_vec().into(),
+                range_footprint: range_footprint.into_vec().into(),
                 hard_constraints_touched,
                 zone,
                 after_fingerprint: Self::text_fingerprint(edit.after.as_str()),
@@ -145,14 +147,14 @@ impl ProposerController {
         certainty: Option<&crate::engine::catalog::PolicyCertainty>,
     ) -> GuardianAssessment {
         let zone_relaxed =
-            crate::engine::fuzzy_inference::fuzzy_guardian_zone_relax(certainty);
+            crate::engine::fuzzy_inference::fuzzy_zone_relax(certainty);
         let mut allowed = Vec::<PolicyEditCandidate>::new();
         let mut blocked_zone_lines = BTreeSet::<usize>::new();
-        let mut blocked_hard_constraint_lines = BTreeSet::<usize>::new();
+        let mut hard_blocked_lines = BTreeSet::<usize>::new();
         for candidate in candidates {
             if !capability.allows_zone(candidate.zone) {
                 let zone_ok = zone_relaxed
-                    && candidate.zone != crate::engine::zone::PolicyZone::Preprocessor;
+                    && candidate.zone != crate::policy::zone::PolicyZone::Preprocessor;
                 if !zone_ok {
                     blocked_zone_lines.insert(candidate.line);
                     continue;
@@ -167,10 +169,10 @@ impl ProposerController {
                     if !spec_hard {
                         return false;
                     }
-                    !crate::engine::fuzzy_inference::fuzzy_hard_constraint_override(certainty, clause)
+                    !crate::engine::fuzzy_inference::fuzzy_constraint_override(certainty, clause)
                 });
             if has_hard_constraint {
-                blocked_hard_constraint_lines.insert(candidate.line);
+                hard_blocked_lines.insert(candidate.line);
                 continue;
             }
             allowed.push(candidate.clone());
@@ -178,7 +180,7 @@ impl ProposerController {
         GuardianAssessment {
             allowed,
             blocked_zone_lines,
-            blocked_hard_constraint_lines,
+            hard_blocked_lines,
         }
     }
 
@@ -235,7 +237,7 @@ impl ProposerController {
         let delta = before_trimmed.len().abs_diff(after_trimmed.len()) as f64;
         let normalized_delta = (delta / 32.0).min(1.0);
         let (base, ws_bonus, delta_bonus) =
-            crate::engine::fuzzy_inference::fuzzy_style_gain_weights(
+            crate::engine::fuzzy_inference::fuzzy_style_weights(
                 crate::engine::fuzzy_inference::DEFAULT_TRUST,
             );
         base + (whitespace_change * ws_bonus) + ((1.0 - normalized_delta) * delta_bonus)
@@ -259,7 +261,7 @@ mod tests {
     use crate::parser::node_kind;
 
     #[test]
-    fn proposer_marks_preprocessor_lines_as_protected_zone() {
+    fn marks_protected_zone() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
@@ -271,7 +273,7 @@ mod tests {
             }],
             ..SemanticFileContext::default()
         };
-        let semantic_query = SemanticContextQuery::from_semantic_file_context(Some(&semantic));
+        let semantic_query = SemanticContextQuery::from_semantic(Some(&semantic));
         let project_query = ProjectContextQuery::new(semantic_query.clone(), None);
         let result = PolicyResult {
             text: "#if 1\nx\n#endif\n".to_string(),

@@ -190,21 +190,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_produces_valid_context() {
+    fn default_valid_context() {
         let ctx = PopulationContext::default();
         assert_eq!(ctx.file_count, 0);
         assert!((ctx.prior_estimates[4] - 0.85).abs() < 1e-9);
     }
 
     #[test]
-    fn too_few_files_returns_default() {
+    fn few_files_default() {
         let measurements = vec![[0.9, 0.5, 0.1, 0.3, 0.8], [0.8, 0.4, 0.2, 0.5, 0.7]];
         let ctx = PopulationContext::compute_from_measurements(&measurements);
         assert_eq!(ctx.file_count, 0);
     }
 
     #[test]
-    fn population_with_low_coverage_produces_tight_boundaries() {
+    fn low_coverage_tight() {
         let measurements: Vec<[f64; 5]> = (0..32)
             .map(|i| {
                 let coverage = (i as f64) * 0.005;
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn population_with_high_coverage_produces_wide_boundaries() {
+    fn high_coverage_wide() {
         let measurements: Vec<[f64; 5]> = (0..20)
             .map(|i| {
                 let coverage = 0.40 + (i as f64) * 0.025;
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn five_dim_stats_computed() {
+    fn five_dim_stats() {
         let measurements: Vec<[f64; 5]> = (0..10)
             .map(|i| {
                 let v = (i as f64) / 10.0;

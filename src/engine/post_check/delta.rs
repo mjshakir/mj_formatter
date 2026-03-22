@@ -10,13 +10,13 @@ use crate::parser::file_context::SemanticFileContext;
 
 use crate::engine::catalog::PolicyCertainty;
 
-use super::{PostEditCheckBaseline, PostEditCheckResult, PostEditChecker, PostEditFailureKind};
+use super::{CheckBaseline, PostEditCheckResult, PostEditChecker, PostEditFailureKind};
 
 pub(super) fn validate(
     checker: &PostEditChecker,
     path: &Path,
     after_text: &str,
-    baseline: &PostEditCheckBaseline,
+    baseline: &CheckBaseline,
     edited_lines: Option<&BTreeSet<usize>>,
     certainty: Option<&PolicyCertainty>,
 ) -> PostEditCheckResult {
@@ -65,7 +65,7 @@ pub(super) fn validate(
                 culprit_lines.extend(tree_error_lines.iter().copied());
             }
             if let Some(before_ratio) = baseline.before_tree_error_ratio {
-                let adaptive_tolerance = crate::engine::fuzzy_inference::fuzzy_tree_error_ratio_tolerance(
+                let adaptive_tolerance = crate::engine::fuzzy_inference::fuzzy_error_tolerance(
                     checker.tree_error_ratio_tolerance,
                     certainty,
                 );
@@ -227,10 +227,10 @@ pub(super) fn validate(
                 after_readiness.summary()
             ));
         } else if let Some(before_semantic) = baseline.before_semantic_snapshot.as_ref() {
-            let exact_compdb = checker.parser_manager.has_exact_compdb_entry_for_path(path);
+            let exact_compdb = checker.parser_manager.has_exact_compdb(path);
             let context_kind = checker
                 .parser_manager
-                .semantic_compdb_context_kind_for_path(path);
+                .semantic_compdb_kind(path);
             let (reference_drop_tolerance, scope_drift_tolerance) =
                 PostEditChecker::semantic_transition_tolerances_for_context(
                     context_kind,
@@ -238,7 +238,7 @@ pub(super) fn validate(
                     edited_lines,
                     certainty,
                 );
-            let identity_line_shift_tolerance = crate::engine::fuzzy_inference::fuzzy_identity_migration_tolerance(
+            let identity_shift_tol = crate::engine::fuzzy_inference::fuzzy_migration_tol(
                 edited_lines.map(|e| e.len()).unwrap_or(0),
                 certainty,
             );
@@ -247,7 +247,7 @@ pub(super) fn validate(
                 &after_snapshot,
                 reference_drop_tolerance,
                 scope_drift_tolerance,
-                identity_line_shift_tolerance,
+                identity_shift_tol,
                 edited_lines,
             );
             if transition.identity_integrity_regressed {
@@ -314,7 +314,7 @@ pub(super) fn validate_structural_only(
     checker: &PostEditChecker,
     path: &Path,
     after_text: &str,
-    baseline: &PostEditCheckBaseline,
+    baseline: &CheckBaseline,
     certainty: Option<&PolicyCertainty>,
 ) -> PostEditCheckResult {
     let mut messages = baseline.warnings.clone();
@@ -335,7 +335,7 @@ pub(super) fn validate_structural_only(
             }
             if let Some(before_ratio) = baseline.before_tree_error_ratio {
                 let adaptive_tolerance =
-                    crate::engine::fuzzy_inference::fuzzy_tree_error_ratio_tolerance(
+                    crate::engine::fuzzy_inference::fuzzy_error_tolerance(
                         checker.tree_error_ratio_tolerance,
                         certainty,
                     );
