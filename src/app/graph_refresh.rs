@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -26,6 +26,21 @@ use crate::runtime::retry_telemetry::{
     RetryCulpritPairSnapshotEntry, RetryLearningSnapshot, RetryLearningTelemetry,
     RetryStrategySnapshotEntry,
 };
+
+/// Pre-extracted data from `&[FileResult]` for graph refresh.
+/// Allows graph refresh to run on a separate thread without borrowing results.
+pub(crate) struct GraphRefreshInput {
+    pub convergence_pairs: BTreeMap<(String, String), usize>,
+    /// (result_index, path) for changed files; None index for neighbor files.
+    pub targets: Vec<(Option<usize>, PathBuf)>,
+}
+
+/// Warnings produced by graph refresh, indexed by result position.
+pub(crate) struct GraphRefreshOutput {
+    pub stats: Option<ProjectGraphPersistStats>,
+    /// (result_index or None, warning_message)
+    pub warnings: Vec<(Option<usize>, String)>,
+}
 
 fn adaptive_eager_parse_cap(total_targets: usize, population_observation_count: u32) -> usize {
     let base = (total_targets as f64).sqrt().ceil() as usize;
@@ -377,17 +392,95 @@ impl App {
         (index, path, Some(parse), None)
     }
 
-    pub(crate) fn refresh_project_graph(
+    pub(crate) fn extract_graph_refresh_input(
+        results: &[FileResult],
+        project_graph: &ProjectGraphRuntime,
+        project_graph_config: &crate::config::graph_config::ProjectGraphConfig,
+        include_parse_updates: bool,
+        population_observation_count: u32,
+    ) -> (GraphRefreshInput, Vec<(Option<usize>, String)>) {
+        let convergence_pairs = Self::collect_convergence_pairs(results);
+        let edit_counts: Vec<usize> = results.iter().map(|r| r.edits.len()).collect();
+        let mut targets = if include_parse_updates {
+            results
+                .iter()
+                .enumerate()
+                .filter(|(_, result)| result.error.is_none() && result.changed)
+                .map(|(index, result)| (Some(index), result.path.clone()))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut input_warnings: Vec<(Option<usize>, String)> = Vec::new();
+        if include_parse_updates
+            && project_graph_config.incremental_neighborhood_enabled
+            && !targets.is_empty()
+        {
+            let graph_snapshot = project_graph.snapshot();
+            let changed_paths = targets
+                .iter()
+                .map(|(_, path)| path.clone())
+                .collect::<Vec<_>>();
+            let neighbors = graph_snapshot.affected_file_paths(
+                changed_paths.as_slice(),
+                project_graph_config.incremental_neighborhood_hops.max(1),
+                project_graph_config
+                    .incremental_neighborhood_max_files
+                    .max(1),
+            );
+            let mut seen = targets
+                .iter()
+                .map(|(_, path)| Self::path_identity(path.as_path()))
+                .collect::<HashSet<_>>();
+            let mut added = 0usize;
+            for neighbor in neighbors {
+                if !neighbor.exists() {
+                    continue;
+                }
+                let key = Self::path_identity(neighbor.as_path());
+                if seen.insert(key) {
+                    targets.push((None, neighbor));
+                    added = added.saturating_add(1);
+                }
+            }
+            if added > 0 {
+                let first_ok = results.iter().position(|r| r.error.is_none());
+                input_warnings.push((first_ok, format!(
+                    "project_graph: expanded incremental refresh with {} affected-neighbor file(s)",
+                    added
+                )));
+            }
+        }
+        let cap = adaptive_eager_parse_cap(targets.len(), population_observation_count);
+        if targets.len() > cap {
+            targets.sort_by(|a, b| {
+                let edits_a = a.0.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
+                let edits_b = b.0.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
+                edits_b.cmp(&edits_a)
+            });
+            let deferred = targets.len() - cap;
+            targets.truncate(cap);
+            let first_ok = results.iter().position(|r| r.error.is_none());
+            input_warnings.push((first_ok, format!(
+                "project_graph: deferred parse refresh for {} lower-impact file(s) (cap={}, obs={})",
+                deferred, cap, population_observation_count
+            )));
+        }
+        (GraphRefreshInput {
+            convergence_pairs,
+            targets,
+        }, input_warnings)
+    }
+
+    pub(crate) fn refresh_project_graph_owned(
+        input: GraphRefreshInput,
         project_graph: &ProjectGraphRuntime,
         file_io: &FileIo,
         parser_manager: &ParserManager,
-        project_graph_config: &crate::config::graph_config::ProjectGraphConfig,
-        results: &mut [FileResult],
         parallel_pool: Option<&rayon::ThreadPool>,
-        include_parse_updates: bool,
-        population_observation_count: u32,
-    ) -> Option<ProjectGraphPersistStats> {
-        let convergence_pairs = Self::collect_convergence_pairs(results);
+    ) -> GraphRefreshOutput {
+        let mut warnings: Vec<(Option<usize>, String)> = Vec::new();
+
         let graph_snapshot = project_graph.snapshot();
         let persisted_state = graph_snapshot.to_state_clone();
         let persisted_cluster = persisted_state
@@ -405,13 +498,11 @@ impl App {
             strategy_outcomes: persisted_state
                 .retry_strategy_learning_snapshot()
                 .into_iter()
-                .map(
-                    |(strategy, failure_context, stats)| RetryStrategySnapshotEntry {
-                        strategy: strategy.into(),
-                        failure_context,
-                        stats,
-                    },
-                )
+                .map(|(strategy, failure_context, stats)| RetryStrategySnapshotEntry {
+                    strategy: strategy.into(),
+                    failure_context,
+                    stats,
+                })
                 .collect(),
             culprit_pairs: persisted_state
                 .retry_culprit_pairs_snapshot()
@@ -456,98 +547,36 @@ impl App {
                 count: entry.count,
             })
             .collect::<Vec<_>>();
-        let mut targets = if include_parse_updates {
-            results
-                .iter()
-                .enumerate()
-                .filter(|(_, result)| result.error.is_none() && result.changed)
-                .map(|(index, result)| (Some(index), result.path.clone()))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        if include_parse_updates
-            && project_graph_config.incremental_neighborhood_enabled
-            && !targets.is_empty()
-        {
-            let changed_paths = targets
-                .iter()
-                .map(|(_, path)| path.clone())
-                .collect::<Vec<_>>();
-            let neighbors = graph_snapshot.affected_file_paths(
-                changed_paths.as_slice(),
-                project_graph_config.incremental_neighborhood_hops.max(1),
-                project_graph_config
-                    .incremental_neighborhood_max_files
-                    .max(1),
-            );
-            let mut seen = targets
-                .iter()
-                .map(|(_, path)| Self::path_identity(path.as_path()))
-                .collect::<HashSet<_>>();
-            let mut added = 0usize;
-            for neighbor in neighbors {
-                if !neighbor.exists() {
-                    continue;
-                }
-                let key = Self::path_identity(neighbor.as_path());
-                if seen.insert(key) {
-                    targets.push((None, neighbor));
-                    added = added.saturating_add(1);
-                }
-            }
-            if added > 0 {
-                for result in results.iter_mut() {
-                    if result.error.is_none() {
-                        result.warnings.push(format!(
-                            "project_graph: expanded incremental refresh with {} affected-neighbor file(s)",
-                            added
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-        let cap = adaptive_eager_parse_cap(targets.len(), population_observation_count);
-        if targets.len() > cap {
-            targets.sort_by(|a, b| {
-                let edits_a = a.0.map(|i| results[i].edits.len()).unwrap_or(0);
-                let edits_b = b.0.map(|i| results[i].edits.len()).unwrap_or(0);
-                edits_b.cmp(&edits_a)
-            });
-            let deferred = targets.len() - cap;
-            targets.truncate(cap);
-            if let Some(result) = results.iter_mut().find(|item| item.error.is_none()) {
-                result.warnings.push(format!(
-                    "project_graph: deferred parse refresh for {} lower-impact file(s) (cap={}, obs={})",
-                    deferred, cap, population_observation_count
-                ));
-            }
-        }
-        if targets.is_empty()
-            && convergence_pairs.is_empty()
+
+        if input.targets.is_empty()
+            && input.convergence_pairs.is_empty()
             && !cluster_learning_changed
             && retry_strategy_entries.is_empty()
             && retry_culprit_pairs.is_empty()
         {
-            return None;
+            return GraphRefreshOutput {
+                stats: None,
+                warnings,
+            };
         }
 
         let file_io_for_parse = Arc::new(file_io.clone());
         let parser_for_parse = Arc::new(parser_manager.clone());
         let outcomes: Vec<_> = if let Some(pool) = parallel_pool {
-            let file_io = file_io_for_parse.clone();
+            let fio = file_io_for_parse.clone();
             let parser = parser_for_parse.clone();
             pool.install(|| {
-                targets
+                input
+                    .targets
                     .into_par_iter()
                     .map(|(index, path)| {
-                        Self::parse_project_graph_target(index, path, &file_io, &parser)
+                        Self::parse_project_graph_target(index, path, &fio, &parser)
                     })
                     .collect()
             })
         } else {
-            targets
+            input
+                .targets
                 .into_iter()
                 .map(|(index, path)| {
                     Self::parse_project_graph_target(
@@ -566,31 +595,28 @@ impl App {
                 file_parses.push((path, parse));
             }
             if let Some(warning) = warning {
-                if let Some(index) = index {
-                    if let Some(result) = results.get_mut(index) {
-                        result.warnings.push(warning);
-                    }
-                } else if let Some(result) = results.iter_mut().find(|item| item.error.is_none()) {
-                    result.warnings.push(warning);
-                }
+                warnings.push((index, warning));
             }
         }
 
         if file_parses.is_empty()
-            && convergence_pairs.is_empty()
+            && input.convergence_pairs.is_empty()
             && !cluster_learning_changed
             && retry_strategy_entries.is_empty()
             && retry_culprit_pairs.is_empty()
         {
-            return None;
+            return GraphRefreshOutput {
+                stats: None,
+                warnings,
+            };
         }
 
-        match project_graph.update_state_with_stats(|state| {
+        let stats = match project_graph.update_state_with_stats(|state| {
             for (path, parse) in &file_parses {
                 ProjectGraphStateUpdater::apply_clang_parse(state, path.as_path(), parse);
             }
-            if !convergence_pairs.is_empty() {
-                state.record_convergence_pairs(&convergence_pairs);
+            if !input.convergence_pairs.is_empty() {
+                state.record_convergence_pairs(&input.convergence_pairs);
             }
             if cluster_learning_changed {
                 state.replace_policy_cluster_learning_entries(
@@ -611,16 +637,12 @@ impl App {
         }) {
             Ok((_, stats)) => Some(stats),
             Err(err) => {
-                for result in results.iter_mut() {
-                    if result.error.is_none() {
-                        result
-                            .warnings
-                            .push(format!("project_graph: persist update failed: {err}"));
-                    }
-                }
+                warnings.push((None, format!("project_graph: persist update failed: {err}")));
                 None
             }
-        }
+        };
+
+        GraphRefreshOutput { stats, warnings }
     }
 
 }
