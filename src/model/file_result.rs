@@ -24,5 +24,6 @@ pub struct FileResult {
     pub warnings: Vec<String>,
     pub elapsed_engine_ms: f64,
     pub elapsed_total_ms: f64,
+    pub boot_parse_ms: f64,
     pub policy_certainty: Option<PolicyCertainty>,
 }
