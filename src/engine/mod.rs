@@ -22,4 +22,3 @@ pub mod retry_optimizer;
 pub mod run_options;
 pub mod semantic_contract;
 pub mod suppression;
-pub mod zone;

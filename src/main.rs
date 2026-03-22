@@ -8,7 +8,6 @@ mod parser;
 mod policy;
 mod graph;
 mod runtime;
-mod text_scan;
 
 use anyhow::Result;
 use app::runner::App;
