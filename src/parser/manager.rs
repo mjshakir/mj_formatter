@@ -135,7 +135,7 @@ impl ParserManager {
         self.parse_tree_sitter_with_old(text, path, None)
     }
 
-    fn parse_tree_sitter_with_old(
+    pub fn parse_tree_sitter_with_old(
         &self,
         text: &str,
         path: &Path,
