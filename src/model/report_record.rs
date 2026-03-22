@@ -13,6 +13,7 @@ pub struct ReportRecord {
     pub warnings: Vec<String>,
     pub elapsed_engine_ms: f64,
     pub elapsed_total_ms: f64,
+    pub boot_parse_ms: f64,
     pub certainty: Option<FileCertaintyReport>,
     pub policies: Vec<PolicyReport>,
 }
@@ -45,6 +46,12 @@ pub struct PolicyReport {
     pub outcome: PolicyOutcome,
     pub reason: Option<String>,
     pub elapsed_ms: f64,
+    #[serde(default)]
+    pub parse_ms: f64,
+    #[serde(default)]
+    pub execute_ms: f64,
+    #[serde(default)]
+    pub checkpoint_ms: f64,
     pub edits: Vec<EditReport>,
     pub blocked_lines: Vec<BlockedLineReport>,
     pub confidence_score: Option<f64>,
@@ -154,6 +161,9 @@ impl From<&FileResult> for ReportRecord {
                 outcome,
                 reason,
                 elapsed_ms: trace.elapsed_ms,
+                parse_ms: trace.parse_ms,
+                execute_ms: trace.execute_ms,
+                checkpoint_ms: trace.checkpoint_ms,
                 edits,
                 blocked_lines: all_blocked,
                 confidence_score: trace.confidence_score,
@@ -172,6 +182,7 @@ impl From<&FileResult> for ReportRecord {
             warnings: result.warnings.clone(),
             elapsed_engine_ms: result.elapsed_engine_ms,
             elapsed_total_ms: result.elapsed_total_ms,
+            boot_parse_ms: result.boot_parse_ms,
             certainty,
             policies,
         }
