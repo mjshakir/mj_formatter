@@ -1,4 +1,5 @@
 pub mod clang_format;
+pub mod clang_format_service;
 pub mod class_layout;
 pub mod compact_decls;
 pub mod dash_comment;

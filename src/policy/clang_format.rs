@@ -1,6 +1,3 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use crate::engine::fuzzy_inference;
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -222,49 +219,20 @@ impl ClangFormatPolicy {
         filename: &str,
         region: Option<(usize, usize)>,
     ) -> Result<String, String> {
-        let mut cmd = Command::new(&self.command);
-        cmd.arg(format!("-style={}", self.style))
-            .arg(format!("-assume-filename={}", filename));
-        if let Some((start, end)) = region {
-            cmd.arg(format!("--lines={}:{}", start, end));
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd.spawn().map_err(|e| format!("clang_format unavailable: {e}"))?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(text.as_bytes())
-                .map_err(|_| "clang_format failed to send stdin".to_string())?;
-        }
-        drop(child.stdin.take());
-
-        let timeout = std::time::Duration::from_secs(30);
-        let start = std::time::Instant::now();
-        let output = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => match child.wait_with_output() {
-                    Ok(value) => break value,
-                    Err(err) => return Err(format!("clang_format execution failed: {err}")),
-                },
-                Ok(None) if start.elapsed() > timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("clang_format timed out after 30s".to_string());
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(err) => return Err(format!("clang_format execution failed: {err}")),
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("clang_format non-zero exit: {stderr}"));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let service = crate::policy::clang_format_service::ClangFormatService::global()
+            .map_err(|e| format!("clang_format service unavailable: {e}"))?;
+        let handle = service
+            .dispatch(
+                text.to_string(),
+                self.command.clone(),
+                self.style.clone(),
+                filename.to_string(),
+                region,
+            )
+            .map_err(|e| format!("clang_format dispatch failed: {e}"))?;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(30);
+        handle.collect_deadline(deadline)
     }
 
     fn compute_line_regions(total_lines: usize, batch_size: usize) -> Vec<(usize, usize)> {
