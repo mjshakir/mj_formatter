@@ -160,6 +160,8 @@ pub(crate) struct WorkerFileResult {
     #[serde(default)]
     pub(crate) elapsed_total_ms: f64,
     #[serde(default)]
+    pub(crate) boot_parse_ms: f64,
+    #[serde(default)]
     pub(crate) policy_certainty: Option<crate::engine::catalog::PolicyCertainty>,
 }
 
@@ -224,7 +226,7 @@ impl App {
         }
         let loader = ConfigLoader;
         let mut config = loader.load(&args)?;
-        RuntimeLogging::init(config.verbose);
+        let _log_guard = RuntimeLogging::init(config.verbose);
         PolicyTelemetry::reset();
         AdaptiveTelemetry::reset();
         PolicyClusterTelemetry::reset();
@@ -350,14 +352,12 @@ impl App {
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .join("certainty_filter_state.bin");
-            let warm_start = crate::engine::filter_store::CertaintyFilterStore::load_from_path(
+
+            // Mandatory dry-run: check persisted observations for early exit.
+            let persisted_population = crate::engine::filter_store::CertaintyFilterStore::load_from_path(
                 &certainty_path,
                 None,
-            );
-            let mut obs_config = config.clone();
-            obs_config.check = true;
-            let max_iterations = 10usize;
-            let mut prev_population: Option<PopulationContext> = warm_start.and_then(|store| {
+            ).and_then(|store| {
                 if !store.has_sufficient_observations(1) {
                     return None;
                 }
@@ -369,96 +369,131 @@ impl App {
                 if ctx.file_count == 0 {
                     return None;
                 }
-                if config.verbose {
-                    info!(
-                        population_file_count = ctx.file_count,
-                        "warm start from persisted certainty state"
-                    );
-                }
                 Some(ctx)
             });
-            let mut final_population: Option<PopulationContext> = prev_population.clone();
-            let obs_max = if prev_population.is_some() { 1 } else { max_iterations };
-            if prev_population.is_some() && config.verbose {
-                info!("warm start available — limiting observation to 1 iteration");
-            }
-            for iteration in 0..obs_max {
-                let obs_results = if multi_process_enabled {
-                    Self::run_multiprocess_pass(
-                        &args,
-                        &obs_config,
-                        files.clone(),
-                        effective_processes,
-                        false,
-                        prev_population.clone(),
-                    )?
-                } else {
-                    Self::run_processing_pass(
-                        &obs_config,
-                        files.clone(),
-                        project_graph_runtime.clone(),
-                        false,
-                        false,
-                        prev_population.clone(),
-                    )?
-                };
-                let certainties: Vec<&crate::engine::catalog::PolicyCertainty> = obs_results
-                    .iter()
-                    .filter_map(|r| r.policy_certainty.as_ref())
-                    .collect();
-                let measurements: Vec<[f64; 5]> = certainties
-                    .iter()
-                    .map(|c| [c.structural, c.semantic, c.coverage, c.richness, c.edit_success])
-                    .collect();
-                if measurements.is_empty() {
-                    break;
-                }
-                let ctx = PopulationContext::compute_from_measurements(&measurements);
-                if ctx.file_count == 0 {
-                    break;
-                }
-                let stable_model_avg = if certainties.is_empty() {
-                    0.0
-                } else {
-                    certainties.iter().map(|c| c.stable_model_prob).sum::<f64>()
-                        / certainties.len() as f64
-                };
-                let variance_converged = prev_population.as_ref().is_some_and(|prev| {
-                    let prev_var: f64 = prev.dim_stats.iter().map(|d| d.variance).sum();
-                    let curr_var: f64 = ctx.dim_stats.iter().map(|d| d.variance).sum();
-                    let delta = (prev_var - curr_var).abs();
-                    delta < prev_var * 0.01
-                });
-                let obs_median = (iteration as u32 + 1)
-                    + if prev_population.is_some() && iteration == 0 { 1 } else { 0 };
-                let kalman_converged = crate::engine::fuzzy_inference::fuzzy_observation_converged(
-                    stable_model_avg,
-                    obs_median,
-                    certainties.len(),
-                );
-                let converged = variance_converged && kalman_converged;
+
+            if let Some(ctx) = persisted_population {
                 if config.verbose {
                     info!(
-                        iteration = iteration + 1,
-                        max_iterations,
-                        converged,
-                        variance_converged,
-                        kalman_converged,
-                        stable_model_avg = format!("{:.4}", stable_model_avg),
-                        obs_median,
                         population_file_count = ctx.file_count,
-                        "observation iteration"
+                        prior_observation_count = ctx.prior_observation_count,
+                        "dry-run: sufficient observations persisted — early exit"
                     );
                 }
-                prev_population = Some(ctx.clone());
-                let mut final_ctx = ctx;
-                final_ctx.prior_observation_count = obs_median;
-                final_population = Some(final_ctx);
-                if converged {
-                    break;
+                let mut result = ctx;
+                result.prior_observation_count = result.prior_observation_count.saturating_add(1);
+                Some(result)
+            } else {
+                if config.verbose {
+                    info!("dry-run: building observations (cold start)");
                 }
+                let mut obs_config = config.clone();
+                obs_config.check = true;
+                obs_config.observation_only = true;
+                let max_iterations = 10usize;
+                let mut prev_population: Option<PopulationContext> = None;
+                let mut final_population: Option<PopulationContext> = None;
+                let mut last_obs_results: Vec<FileResult>;
+
+                for iteration in 0..max_iterations {
+                    let obs_results = if multi_process_enabled {
+                        Self::run_multiprocess_pass(
+                            &args,
+                            &obs_config,
+                            files.clone(),
+                            effective_processes,
+                            false,
+                            prev_population.clone(),
+                        )?
+                    } else {
+                        Self::run_processing_pass(
+                            &obs_config,
+                            files.clone(),
+                            project_graph_runtime.clone(),
+                            false,
+                            true,
+                            prev_population.clone(),
+                        )?
+                    };
+                    last_obs_results = obs_results;
+                    let certainties: Vec<&crate::engine::catalog::PolicyCertainty> = last_obs_results
+                        .iter()
+                        .filter_map(|r| r.policy_certainty.as_ref())
+                        .collect();
+                    let measurements: Vec<[f64; 5]> = certainties
+                        .iter()
+                        .map(|c| [c.structural, c.semantic, c.coverage, c.richness, c.edit_success])
+                        .collect();
+                    if measurements.is_empty() {
+                        break;
+                    }
+                    let ctx = PopulationContext::compute_from_measurements(&measurements);
+                    if ctx.file_count == 0 {
+                        break;
+                    }
+                    let stable_model_avg = if certainties.is_empty() {
+                        0.0
+                    } else {
+                        certainties.iter().map(|c| c.stable_model_prob).sum::<f64>()
+                            / certainties.len() as f64
+                    };
+                    let variance_converged = prev_population.as_ref().is_some_and(|prev| {
+                        let prev_var: f64 = prev.dim_stats.iter().map(|d| d.variance).sum();
+                        let curr_var: f64 = ctx.dim_stats.iter().map(|d| d.variance).sum();
+                        let delta = (prev_var - curr_var).abs();
+                        delta < prev_var * 0.01
+                    });
+                    let obs_median = iteration as u32 + 1;
+                    let kalman_converged = crate::engine::fuzzy_inference::fuzzy_observation_converged(
+                        stable_model_avg,
+                        obs_median,
+                        certainties.len(),
+                    );
+                    let fast_converged = iteration >= 1 && prev_population.as_ref().is_some_and(|prev| {
+                        let prev_var: f64 = prev.dim_stats.iter().map(|d| d.variance).sum();
+                        let curr_var: f64 = ctx.dim_stats.iter().map(|d| d.variance).sum();
+                        (prev_var - curr_var).abs() < prev_var * 0.05
+                    });
+                    let converged = (variance_converged && kalman_converged) || fast_converged;
+                    if config.verbose {
+                        info!(
+                            iteration = iteration + 1,
+                            max_iterations,
+                            converged,
+                            variance_converged,
+                            kalman_converged,
+                            stable_model_avg = format!("{:.4}", stable_model_avg),
+                            obs_median,
+                            population_file_count = ctx.file_count,
+                            "dry-run observation iteration"
+                        );
+                    }
+                    prev_population = Some(ctx.clone());
+                    let mut final_ctx = ctx;
+                    final_ctx.prior_observation_count = obs_median;
+                    final_population = Some(final_ctx.clone());
+                    // Persist after each iteration so kills/restarts don't lose progress.
+                    {
+                        let store = crate::engine::filter_store::CertaintyFilterStore::new(Some(&final_ctx));
+                        for result in last_obs_results.iter() {
+                            if let Some(ref cert) = result.policy_certainty {
+                                let measurement = [cert.structural, cert.semantic, cert.coverage, cert.richness, cert.edit_success];
+                                let content_hash = crc32fast::hash(result.path.to_string_lossy().as_bytes()) as u64;
+                                store.observe(&result.path.to_string_lossy(), measurement, content_hash);
+                            }
+                        }
+                        if let Err(err) = store.save_to_path(&certainty_path) {
+                            warn!(error = %err, "failed to persist dry-run certainty state");
+                        } else if config.verbose {
+                            info!(iteration = iteration + 1, "dry-run: persisted certainty state");
+                        }
+                    }
+                    if converged {
+                        break;
+                    }
+                }
+                final_population
             }
-            final_population
         };
         if config.verbose {
             info!(
@@ -478,7 +513,8 @@ impl App {
             .as_ref()
             .map(|ctx| ctx.prior_observation_count)
             .unwrap_or(0);
-        let started = Instant::now();
+        let observation_ms = observation_started.elapsed().as_secs_f64() * 1000.0;
+        let engine_wall_started = Instant::now();
         let mut results = if multi_process_enabled {
             Self::run_multiprocess_pass(&args, &config, files, effective_processes, false, population_context)?
         } else {
@@ -496,6 +532,28 @@ impl App {
             None
         };
 
+        let engine_wall_ms = engine_wall_started.elapsed().as_secs_f64() * 1000.0;
+        let write_started = Instant::now();
+
+        // Extract graph refresh input from results BEFORE write phase (read-only).
+        // This allows graph refresh to run in parallel with backup manifest writing.
+        let include_parse_updates = !config.check;
+        let should_graph_refresh = project_graph_runtime.is_some()
+            && (include_parse_updates || config.convergence_learn_on_check);
+        let (graph_input, graph_input_warnings) = if should_graph_refresh {
+            let pg = project_graph_runtime.as_ref().unwrap();
+            let (input, warnings) = Self::extract_graph_refresh_input(
+                &results,
+                pg,
+                &config.project_graph,
+                include_parse_updates,
+                population_observation_count,
+            );
+            (Some(input), warnings)
+        } else {
+            (None, Vec::new())
+        };
+
         if !config.check {
             Self::apply_project_wide_semantic_renames(
                 &file_io,
@@ -505,45 +563,65 @@ impl App {
                 population_edit_success,
             );
             Self::apply_write_phase(&file_io, &mut results, parallel_pool.as_ref());
-            BackupManifest::write(&config, results.as_slice()).with_context(|| {
-                format!(
-                    "failed writing backup manifest under {}",
-                    config.backup_dir.display()
-                )
-            })?;
         }
-        let project_graph_stats = if let Some(project_graph) = project_graph_runtime.as_ref() {
-            if config.check {
-                if config.convergence_learn_on_check {
-                    Self::refresh_project_graph(
+
+        // Run graph refresh in parallel with backup manifest writing.
+        // Graph refresh reads files from disk (needs write phase complete) and uses
+        // pre-extracted owned data. Backup manifest is independent.
+        let graph_started = Instant::now();
+        let (project_graph_stats, graph_warnings) = std::thread::scope(|s| {
+            let graph_handle = if let (Some(input), Some(project_graph)) =
+                (graph_input, project_graph_runtime.as_ref())
+            {
+                Some(s.spawn(|| {
+                    Self::refresh_project_graph_owned(
+                        input,
                         project_graph,
                         &file_io,
                         &parser_manager,
-                        &config.project_graph,
-                        &mut results,
                         parallel_pool.as_ref(),
-                        false,
-                        population_observation_count,
                     )
-                } else {
-                    None
-                }
+                }))
             } else {
-                Self::refresh_project_graph(
-                    project_graph,
-                    &file_io,
-                    &parser_manager,
-                    &config.project_graph,
-                    &mut results,
-                    parallel_pool.as_ref(),
-                    true,
-                    population_observation_count,
-                )
-            }
-        } else {
-            None
-        };
+                None
+            };
 
+            // Backup manifest runs on main thread (fast, ~1ms).
+            if !config.check {
+                if let Err(err) = BackupManifest::write(&config, results.as_slice()) {
+                    tracing::warn!("failed writing backup manifest: {err:#}");
+                }
+            }
+
+            // Join graph refresh thread.
+            match graph_handle {
+                Some(handle) => match handle.join() {
+                    Ok(output) => (output.stats, output.warnings),
+                    Err(_) => {
+                        tracing::error!("graph refresh thread panicked");
+                        (None, Vec::new())
+                    }
+                },
+                None => (None, Vec::new()),
+            }
+        });
+
+        // Apply graph refresh warnings back to results.
+        for (index, warning) in graph_input_warnings.into_iter().chain(graph_warnings) {
+            match index {
+                Some(idx) if idx < results.len() => {
+                    results[idx].warnings.push(warning);
+                }
+                _ => {
+                    if let Some(result) = results.iter_mut().find(|r| r.error.is_none()) {
+                        result.warnings.push(warning);
+                    }
+                }
+            }
+        }
+
+        let write_ms = write_started.elapsed().as_secs_f64() * 1000.0;
+        let graph_ms = graph_started.elapsed().as_secs_f64() * 1000.0;
         let report_dir = config.report_path.parent().unwrap_or(Path::new("."));
         let report_name = config
             .report_path
@@ -616,7 +694,7 @@ impl App {
             }
         }
 
-        let elapsed = started.elapsed();
+        let elapsed = engine_wall_started.elapsed();
         let throughput = summary.files_processed as f64 / elapsed.as_secs_f64().max(0.000_1);
         let contract_violation_count = Self::contract_violation_count(results.as_slice());
 
@@ -630,6 +708,10 @@ impl App {
         println!("backups: {}", backup_writes);
         println!("elapsed: {:.3}s", elapsed.as_secs_f64());
         println!("throughput: {:.2} files/s", throughput);
+        println!(
+            "phases: observation={:.1}ms engine={:.1}ms write={:.1}ms graph={:.1}ms",
+            observation_ms, engine_wall_ms, write_ms, graph_ms,
+        );
         if let Some(stats) = project_graph_stats {
             println!(
                 "project_graph: generation={} prune={} tombstone={} nodes {}->{} edges {}->{} metrics {}->{} tombstones {}->{}",
@@ -874,6 +956,7 @@ impl App {
             warnings: result.warnings,
             elapsed_engine_ms: result.elapsed_engine_ms,
             elapsed_total_ms: result.elapsed_total_ms,
+            boot_parse_ms: result.boot_parse_ms,
             policy_certainty: result.policy_certainty,
         }
     }
@@ -903,6 +986,7 @@ impl App {
             warnings: result.warnings,
             elapsed_engine_ms: result.elapsed_engine_ms,
             elapsed_total_ms: result.elapsed_total_ms,
+            boot_parse_ms: result.boot_parse_ms,
             policy_certainty: result.policy_certainty,
         }
     }
@@ -1522,6 +1606,7 @@ mod tests {
                 warnings: Vec::new(),
                 elapsed_engine_ms: 0.0,
                 elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
                 policy_certainty: None,
             },
             WorkerFileResult {
@@ -1538,6 +1623,7 @@ mod tests {
                 warnings: Vec::new(),
                 elapsed_engine_ms: 0.0,
                 elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
                 policy_certainty: None,
             },
         ];
@@ -1563,6 +1649,7 @@ mod tests {
                 warnings: Vec::new(),
                 elapsed_engine_ms: 0.0,
                 elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
                 policy_certainty: None,
             },
             WorkerFileResult {
@@ -1579,6 +1666,7 @@ mod tests {
                 warnings: Vec::new(),
                 elapsed_engine_ms: 0.0,
                 elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
                 policy_certainty: None,
             },
         ];
