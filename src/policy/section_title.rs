@@ -42,6 +42,7 @@ impl Policy for SectionTitleNormalizerPolicy {
         let mut lines = shared.lines_cow();
         let trailing_newline = shared.trailing_newline();
         let mut edits = Vec::new();
+        let mut warnings = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
 
         for (idx, line) in lines.iter_mut().enumerate() {
@@ -77,22 +78,21 @@ impl Policy for SectionTitleNormalizerPolicy {
             }
         }
 
-        if edits.is_empty() {
-            if skipped_semantic_unsafe > 0 {
-                tracing::debug!(
-                    skipped = skipped_semantic_unsafe,
-                    "section_title_normalizer: skipped semantic-unsafe candidate line(s)"
-                );
-            }
-            return PolicyResult::unchanged();
-        }
-
         if skipped_semantic_unsafe > 0 {
+            warnings.push(format!(
+                "section_title_normalizer: skipped {} semantic-unsafe candidate line(s)",
+                skipped_semantic_unsafe
+            ));
             tracing::debug!(
                 skipped = skipped_semantic_unsafe,
                 "section_title_normalizer: skipped semantic-unsafe candidate line(s)"
             );
         }
+
+        if edits.is_empty() {
+            return PolicyResult::unchanged_with_warnings(warnings);
+        }
+
         PolicyResult {
             text: join_lines_cow(&lines, eol, trailing_newline),
             changed: true,
@@ -103,6 +103,7 @@ impl Policy for SectionTitleNormalizerPolicy {
                 column: Some(1),
             }],
             edits,
+            warnings,
             ..Default::default()
         }
     }

@@ -1064,11 +1064,10 @@ impl PolicyPipeline {
                 result.edits.retain(|e| e.line == 0 || !excluded.contains(&e.line));
                 let dropped = before_count.saturating_sub(result.edits.len());
                 if dropped > 0 {
-                    debug!(
-                        policy = policy_name,
-                        dropped,
-                        "understanding gate: suppressed edit(s) on parser-error line(s)"
-                    );
+                    result.warnings.push(format!(
+                        "understanding gate: suppressed {} edit(s) on parser-error line(s) for '{}'",
+                        dropped, policy_name
+                    ));
                     if result.edits.is_empty() {
                         result.text = state.current.to_string();
                     } else {

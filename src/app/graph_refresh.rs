@@ -438,7 +438,7 @@ impl App {
         } else {
             Vec::new()
         };
-        let input_warnings: Vec<(Option<usize>, String)> = Vec::new();
+        let mut input_warnings: Vec<(Option<usize>, String)> = Vec::new();
         if include_parse_updates
             && project_graph_config.incremental_neighborhood_enabled
             && !targets.is_empty()
@@ -476,10 +476,11 @@ impl App {
                 }
             }
             if added > 0 {
-                tracing::debug!(
-                    added,
-                    "project_graph: expanded incremental refresh with affected-neighbor file(s)"
-                );
+                let first_ok = results.iter().position(|r| r.error.is_none());
+                input_warnings.push((first_ok, format!(
+                    "project_graph: expanded incremental refresh with {} affected-neighbor file(s)",
+                    added
+                )));
             }
         }
         let cap = eager_parse_cap(targets.len(), population_observation_count);
@@ -491,12 +492,11 @@ impl App {
             });
             let deferred = targets.len() - cap;
             targets.truncate(cap);
-            tracing::debug!(
-                deferred,
-                cap,
-                obs = population_observation_count,
-                "project_graph: deferred parse refresh for lower-impact file(s)"
-            );
+            let first_ok = results.iter().position(|r| r.error.is_none());
+            input_warnings.push((first_ok, format!(
+                "project_graph: deferred parse refresh for {} lower-impact file(s) (cap={}, obs={})",
+                deferred, cap, population_observation_count
+            )));
         }
         (GraphRefreshInput {
             convergence_pairs,

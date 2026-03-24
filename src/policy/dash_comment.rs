@@ -82,6 +82,7 @@ impl Policy for DashCommentNormalizerPolicy {
         }
 
         let mut edits = Vec::new();
+        let mut warnings = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
         for idx in 0..lines.len() {
             if shared.is_macro_line(idx + 1) {
@@ -124,6 +125,13 @@ impl Policy for DashCommentNormalizerPolicy {
             }
         }
 
+        if skipped_semantic_unsafe > 0 {
+            warnings.push(format!(
+                "dash_comment_normalizer: skipped {} semantic-unsafe candidate line(s)",
+                skipped_semantic_unsafe
+            ));
+        }
+
         if edits.is_empty() {
             if skipped_semantic_unsafe > 0 {
                 tracing::debug!(
@@ -131,15 +139,9 @@ impl Policy for DashCommentNormalizerPolicy {
                     "dash_comment_normalizer: skipped semantic-unsafe candidate line(s)"
                 );
             }
-            return PolicyResult::unchanged();
+            return PolicyResult::unchanged_with_warnings(warnings);
         }
 
-        if skipped_semantic_unsafe > 0 {
-            tracing::debug!(
-                skipped = skipped_semantic_unsafe,
-                "dash_comment_normalizer: skipped semantic-unsafe candidate line(s)"
-            );
-        }
         PolicyResult {
             text: join_lines_cow(&lines, eol, trailing_newline),
             changed: true,
@@ -150,6 +152,7 @@ impl Policy for DashCommentNormalizerPolicy {
                 column: Some(1),
             }],
             edits,
+            warnings,
             ..Default::default()
         }
     }
