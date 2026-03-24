@@ -41,7 +41,7 @@ impl RenamePlan {
             (true, true, true) => 1.0,
             (true, true, false) => 0.8,
             (true, false, _) => 0.6,
-            (false, _, _) => 0.3,
+            (false, _, _) => 0.5,
         }
     }
 }
@@ -217,10 +217,17 @@ impl NamingConventionsPolicy {
         if !parse.symbols.is_empty() {
             return true;
         }
-        semantic_context.is_some_and(|semantic| {
+        if semantic_context.is_some_and(|semantic| {
             let summary = semantic.summary();
             summary.declaration_count > 0 && summary.reference_count > 0
-        })
+        }) {
+            return true;
+        }
+        // Allow renames without clang symbols when there are no fatal errors.
+        // Tree-sitter provides rename candidates; clang symbols only add
+        // confidence (stable_id, expected_occurrences). Without them, renames
+        // proceed at lower confidence through the trust gate.
+        true
     }
 
     pub fn new(semantic_mode: bool, semantic_strict: bool) -> Self {
