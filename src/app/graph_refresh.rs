@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -27,12 +28,16 @@ use crate::runtime::retry_telemetry::{
     RetryStrategySnapshotEntry,
 };
 
-/// Pre-extracted data from `&[FileResult]` for graph refresh.
-/// Allows graph refresh to run on a separate thread without borrowing results.
+pub(crate) struct GraphRefreshTarget {
+    pub result_index: Option<usize>,
+    pub path: PathBuf,
+    pub cached_text: Option<String>,
+    pub cached_clang: Option<Arc<ClangParseResult>>,
+}
+
 pub(crate) struct GraphRefreshInput {
     pub convergence_pairs: BTreeMap<(String, String), usize>,
-    /// (result_index, path) for changed files; None index for neighbor files.
-    pub targets: Vec<(Option<usize>, PathBuf)>,
+    pub targets: Vec<GraphRefreshTarget>,
 }
 
 /// Warnings produced by graph refresh, indexed by result position.
@@ -353,8 +358,7 @@ impl App {
     }
 
     fn parse_project_graph_target(
-        index: Option<usize>,
-        path: PathBuf,
+        target: GraphRefreshTarget,
         file_io: &FileIo,
         parser_manager: &ParserManager,
     ) -> (
@@ -363,25 +367,32 @@ impl App {
         Option<Arc<ClangParseResult>>,
         Option<String>,
     ) {
-        let text = match file_io.read_text(&path) {
-            Ok(content) => content,
-            Err(err) => {
-                return (
-                    index,
-                    path,
-                    None,
-                    Some(format!(
-                        "project_graph: failed reading file for graph update: {err}"
-                    )),
-                );
+        if let Some(clang) = target.cached_clang {
+            return (target.result_index, target.path, Some(clang), None);
+        }
+        let text = if let Some(cached) = target.cached_text {
+            cached
+        } else {
+            match file_io.read_text(&target.path) {
+                Ok(content) => content,
+                Err(err) => {
+                    return (
+                        target.result_index,
+                        target.path,
+                        None,
+                        Some(format!(
+                            "project_graph: failed reading file for graph update: {err}"
+                        )),
+                    );
+                }
             }
         };
-        let parse = match parser_manager.parse_clang(text.as_str(), &path) {
+        let parse = match parser_manager.parse_clang(text.as_str(), &target.path) {
             Ok(value) => value,
             Err(err) => {
                 return (
-                    index,
-                    path,
+                    target.result_index,
+                    target.path,
                     None,
                     Some(format!(
                         "project_graph: clang parse failed for graph update: {err}"
@@ -389,7 +400,7 @@ impl App {
                 );
             }
         };
-        (index, path, Some(parse), None)
+        (target.result_index, target.path, Some(parse), None)
     }
 
     pub(crate) fn extract_graph_refresh_input(
@@ -406,12 +417,28 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter(|(_, result)| result.error.is_none() && result.outcome.changed)
-                .map(|(index, result)| (Some(index), result.meta.path.clone()))
+                .map(|(index, result)| {
+                    let has_naming_edits = result.outcome.edits.iter().any(|edit| {
+                        let name = edit.policy.as_str();
+                        name == "naming_conventions" || name == "snake_case"
+                    });
+                    let cached_clang = if has_naming_edits {
+                        None
+                    } else {
+                        result.outcome.clang_parse.clone()
+                    };
+                    GraphRefreshTarget {
+                        result_index: Some(index),
+                        path: result.meta.path.clone(),
+                        cached_text: result.outcome.pending_text.clone(),
+                        cached_clang,
+                    }
+                })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
-        let mut input_warnings: Vec<(Option<usize>, String)> = Vec::new();
+        let input_warnings: Vec<(Option<usize>, String)> = Vec::new();
         if include_parse_updates
             && project_graph_config.incremental_neighborhood_enabled
             && !targets.is_empty()
@@ -419,7 +446,7 @@ impl App {
             let graph_snapshot = project_graph.snapshot();
             let changed_paths = targets
                 .iter()
-                .map(|(_, path)| path.clone())
+                .map(|t| t.path.clone())
                 .collect::<Vec<_>>();
             let neighbors = graph_snapshot.affected_file_paths(
                 changed_paths.as_slice(),
@@ -430,7 +457,7 @@ impl App {
             );
             let mut seen = targets
                 .iter()
-                .map(|(_, path)| Self::path_identity(path.as_path()))
+                .map(|t| Self::path_identity(t.path.as_path()))
                 .collect::<HashSet<_>>();
             let mut added = 0usize;
             for neighbor in neighbors {
@@ -439,32 +466,37 @@ impl App {
                 }
                 let key = Self::path_identity(neighbor.as_path());
                 if seen.insert(key) {
-                    targets.push((None, neighbor));
+                    targets.push(GraphRefreshTarget {
+                        result_index: None,
+                        path: neighbor,
+                        cached_text: None,
+                        cached_clang: None,
+                    });
                     added = added.saturating_add(1);
                 }
             }
             if added > 0 {
-                let first_ok = results.iter().position(|r| r.error.is_none());
-                input_warnings.push((first_ok, format!(
-                    "project_graph: expanded incremental refresh with {} affected-neighbor file(s)",
-                    added
-                )));
+                tracing::debug!(
+                    added,
+                    "project_graph: expanded incremental refresh with affected-neighbor file(s)"
+                );
             }
         }
         let cap = eager_parse_cap(targets.len(), population_observation_count);
         if targets.len() > cap {
             targets.sort_by(|a, b| {
-                let edits_a = a.0.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
-                let edits_b = b.0.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
+                let edits_a = a.result_index.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
+                let edits_b = b.result_index.map(|i| edit_counts.get(i).copied().unwrap_or(0)).unwrap_or(0);
                 edits_b.cmp(&edits_a)
             });
             let deferred = targets.len() - cap;
             targets.truncate(cap);
-            let first_ok = results.iter().position(|r| r.error.is_none());
-            input_warnings.push((first_ok, format!(
-                "project_graph: deferred parse refresh for {} lower-impact file(s) (cap={}, obs={})",
-                deferred, cap, population_observation_count
-            )));
+            tracing::debug!(
+                deferred,
+                cap,
+                obs = population_observation_count,
+                "project_graph: deferred parse refresh for lower-impact file(s)"
+            );
         }
         (GraphRefreshInput {
             convergence_pairs,
@@ -480,6 +512,7 @@ impl App {
         parallel_pool: Option<&rayon::ThreadPool>,
     ) -> GraphRefreshOutput {
         let mut warnings: Vec<(Option<usize>, String)> = Vec::new();
+        let t_start = Instant::now();
 
         let graph_snapshot = project_graph.snapshot();
         let persisted_state = graph_snapshot.to_state_clone();
@@ -560,34 +593,63 @@ impl App {
             };
         }
 
-        let file_io_for_parse = Arc::new(file_io.clone());
-        let parser_for_parse = Arc::new(parser_manager.clone());
-        let outcomes: Vec<_> = if let Some(pool) = parallel_pool {
-            let fio = file_io_for_parse.clone();
-            let parser = parser_for_parse.clone();
-            pool.install(|| {
-                input
-                    .targets
-                    .into_par_iter()
-                    .map(|(index, path)| {
-                        Self::parse_project_graph_target(index, path, &fio, &parser)
+        let snapshot_ms = t_start.elapsed().as_millis();
+
+        let t_parse = Instant::now();
+        let (ready, need_parse): (Vec<_>, Vec<_>) = input
+            .targets
+            .into_iter()
+            .partition(|t| t.cached_clang.is_some());
+
+        let cached_count = ready.len();
+        let need_parse_count = need_parse.len();
+        let mut outcomes: Vec<_> = ready
+            .into_iter()
+            .map(|t| {
+                let index = t.result_index;
+                let path = t.path;
+                let clang = t.cached_clang;
+                (index, path, clang, None)
+            })
+            .collect();
+
+        if !need_parse.is_empty() {
+            let file_io_for_parse = Arc::new(file_io.clone());
+            let parser_for_parse = Arc::new(parser_manager.clone());
+            let parsed: Vec<_> = if let Some(pool) = parallel_pool {
+                let fio = file_io_for_parse.clone();
+                let parser = parser_for_parse.clone();
+                pool.install(|| {
+                    need_parse
+                        .into_par_iter()
+                        .map(|target| {
+                            Self::parse_project_graph_target(target, &fio, &parser)
+                        })
+                        .collect()
+                })
+            } else {
+                need_parse
+                    .into_iter()
+                    .map(|target| {
+                        Self::parse_project_graph_target(
+                            target,
+                            &file_io_for_parse,
+                            &parser_for_parse,
+                        )
                     })
                     .collect()
-            })
-        } else {
-            input
-                .targets
-                .into_iter()
-                .map(|(index, path)| {
-                    Self::parse_project_graph_target(
-                        index,
-                        path,
-                        &file_io_for_parse,
-                        &parser_for_parse,
-                    )
-                })
-                .collect()
-        };
+            };
+            outcomes.extend(parsed);
+        }
+
+        let parse_ms = t_parse.elapsed().as_millis();
+        tracing::debug!(
+            snapshot_ms = snapshot_ms as u64,
+            parse_ms = parse_ms as u64,
+            cached = cached_count,
+            parsed = need_parse_count,
+            "graph: snapshot+parse",
+        );
 
         let mut file_parses = Vec::with_capacity(outcomes.len());
         for (index, path, parse, warning) in outcomes {
@@ -611,6 +673,7 @@ impl App {
             };
         }
 
+        let t_persist = Instant::now();
         let stats = match project_graph.update_state_with_stats(|state| {
             for (path, parse) in &file_parses {
                 GraphUpdater::apply_clang_parse(state, path.as_path(), parse);
@@ -641,6 +704,11 @@ impl App {
                 None
             }
         };
+
+        tracing::debug!(
+            persist_ms = t_persist.elapsed().as_millis() as u64,
+            "graph: persist",
+        );
 
         GraphRefreshOutput { stats, warnings }
     }

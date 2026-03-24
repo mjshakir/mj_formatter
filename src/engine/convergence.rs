@@ -171,11 +171,11 @@ impl ConvergenceController {
 
         if !dropped_lines.is_empty() {
             result = Self::apply_line_suppression(before_text, result, &dropped_lines);
-            result.warnings.push(format!(
-                "convergence_controller: dropped {} conflicting line edit(s) for '{}' (superseded by higher-priority policy on same line)",
-                dropped_lines.len(),
-                policy_name
-            ));
+            tracing::debug!(
+                policy = policy_name,
+                dropped = dropped_lines.len(),
+                "convergence_controller: dropped conflicting line edit(s) superseded by higher-priority policy"
+            );
         }
 
         // Claim all winning lines for this policy.
@@ -310,6 +310,7 @@ impl ConvergenceController {
                 violations: kept_violations,
                 edits: kept_edits,
                 warnings: result.warnings,
+                changed: false,
             };
         }
 
@@ -335,6 +336,7 @@ impl ConvergenceController {
             violations: kept_violations,
             edits: kept_edits,
             warnings: result.warnings,
+            changed: true,
         }
     }
 }
@@ -373,6 +375,7 @@ mod tests {
                 after: after.to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         }
     }
 
@@ -442,10 +445,6 @@ mod tests {
 
         assert!(align.edits.is_empty());
         assert_eq!(align.text, clang.text);
-        assert!(align
-            .warnings
-            .iter()
-            .any(|item| item.contains("convergence_controller: dropped")));
     }
 
     #[test]

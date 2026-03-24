@@ -3,7 +3,9 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::policy::Policy;
-use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
+use std::borrow::Cow;
+
+use crate::policy::text_utils::join_lines_cow;
 use crate::parser::text_scan;
 
 pub struct DashCommentNormalizerPolicy {
@@ -38,7 +40,7 @@ impl DashCommentNormalizerPolicy {
             && text_scan::TEXT_SCAN.all_bytes_equal(&trimmed.as_bytes()[2..], b'-')
     }
 
-    fn adjacent_title_length(lines: &[String], index: usize) -> Option<usize> {
+    fn adjacent_title_length(lines: &[Cow<'_, str>], index: usize) -> Option<usize> {
         let neighbors = [index.checked_sub(1), Some(index + 1)];
         for neighbor in neighbors.into_iter().flatten() {
             if neighbor >= lines.len() {
@@ -66,41 +68,33 @@ impl Policy for DashCommentNormalizerPolicy {
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "dash_comment_normalizer: semantic context unavailable; skipping heuristic edits"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "dash_comment_normalizer: semantic context unavailable; skipping heuristic edits"
+                    .to_string(),
+            );
         }
-        let eol = detect_line_ending(context.text);
-        let (mut lines, trailing_newline) = split_lines(context.text);
+        let shared = context.shared.unwrap();
+        let eol = shared.line_ending();
+        let mut lines = shared.lines_cow();
+        let trailing_newline = shared.trailing_newline();
         if lines.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let mut edits = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
         for idx in 0..lines.len() {
-            if semantic_query.is_available() && semantic_query.is_macro_region(idx + 1, 1) {
+            if shared.is_macro_line(idx + 1) {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
                 continue;
             }
-            let original = lines[idx].clone();
+            let original = lines[idx].to_string();
             if !Self::is_dash_comment(&original) {
                 continue;
             }
 
             let indent_len = text_scan::TEXT_SCAN.leading_whitespace_byte_count(original.as_bytes());
-            let indent: String = original[..indent_len].to_string();
+            let indent: &str = &original[..indent_len];
             let current_len = original.trim().len();
 
             let mut target_len = if current_len >= self.long_threshold {
@@ -126,35 +120,29 @@ impl Policy for DashCommentNormalizerPolicy {
                     before: original,
                     after: updated.clone(),
                 });
-                lines[idx] = updated;
+                lines[idx] = Cow::Owned(updated);
             }
         }
 
         if edits.is_empty() {
-            let mut warnings = Vec::new();
             if skipped_semantic_unsafe > 0 {
-                warnings.push(format!(
-                    "dash_comment_normalizer: skipped {} semantic-unsafe candidate line(s)",
-                    skipped_semantic_unsafe
-                ));
+                tracing::debug!(
+                    skipped = skipped_semantic_unsafe,
+                    "dash_comment_normalizer: skipped semantic-unsafe candidate line(s)"
+                );
             }
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits,
-                warnings,
-            };
+            return PolicyResult::unchanged();
         }
 
-        let mut warnings = Vec::new();
         if skipped_semantic_unsafe > 0 {
-            warnings.push(format!(
-                "dash_comment_normalizer: skipped {} semantic-unsafe candidate line(s)",
-                skipped_semantic_unsafe
-            ));
+            tracing::debug!(
+                skipped = skipped_semantic_unsafe,
+                "dash_comment_normalizer: skipped semantic-unsafe candidate line(s)"
+            );
         }
         PolicyResult {
-            text: join_lines(&lines, eol, trailing_newline),
+            text: join_lines_cow(&lines, eol, trailing_newline),
+            changed: true,
             violations: vec![Violation {
                 policy: self.name().into(),
                 message: "normalized dashed comment separators".to_string(),
@@ -162,7 +150,7 @@ impl Policy for DashCommentNormalizerPolicy {
                 column: Some(1),
             }],
             edits,
-            warnings,
+            ..Default::default()
         }
     }
 }
