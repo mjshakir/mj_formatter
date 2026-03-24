@@ -401,16 +401,28 @@ impl NamingConventionsPolicy {
         }
     }
 
-    fn is_ts_constructor<'a>(name_node: Node<'a>, name: &str, source: &[u8]) -> bool {
-        let mut cursor = name_node;
+    fn is_enclosing_class_match<'a>(node: Node<'a>, name: &str, source: &'a [u8]) -> bool {
+        let mut cursor = node;
         while let Some(parent) = cursor.parent() {
             if matches!(
                 parent.kind(),
                 node_kind::CLASS_SPECIFIER | node_kind::STRUCT_SPECIFIER
             ) {
-                if let Some(class_name_node) = parent.child_by_field_name("name") {
-                    if let Ok(class_name) = class_name_node.utf8_text(source) {
-                        return class_name == name;
+                // Check the "name" field and all TYPE_IDENTIFIER children.
+                // Handles `class EXPORT_MACRO ClassName` where the name field
+                // may point to the macro rather than the class name.
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if name_node.utf8_text(source).is_ok_and(|cn| cn == name) {
+                        return true;
+                    }
+                }
+                for i in 0..parent.child_count() {
+                    if let Some(child) = parent.child(i as u32) {
+                        if child.kind() == node_kind::TYPE_IDENTIFIER
+                            && child.utf8_text(source).is_ok_and(|cn| cn == name)
+                        {
+                            return true;
+                        }
                     }
                 }
                 return false;
@@ -420,27 +432,16 @@ impl NamingConventionsPolicy {
         false
     }
 
+    fn is_ts_constructor<'a>(name_node: Node<'a>, name: &str, source: &[u8]) -> bool {
+        Self::is_enclosing_class_match(name_node, name, source)
+    }
+
     fn is_ts_destructor<'a>(name_node: Node<'a>, name: &str, source: &[u8]) -> bool {
         let start = name_node.start_byte();
         if start == 0 || source[start - 1] != b'~' {
             return false;
         }
-        let mut cursor = name_node;
-        while let Some(parent) = cursor.parent() {
-            if matches!(
-                parent.kind(),
-                node_kind::CLASS_SPECIFIER | node_kind::STRUCT_SPECIFIER
-            ) {
-                if let Some(class_name_node) = parent.child_by_field_name("name") {
-                    if let Ok(class_name) = class_name_node.utf8_text(source) {
-                        return class_name == name;
-                    }
-                }
-                return false;
-            }
-            cursor = parent;
-        }
-        false
+        Self::is_enclosing_class_match(name_node, name, source)
     }
 
     fn is_snake_case(name: &str) -> bool {
