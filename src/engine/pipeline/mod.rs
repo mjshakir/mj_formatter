@@ -70,6 +70,7 @@ use crate::engine::context_tracker::{
 };
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::ts_traversal;
+use crate::policy::shared_data::PolicySharedData;
 
 const CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE: usize = 6;
 type SemanticImpactRangesByLine = BTreeMap<usize, SmallVec<[(usize, usize); 4]>>;
@@ -401,6 +402,7 @@ impl PolicyPipeline {
             });
         }
         self.record_initial_fidelity_warnings(&mut state);
+
         for policy in &self.policies {
             self.run_policy_stage(&mut state, policy.as_ref())?;
         }
@@ -425,6 +427,7 @@ impl PolicyPipeline {
                 violations: finalized.violations,
                 edits: finalized.edits,
                 warnings: final_warnings,
+                changed: true,
             },
             convergence_pairs: finalized.convergence_pairs,
             policy_traces: state.policy_traces,
@@ -433,6 +436,7 @@ impl PolicyPipeline {
             policy_certainty: state.parse.certainty,
             rollback_count: state.rollback_count,
             boot_parse_ms,
+            clang_parse: state.parse.clang.clone(),
         })
     }
 
@@ -638,7 +642,8 @@ impl PolicyPipeline {
         let execute_end = Instant::now();
         if executed.result.edits.is_empty()
             && executed.result.violations.is_empty()
-            && text_scan::TEXT_SCAN.strings_equal(&executed.result.text, &state.current)
+            && (!executed.result.changed
+                || text_scan::TEXT_SCAN.strings_equal(&executed.result.text, &state.current))
         {
             state.telem.samples.push(PolicyExecutionSample::success(
                 policy_name,
@@ -965,6 +970,7 @@ impl PolicyPipeline {
             semantic_rewrite: prepared.policy_certainty.trust_for_semantic_rewrite(),
         };
         let tree_error_lines = state.parse.error_lines_cached().clone();
+        let shared = PolicySharedData::new(&state.current, state.parse.semantic.as_ref());
         let mut context = PolicyContext::new(&state.current, state.path)
             .with_tree(state.parse.tree.as_ref())
             .with_clang(state.parse.clang.as_deref())
@@ -972,7 +978,8 @@ impl PolicyPipeline {
             .with_graph(state.options.project_graph_snapshot.as_deref())
             .with_parser_trust(parser_trust)
             .with_policy_certainty(Some(prepared.policy_certainty))
-            .with_query_cache(Some(&self.query_cache));
+            .with_query_cache(Some(&self.query_cache))
+            .with_shared(Some(&shared));
         context.forced_batch_size = state.retry_batch_size.take();
         let semantic_query = context.semantic_query();
         let project_query = context.project_query();
@@ -1115,6 +1122,7 @@ impl PolicyPipeline {
                     violations,
                     edits: Vec::new(),
                     warnings: result.warnings,
+                    changed: false,
                 };
             }
             if self.confidence_enabled && !result.edits.is_empty() {
@@ -1311,6 +1319,7 @@ impl PolicyPipeline {
                     violations: executed.result.violations,
                     edits: Vec::new(),
                     warnings: executed.result.warnings,
+                    changed: false,
                 };
                 candidates.clear();
                 executed.result.warnings.push(format!(
@@ -1509,6 +1518,9 @@ impl PolicyPipeline {
         before_text: &str,
         mut result: PolicyResult,
     ) -> PolicyResult {
+        if !result.changed && result.text.is_empty() {
+            return result;
+        }
         if text_scan::TEXT_SCAN.strings_equal(&result.text, before_text) {
             if !result.edits.is_empty() {
                 result.edits.clear();
@@ -1959,6 +1971,7 @@ impl PolicyPipeline {
                         violations,
                         edits: result.edits,
                         warnings: result.warnings,
+                        changed: result.changed,
                     }
                 } else {
                     result
@@ -2001,6 +2014,7 @@ impl PolicyPipeline {
                     violations,
                     edits: Vec::new(),
                     warnings: result.warnings,
+                    changed: false,
                 }
             }
         }
@@ -2152,6 +2166,7 @@ impl PolicyPipeline {
                     violations,
                     edits: Vec::new(),
                     warnings: result.warnings,
+                    changed: false,
                 }
             }
         }
@@ -2236,6 +2251,7 @@ impl PolicyPipeline {
             violations: result_violations,
             edits: result_edits,
             mut warnings,
+            changed: _,
         } = result;
         let kept_violations = result_violations
             .into_iter()
@@ -2270,6 +2286,7 @@ impl PolicyPipeline {
                 violations: kept_violations,
                 edits: kept_edits,
                 warnings,
+                changed: true,
             };
         }
         let has_non_local_line_edits = before_line_count != after_line_count;
@@ -2296,6 +2313,7 @@ impl PolicyPipeline {
                     violations: kept_violations,
                     edits: Vec::new(),
                     warnings,
+                    changed: false,
                 };
             };
             let synthesized = Self::synthesize_line_edits(
@@ -2316,6 +2334,7 @@ impl PolicyPipeline {
                     violations: kept_violations,
                     edits: synthesized,
                     warnings,
+                    changed: true,
                 };
             }
             warnings.push(
@@ -2326,6 +2345,7 @@ impl PolicyPipeline {
                 violations: kept_violations,
                 edits: Vec::new(),
                 warnings,
+                changed: false,
             };
         }
 
@@ -2335,6 +2355,7 @@ impl PolicyPipeline {
                 violations: kept_violations,
                 edits: kept_edits,
                 warnings,
+                changed: false,
             };
         }
 
@@ -2353,6 +2374,7 @@ impl PolicyPipeline {
             violations: kept_violations,
             edits: kept_edits,
             warnings,
+            changed: true,
         }
     }
 
@@ -2719,7 +2741,7 @@ mod tests {
     use crate::parser::clang_result::ClangDiagnosticEntry;
     use crate::parser::clang_result::ClangDiagnosticSeverity;
     use crate::parser::clang_result::ClangDiagnosticSummary;
-    use crate::parser::clang_types::ClangSymbolKind;
+    use clang::EntityKind;
     use crate::parser::manager::SemanticCompdbContextKind;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
@@ -2759,6 +2781,7 @@ mod tests {
                 },
             ],
             warnings: Vec::new(),
+            changed: true,
         };
         let capability = PolicyCapabilityMatrix::for_policy("sample");
 
@@ -2795,7 +2818,7 @@ mod tests {
                 stable_id: "usr:c:@F@unsafe#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "unsafe".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: EntityKind::FunctionDecl,
                 line: 4,
                 column: 1,
                 usr: Some("c:@F@unsafe#".to_string()),
@@ -2815,6 +2838,7 @@ mod tests {
                 after: "unsafe".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let capability = PolicyCapabilityMatrix::for_policy("sample");
 
@@ -2863,6 +2887,7 @@ mod tests {
                 after: "#include <b>".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let capability = PolicyCapabilityMatrix::for_policy("include_order");
 
@@ -2907,6 +2932,7 @@ mod tests {
                 },
             ],
             warnings: Vec::new(),
+            changed: true,
         };
         let allowed = BTreeSet::from([4usize]);
         let filtered = PolicyPipeline::apply_scope_filter(
@@ -2954,6 +2980,7 @@ mod tests {
                 },
             ],
             warnings: Vec::new(),
+            changed: true,
         };
         let allowed = BTreeSet::from([1usize]);
         let filtered = PolicyPipeline::apply_scope_filter(
@@ -2987,6 +3014,7 @@ mod tests {
             violations: Vec::new(),
             edits: Vec::new(),
             warnings: Vec::new(),
+            changed: true,
         };
         for line in 1..=90usize {
             result.edits.push(Edit {
@@ -3078,6 +3106,7 @@ mod tests {
                 })
                 .collect(),
             warnings: Vec::new(),
+            changed: true,
         };
         let semantic = SemanticFileContext {
             clang_success: true,
@@ -3089,7 +3118,7 @@ mod tests {
                     stable_id: "usr:test".to_string(),
                     provenance: SemanticIdProvenance::Usr,
                     decl_path: "sample.cpp".to_string(),
-                    decl_kind: ClangSymbolKind::Variable,
+                    decl_kind: EntityKind::VarDecl,
                     offset,
                     line: 1,
                     column: 1,
@@ -3133,6 +3162,7 @@ mod tests {
                 },
             ],
             warnings: Vec::new(),
+            changed: true,
         };
         let semantic = SemanticFileContext {
             clang_success: true,
@@ -3141,7 +3171,7 @@ mod tests {
                 stable_id: "usr:c:@F@value#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "value".to_string(),
-                kind: ClangSymbolKind::Variable,
+                kind: EntityKind::VarDecl,
                 line: 10,
                 column: 5,
                 usr: Some("c:@F@value#".to_string()),
@@ -3151,7 +3181,7 @@ mod tests {
                 stable_id: "usr:c:@F@value#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "sample.cpp".to_string(),
-                decl_kind: ClangSymbolKind::Variable,
+                decl_kind: EntityKind::VarDecl,
                 offset: 0,
                 line: 12,
                 column: 3,
@@ -3218,6 +3248,7 @@ mod tests {
                 after: "b".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let semantic = SemanticFileContext {
             clang_success: true,
@@ -3325,6 +3356,7 @@ mod tests {
                 after: "    ".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let suppressed =
             PolicyPipeline::apply_line_suppression(before, result, &BTreeSet::from([3usize]));
@@ -3345,6 +3377,7 @@ mod tests {
                 after: "X".to_string(),
             }],
             warnings: vec![],
+            changed: true,
         };
         let suppressed =
             PolicyPipeline::apply_line_suppression(before, result, &BTreeSet::from([3usize]));
@@ -3374,6 +3407,7 @@ mod tests {
                 })
                 .collect(),
             warnings: vec![],
+            changed: true,
         };
         let suppressed =
             PolicyPipeline::apply_line_suppression(before.as_str(), result, &BTreeSet::from([3usize]));
@@ -3400,6 +3434,7 @@ mod tests {
                 })
                 .collect(),
             warnings: vec![],
+            changed: true,
         };
         let suppressed = PolicyPipeline::suppress_structural(
             before.as_str(),
@@ -3505,6 +3540,7 @@ mod tests {
                 after: "block_changed".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let normalized = PolicyPipeline::normalize_edit_coverage(
             "pragma_once_spacing",
@@ -3529,6 +3565,7 @@ mod tests {
                 after: "line1 changed".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let normalized =
             PolicyPipeline::normalize_edit_coverage("include_order", "line1\nline2\n", result);
@@ -3571,6 +3608,7 @@ mod tests {
                 },
             ],
             warnings: Vec::new(),
+            changed: true,
         };
         let normalized = PolicyPipeline::normalize_edit_coverage(
             "class_layout",
