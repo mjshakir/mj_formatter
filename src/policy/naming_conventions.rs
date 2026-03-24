@@ -420,6 +420,29 @@ impl NamingConventionsPolicy {
         false
     }
 
+    fn is_ts_destructor<'a>(name_node: Node<'a>, name: &str, source: &[u8]) -> bool {
+        let start = name_node.start_byte();
+        if start == 0 || source[start - 1] != b'~' {
+            return false;
+        }
+        let mut cursor = name_node;
+        while let Some(parent) = cursor.parent() {
+            if matches!(
+                parent.kind(),
+                node_kind::CLASS_SPECIFIER | node_kind::STRUCT_SPECIFIER
+            ) {
+                if let Some(class_name_node) = parent.child_by_field_name("name") {
+                    if let Ok(class_name) = class_name_node.utf8_text(source) {
+                        return class_name == name;
+                    }
+                }
+                return false;
+            }
+            cursor = parent;
+        }
+        false
+    }
+
     fn is_snake_case(name: &str) -> bool {
         if name.is_empty() {
             return true;
@@ -1061,7 +1084,9 @@ impl Policy for NamingConventionsPolicy {
                                     continue;
                                 }
                             }
-                            if Self::is_ts_constructor(name_node, short, context.text.as_bytes()) {
+                            if Self::is_ts_constructor(name_node, short, context.text.as_bytes())
+                                || Self::is_ts_destructor(name_node, short, context.text.as_bytes())
+                            {
                                 continue;
                             }
                             Self::to_snake_case_into(short, &mut upper_pos_buf, &mut snake_buf);
