@@ -199,12 +199,32 @@ impl PolicyFactory {
                     .unwrap_or(true);
                 let standard = settings.string_value("standard").unwrap_or_else(|| "mj".to_string());
                 let std_table = settings.table_value("standards").and_then(|t| t.get(&standard).and_then(|v| v.as_table()));
-                let local_prefix = std_table.and_then(|t| t.get("local_prefix").and_then(|v| v.as_str())).unwrap_or("_");
-                let member_prefix = std_table.and_then(|t| t.get("member_prefix").and_then(|v| v.as_str())).unwrap_or("m_");
+                let get_prefix = |key: &str, default: &str| -> Box<str> {
+                    std_table.and_then(|t| t.get(key).and_then(|v| v.as_str())).unwrap_or(default).into()
+                };
+                let prefix_config = crate::policy::naming_conventions::PrefixConfig {
+                    local: get_prefix("local_prefix", "_"),
+                    member: get_prefix("member_prefix", "m_"),
+                    global: get_prefix("global_prefix", "g_"),
+                    static_lower: get_prefix("static_prefix", "s_"),
+                    static_upper: get_prefix("static_prefix_upper", "S_"),
+                    const_lower: get_prefix("const_prefix", "c_"),
+                    constexpr_upper: get_prefix("constexpr_prefix_upper", "C_"),
+                    volatile: get_prefix("volatile_prefix", "v_"),
+                    pointer: get_prefix("pointer_prefix", "p_"),
+                    shared_ptr: get_prefix("shared_ptr_prefix", "sp_"),
+                    unique_ptr: get_prefix("unique_ptr_prefix", "up_"),
+                    weak_ptr: get_prefix("weak_ptr_prefix", "wp_"),
+                    function: get_prefix("function_prefix", "f_"),
+                    reference: get_prefix("reference_prefix", "r_"),
+                    atomic: get_prefix("atomic_prefix", "a_"),
+                    enum_var: get_prefix("enum_var_prefix", "e_"),
+                    struct_var: get_prefix("struct_var_prefix", "t_"),
+                };
                 Box::new(NamingConventionsPolicy::new(
                     semantic,
                     semantic_strict,
-                ).with_prefixes(local_prefix, member_prefix))
+                ).with_prefix_config(prefix_config))
             }
             PolicyId::SnakeCase => {
                 let apply_target = settings
