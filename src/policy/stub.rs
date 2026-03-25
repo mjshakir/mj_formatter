@@ -18,12 +18,7 @@ impl Policy for StubPolicy {
         &self.name
     }
 
-    fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
-        PolicyResult {
-            text: context.text.to_string(),
-            violations: Vec::new(),
-            edits: Vec::new(),
-            warnings: vec![format!("{}: skipped ({})", self.name, self.reason)],
-        }
+    fn apply(&self, _context: &PolicyContext<'_>) -> PolicyResult {
+        PolicyResult::unchanged_with_warning(format!("{}: skipped ({})", self.name, self.reason))
     }
 }

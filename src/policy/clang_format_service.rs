@@ -140,8 +140,6 @@ impl ClangFormatService {
         }
         drop(child.stdin.take());
 
-        // Read stdout and stderr in a blocking manner, then wait.
-        // This avoids the 50ms polling loop of the old implementation.
         let mut stdout_bytes = Vec::new();
         let mut stderr_bytes = Vec::new();
 
@@ -155,7 +153,6 @@ impl ClangFormatService {
         let timeout = Duration::from_secs(CLANG_FORMAT_DEADLINE_SECS);
         let start = Instant::now();
 
-        // Wait for process exit with timeout check.
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -171,8 +168,6 @@ impl ClangFormatService {
                     return Err("clang_format timed out after 30s".to_string());
                 }
                 Ok(None) => {
-                    // stdout/stderr already drained — process should exit very quickly.
-                    // Brief yield instead of 50ms sleep.
                     std::thread::yield_now();
                 }
                 Err(err) => return Err(format!("clang_format execution failed: {err}")),

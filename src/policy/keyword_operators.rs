@@ -126,9 +126,7 @@ impl LogicalKeywordOperatorsPolicy {
         merged
     }
 
-    fn compute_line_starts(text: &str) -> Vec<usize> {
-        text_scan::line_starts(text, true)
-    }
+
 
     fn line_for_offset(line_starts: &[usize], offset: usize) -> usize {
         match line_starts.binary_search(&offset) {
@@ -201,7 +199,7 @@ impl LogicalKeywordOperatorsPolicy {
         if bytes.len() < 2 {
             return (Vec::new(), 0);
         }
-        let line_starts = Self::compute_line_starts(text);
+        let line_starts = text_scan::line_starts(text, true);
         let mut replacements = Vec::<Replacement>::new();
         let mut skipped_semantic_unsafe = 0usize;
 
@@ -300,48 +298,28 @@ impl Policy for LogicalKeywordOperatorsPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         if !self.replace_and && !self.replace_or {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let Some(tree) = context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "logical_keyword_operators: tree-sitter context unavailable".to_string()
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "logical_keyword_operators: tree-sitter context unavailable".to_string(),
+            );
         };
 
         if context.has_fatal_diags() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![format!(
-                    "logical_keyword_operators: skipped due fatal clang diagnostics (fatal={})",
-                    context.fatal_diag_count()
-                )],
-            };
+            return PolicyResult::unchanged_with_warning(format!(
+                "logical_keyword_operators: skipped due fatal clang diagnostics (fatal={})",
+                context.fatal_diag_count()
+            ));
         }
 
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "logical_keyword_operators: semantic context unavailable; skipping accuracy-unsafe replacement"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "logical_keyword_operators: semantic context unavailable; skipping accuracy-unsafe replacement"
+                    .to_string(),
+            );
         }
 
         let root = tree.root_node();
@@ -355,18 +333,13 @@ impl Policy for LogicalKeywordOperatorsPolicy {
             context.query_cache,
         );
         if replacements.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: if skipped_semantic_unsafe > 0 {
-                    vec![format!(
-                        "logical_keyword_operators: skipped {} semantic-unsafe replacement(s)",
-                        skipped_semantic_unsafe
-                    )]
-                } else {
-                    Vec::new()
-                },
+            return if skipped_semantic_unsafe > 0 {
+                PolicyResult::unchanged_with_warning(format!(
+                    "logical_keyword_operators: skipped {} semantic-unsafe replacement(s)",
+                    skipped_semantic_unsafe
+                ))
+            } else {
+                PolicyResult::unchanged()
             };
         }
 
@@ -396,6 +369,7 @@ impl Policy for LogicalKeywordOperatorsPolicy {
 
         PolicyResult {
             text: rewritten,
+            changed: true,
             violations: vec![Violation {
                 policy: self.name().into(),
                 message: "replaced logical operators with keyword forms where safe".to_string(),
@@ -452,7 +426,7 @@ mod tests {
             .with_tree(Some(&tree))
             .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, source);
+        assert!(!result.changed);
     }
 
     #[test]
@@ -484,7 +458,7 @@ mod tests {
             .with_tree(Some(&tree))
             .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, source);
+        assert!(!result.changed);
     }
 
     #[test]
@@ -498,7 +472,7 @@ mod tests {
             .with_tree(Some(&tree))
             .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, source);
+        assert!(!result.changed);
     }
 
     #[test]

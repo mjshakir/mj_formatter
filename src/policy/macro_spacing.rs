@@ -3,7 +3,9 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::policy::Policy;
-use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
+use std::borrow::Cow;
+
+use crate::policy::text_utils::join_lines_cow;
 
 pub struct LuaMacroSpacingPolicy;
 
@@ -12,7 +14,7 @@ impl LuaMacroSpacingPolicy {
         Self
     }
 
-    fn has_macro_header(lines: &[String], index: usize) -> bool {
+    fn has_macro_header(lines: &[Cow<'_, str>], index: usize) -> bool {
         if index < 1 || index + 1 >= lines.len() {
             return false;
         }
@@ -45,28 +47,20 @@ impl Policy for LuaMacroSpacingPolicy {
 
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         if !Self::is_cpp_source(context.path_str()) {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "lua_macro_spacing: semantic context unavailable; skipping heuristic edits"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "lua_macro_spacing: semantic context unavailable; skipping heuristic edits"
+                    .to_string(),
+            );
         }
 
-        let eol = detect_line_ending(context.text);
-        let (mut lines, trailing_newline) = split_lines(context.text);
+        let shared = context.shared.unwrap();
+        let eol = shared.line_ending();
+        let mut lines = shared.lines_cow();
+        let trailing_newline = shared.trailing_newline();
         let mut edits = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
 
@@ -83,7 +77,7 @@ impl Policy for LuaMacroSpacingPolicy {
                             index += 1;
                             continue;
                         }
-                        lines.insert(define_index, String::new());
+                        lines.insert(define_index, Cow::Owned(String::new()));
                         edits.push(Edit {
                             policy: self.name().into(),
                             line: define_index + 1,
@@ -105,12 +99,7 @@ impl Policy for LuaMacroSpacingPolicy {
                     skipped_semantic_unsafe
                 ));
             }
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits,
-                warnings,
-            };
+            return PolicyResult::unchanged_with_warnings(warnings);
         }
 
         let mut warnings = Vec::new();
@@ -121,7 +110,8 @@ impl Policy for LuaMacroSpacingPolicy {
             ));
         }
         PolicyResult {
-            text: join_lines(&lines, eol, trailing_newline),
+            text: join_lines_cow(&lines, eol, trailing_newline),
+            changed: true,
             violations: vec![Violation {
                 policy: self.name().into(),
                 message: "inserted blank line after macro section headers".to_string(),

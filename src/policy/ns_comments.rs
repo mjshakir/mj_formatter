@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use tree_sitter::{Node, StreamingIterator};
+use tree_sitter::Node;
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -10,7 +10,9 @@ use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
-use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
+use std::borrow::Cow;
+
+use crate::policy::text_utils::join_lines_cow;
 
 #[derive(Clone, Debug)]
 struct BlockCandidate {
@@ -233,35 +235,30 @@ impl NsCommentsPolicy {
             }
         };
 
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::BLOCK_QUERY).ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    process_node(capture.node, &mut blocks);
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
+        ts_traversal::query_or_traverse(
+            root,
+            Self::BLOCK_QUERY,
+            query_cache,
+            &[
+                node_kind::NAMESPACE_DEFINITION,
+                node_kind::CLASS_SPECIFIER,
+                node_kind::STRUCT_SPECIFIER,
+                node_kind::FUNCTION_DEFINITION,
+                node_kind::IF_STATEMENT,
+                node_kind::FOR_STATEMENT,
+                node_kind::WHILE_STATEMENT,
+                node_kind::SWITCH_STATEMENT,
+                node_kind::CATCH_CLAUSE,
+            ],
+            |node| {
                 process_node(node, &mut blocks);
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
+            },
+        );
 
         blocks
     }
 
-    fn line_edits(&self, before: &[String], after: &[String]) -> Vec<Edit> {
+    fn line_edits(&self, before: &[Cow<'_, str>], after: &[Cow<'_, str>]) -> Vec<Edit> {
         let mut edits = Vec::new();
         let shared = before.len().min(after.len());
         for idx in 0..shared {
@@ -271,8 +268,8 @@ impl NsCommentsPolicy {
             edits.push(Edit {
                 policy: self.name().into(),
                 line: idx + 1,
-                before: before[idx].clone(),
-                after: after[idx].clone(),
+                before: before[idx].to_string(),
+                after: after[idx].to_string(),
             });
         }
         edits
@@ -285,42 +282,29 @@ impl Policy for NsCommentsPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         let Some(tree) = &context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "namespace_end_comments: tree-sitter context unavailable".to_string()
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "namespace_end_comments: tree-sitter context unavailable".to_string(),
+            );
         };
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "namespace_end_comments: semantic context unavailable; skipping heuristic edits"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "namespace_end_comments: semantic context unavailable; skipping heuristic edits"
+                    .to_string(),
+            );
         }
 
         let root = tree.root_node();
         let blocks = self.collect_blocks(context.text, root, context.query_cache);
         if blocks.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
-        let eol = detect_line_ending(context.text);
-        let (mut lines, trailing_newline) = split_lines(context.text);
-        let before_lines = lines.clone();
+        let shared = context.shared.unwrap();
+        let eol = shared.line_ending();
+        let mut lines = shared.lines_cow();
+        let trailing_newline = shared.trailing_newline();
+        let before_lines: Vec<Cow<'_, str>> = lines.clone();
         let mut violations = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
 
@@ -329,11 +313,11 @@ impl Policy for NsCommentsPolicy {
                 continue;
             }
             let line_idx = block.close_line - 1;
-            if semantic_query.is_available() && semantic_query.is_macro_region(line_idx + 1, 1) {
+            if shared.is_macro_line(line_idx + 1) {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
                 continue;
             }
-            let original_line = lines[line_idx].clone();
+            let original_line = lines[line_idx].to_string();
             if !original_line.contains('}') {
                 continue;
             }
@@ -349,7 +333,7 @@ impl Policy for NsCommentsPolicy {
             };
 
             if updated != original_line {
-                lines[line_idx] = updated;
+                lines[line_idx] = Cow::Owned(updated);
                 violations.push(Violation {
                     policy: self.name().into(),
                     message: format!(
@@ -363,12 +347,7 @@ impl Policy for NsCommentsPolicy {
         }
 
         if lines == before_lines {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let edits = self.line_edits(before_lines.as_slice(), lines.as_slice());
@@ -380,7 +359,8 @@ impl Policy for NsCommentsPolicy {
             ));
         }
         PolicyResult {
-            text: join_lines(&lines, eol, trailing_newline),
+            text: join_lines_cow(&lines, eol, trailing_newline),
+            changed: true,
             violations,
             edits,
             warnings,
@@ -398,6 +378,7 @@ mod tests {
     use crate::model::policy_context::PolicyContext;
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticFileContext;
+    use crate::policy::shared_data::PolicySharedData;
 
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
@@ -430,10 +411,12 @@ mod tests {
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
         assert!(result.text.contains("} // end namespace demo"));
     }
@@ -445,12 +428,14 @@ mod tests {
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
     }
 
     #[test]
@@ -460,12 +445,14 @@ mod tests {
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
     }
 
     #[test]
@@ -475,12 +462,14 @@ mod tests {
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
     }
 
     #[test]
@@ -490,11 +479,13 @@ mod tests {
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
         let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
     }
 }

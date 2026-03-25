@@ -1,9 +1,8 @@
-use tree_sitter::{Node, StreamingIterator};
+use tree_sitter::Node;
 
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::parser::ts_traversal;
@@ -63,13 +62,6 @@ impl SnakeCasePolicy {
             && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
     }
 
-    fn is_keyword(name: &str) -> bool {
-        matches!(
-            name,
-            "if" | "for" | "while" | "switch" | "catch" | "return" | "template" | "constexpr"
-        )
-    }
-
     fn is_snake_case(name: &str) -> bool {
         if name.is_empty() {
             return true;
@@ -110,63 +102,21 @@ impl SnakeCasePolicy {
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
     ) -> Vec<Node<'a>> {
-        let mut nodes = Vec::new();
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::TARGET_QUERY).ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    nodes.push(capture.node);
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if matches!(
-                    node.kind(),
-                    node_kind::FUNCTION_DEFINITION
-                        | node_kind::DECLARATION
-                        | node_kind::FIELD_DECLARATION
-                        | node_kind::PARAMETER_DECLARATION
-                ) {
-                    nodes.push(node);
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
-        nodes
+        ts_traversal::query_or_traverse_collect(
+            root,
+            Self::TARGET_QUERY,
+            query_cache,
+            &[
+                node_kind::FUNCTION_DEFINITION,
+                node_kind::DECLARATION,
+                node_kind::FIELD_DECLARATION,
+                node_kind::PARAMETER_DECLARATION,
+            ],
+        )
     }
 
     fn declarator_identifier(decl_node: Node<'_>) -> Option<Node<'_>> {
-        let mut current = decl_node.child_by_field_name("declarator")?;
-        loop {
-            let kind = current.kind();
-            if kind == node_kind::IDENTIFIER || kind == node_kind::FIELD_IDENTIFIER {
-                return Some(current);
-            }
-            if let Some(child) = current.child_by_field_name("declarator") {
-                current = child;
-                continue;
-            }
-            for i in 0..current.child_count() {
-                if let Some(child) = current.child(i as u32) {
-                    let ck = child.kind();
-                    if ck == node_kind::IDENTIFIER || ck == node_kind::FIELD_IDENTIFIER {
-                        return Some(child);
-                    }
-                }
-            }
-            return None;
-        }
+        ts_traversal::declarator_identifier(decl_node)
     }
 }
 
@@ -176,21 +126,11 @@ impl Policy for SnakeCasePolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         let Some(tree) = context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec!["snake_case: tree-sitter context unavailable".to_string()],
-            };
+            return PolicyResult::unchanged_with_warning("snake_case: tree-sitter context unavailable".to_string());
         };
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec!["snake_case: semantic context unavailable".to_string()],
-            };
+            return PolicyResult::unchanged_with_warning("snake_case: semantic context unavailable".to_string());
         }
 
         let mut violations = Vec::new();
@@ -222,25 +162,23 @@ impl Policy for SnakeCasePolicy {
                         let line = name_node.start_position().row + 1;
                         let column = name_node.start_position().column + 1;
                         let allowed = [
-                            ClangSymbolKind::Function,
-                            ClangSymbolKind::Method,
-                            ClangSymbolKind::Constructor,
-                            ClangSymbolKind::Destructor,
+                            clang_sys::CXCursor_FunctionDecl,
+                            clang_sys::CXCursor_CXXMethod,
+                            clang_sys::CXCursor_Constructor,
+                            clang_sys::CXCursor_Destructor,
                         ];
                         let Some(symbol) = semantic_query.symbol_at(line, column, &allowed) else {
                             continue;
                         };
-                        if matches!(
-                            symbol.kind,
-                            ClangSymbolKind::Constructor | ClangSymbolKind::Destructor
-                        ) {
+                        if symbol.kind == clang_sys::CXCursor_Constructor
+                            || symbol.kind == clang_sys::CXCursor_Destructor
+                        {
                             continue;
                         }
                         let short_name = symbol.name.split("::").last().unwrap_or(name);
                         if !short_name.starts_with("operator")
                             && !short_name.starts_with('~')
                             && !short_name.contains('<')
-                            && !Self::is_keyword(short_name)
                             && !self.should_exclude_type_like(short_name)
                             && !Self::is_snake_case(short_name)
                         {
@@ -271,15 +209,14 @@ impl Policy for SnakeCasePolicy {
                     let line = name_node.start_position().row + 1;
                     let column = name_node.start_position().column + 1;
                     let allowed = [
-                        ClangSymbolKind::Variable,
-                        ClangSymbolKind::Field,
-                        ClangSymbolKind::Parameter,
+                        clang_sys::CXCursor_VarDecl,
+                        clang_sys::CXCursor_FieldDecl,
+                        clang_sys::CXCursor_ParmDecl,
                     ];
                     if semantic_query.symbol_at(line, column, &allowed).is_none() {
                         continue;
                     }
-                    if !Self::is_keyword(name)
-                        && !self.should_exclude_type_like(name)
+                    if !self.should_exclude_type_like(name)
                         && !Self::is_snake_case(name)
                     {
                         violations.push(Violation {
@@ -307,10 +244,10 @@ impl Policy for SnakeCasePolicy {
         }
 
         PolicyResult {
-            text: context.text.to_string(),
+            changed: false,
             violations,
-            edits: Vec::new(),
             warnings,
+            ..Default::default()
         }
     }
 }
@@ -325,7 +262,6 @@ mod tests {
     use crate::model::policy_context::PolicyContext;
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
     use crate::parser::clang_symbol::ClangSymbol;
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticFileContext;
 
@@ -393,11 +329,18 @@ mod tests {
             Vec::new(),
             vec![ClangSymbol {
                 name: "DifferentName".to_string(),
-                kind: ClangSymbolKind::Variable,
+                kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
                 column: 5,
                 usr: None,
                 scope_usr: None,
+                storage_class: None,
+                is_const: false,
+                is_volatile: false,
+                type_kind: clang_sys::CXType_Unexposed,
+                type_display: String::new(),
+            canonical_type_kind: clang_sys::CXType_Unexposed,
+            template_name: None,
             }],
             ClangDiagnosticSummary::default(),
             Vec::new(),

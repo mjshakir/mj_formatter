@@ -236,14 +236,18 @@ impl ProjectGraphStore {
         }
         let before = GraphShape::from_state(&to_persist);
         if self.options.prune_enabled {
-            to_persist.compact(
-                now_unix_ms,
-                self.options.retention_ms,
-                self.options.max_nodes,
-                self.options.max_edges,
-                self.options.tombstone_enabled,
-                self.options.tombstone_retention_ms,
-            );
+            let needs_compact = to_persist.nodes.len() > self.options.max_nodes * 4 / 5
+                || to_persist.edges.len() > self.options.max_edges * 4 / 5;
+            if needs_compact {
+                to_persist.compact(
+                    now_unix_ms,
+                    self.options.retention_ms,
+                    self.options.max_nodes,
+                    self.options.max_edges,
+                    self.options.tombstone_enabled,
+                    self.options.tombstone_retention_ms,
+                );
+            }
         }
         let after = GraphShape::from_state(&to_persist);
         let payload = PersistedProjectGraph {

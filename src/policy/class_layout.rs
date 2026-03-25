@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tree_sitter::{Node, StreamingIterator};
+use tree_sitter::Node;
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -246,37 +246,12 @@ impl ClassLayoutPolicy {
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
     ) -> Vec<Node<'a>> {
-        let mut nodes = Vec::new();
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::CLASS_QUERY).ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    nodes.push(capture.node);
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if matches!(
-                    node.kind(),
-                    node_kind::CLASS_SPECIFIER | node_kind::STRUCT_SPECIFIER
-                ) {
-                    nodes.push(node);
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
-        nodes
+        ts_traversal::query_or_traverse_collect(
+            root,
+            Self::CLASS_QUERY,
+            query_cache,
+            &[node_kind::CLASS_SPECIFIER, node_kind::STRUCT_SPECIFIER],
+        )
     }
 
     fn extract_source_function_name(node: Node<'_>, text: &str) -> Option<String> {
@@ -333,34 +308,12 @@ impl ClassLayoutPolicy {
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
     ) -> Vec<Node<'a>> {
-        let mut nodes = Vec::new();
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile("(function_definition) @func").ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    nodes.push(capture.node);
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if node.kind() == node_kind::FUNCTION_DEFINITION {
-                    nodes.push(node);
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
-        nodes
+        ts_traversal::query_or_traverse_collect(
+            root,
+            "(function_definition) @func",
+            query_cache,
+            &[node_kind::FUNCTION_DEFINITION],
+        )
     }
 }
 
@@ -370,53 +323,28 @@ impl Policy for ClassLayoutPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         if !self.is_source_file(context.path_str()) {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "class_layout: semantic context unavailable; skipping heuristic reordering"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "class_layout: semantic context unavailable; skipping heuristic reordering"
+                    .to_string(),
+            );
         }
 
         let Some(source_tree) = &context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec!["class_layout: tree-sitter context unavailable".to_string()],
-            };
+            return PolicyResult::unchanged_with_warning("class_layout: tree-sitter context unavailable".to_string());
         };
 
         let Some(header_path) = self.find_header(context.path) else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         };
 
         let header_text = match fs::read_to_string(&header_path) {
             Ok(text) => text,
             Err(err) => {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: vec![format!("class_layout: failed to read header: {err}")],
-                }
+                return PolicyResult::unchanged_with_warning(format!("class_layout: failed to read header: {err}"));
             }
         };
 
@@ -426,24 +354,14 @@ impl Policy for ClassLayoutPolicy {
         {
             Ok(tree) => tree,
             Err(err) => {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: vec![format!("class_layout: header parse failed: {err}")],
-                };
+                return PolicyResult::unchanged_with_warning(format!("class_layout: header parse failed: {err}"));
             }
         };
 
         let header_order =
             self.extract_header_order(&header_text, header_tree.root_node(), context.query_cache);
         if header_order.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let source_blocks = self.extract_source_blocks(
@@ -452,12 +370,7 @@ impl Policy for ClassLayoutPolicy {
             context.query_cache,
         );
         if source_blocks.len() < 2 {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let order_set: HashSet<&str> = header_order
@@ -473,27 +386,17 @@ impl Policy for ClassLayoutPolicy {
             .filter(|item| order_set.contains(item.full_name.as_str()))
             .collect();
         if candidates.len() < 2 {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
-        if semantic_query.is_available()
-            && candidates.iter().any(|item| {
-                (item.start_line..=item.end_line)
-                    .any(|line| semantic_query.is_macro_region(line, 1))
-            })
+        let shared = context.shared.unwrap();
+        if candidates.iter().any(|item| {
+            (item.start_line..=item.end_line)
+                .any(|line| shared.is_macro_line(line))
+        })
         {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "class_layout: skipped macro-region method block(s)".to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "class_layout: skipped macro-region method block(s)".to_string(),
+            );
         }
         candidates.sort_by_key(|item| item.start);
 
@@ -516,12 +419,7 @@ impl Policy for ClassLayoutPolicy {
         }
 
         if ordered_blocks.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let consumed: HashSet<(usize, usize)> = ordered_blocks
@@ -544,12 +442,7 @@ impl Policy for ClassLayoutPolicy {
             .map(|item| item.end)
             .unwrap_or(region_start);
         if region_end <= region_start || region_end > context.text.len() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let mut replacement = String::new();
@@ -570,12 +463,7 @@ impl Policy for ClassLayoutPolicy {
 
         let original_region = context.text[region_start..region_end].to_string();
         if original_region.trim_end() == replacement.trim_end() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let mut updated = String::new();
@@ -585,6 +473,7 @@ impl Policy for ClassLayoutPolicy {
 
         PolicyResult {
             text: updated,
+            changed: true,
             violations: vec![Violation {
                 policy: self.name().into(),
                 message: "Reordered class member implementations to match header declaration order with access-level sections".to_string(),
@@ -635,7 +524,7 @@ mod tests {
             .with_tree(Some(&tree))
             .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
     }
 }

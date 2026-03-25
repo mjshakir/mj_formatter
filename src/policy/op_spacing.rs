@@ -1,168 +1,91 @@
-use std::collections::HashSet;
-
-use tree_sitter::{Node, StreamingIterator};
+use tree_sitter::Node;
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_traversal;
 use crate::policy::Policy;
-use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
-use crate::parser::text_scan;
+use std::borrow::Cow;
+
+use crate::policy::text_utils::join_lines_cow;
 
 pub struct OperatorOverloadSpacingPolicy;
+
+struct OperatorSpan {
+    byte_start: usize,
+    byte_end: usize,
+    line: usize,
+}
 
 impl OperatorOverloadSpacingPolicy {
     pub fn new() -> Self {
         Self
     }
 
-    fn is_identifier_char(ch: u8) -> bool {
-        ch.is_ascii_alphanumeric() || ch == b'_'
-    }
+    const OPERATOR_QUERY: &str = r#"(operator_name) @op"#;
 
-    fn is_operator_token_start(ch: u8) -> bool {
-        matches!(
-            ch,
-            b'<' | b'>'
-                | b'-'
-                | b'='
-                | b'!'
-                | b'&'
-                | b'|'
-                | b'+'
-                | b'*'
-                | b'/'
-                | b'%'
-                | b'^'
-                | b'~'
-                | b'('
-                | b')'
-                | b'['
-                | b']'
-                | b','
-        )
-    }
-
-    fn consume_operator_token(bytes: &[u8], mut start: usize) -> usize {
-        if start >= bytes.len() {
-            return start;
-        }
-        if bytes[start] == b'(' && start + 1 < bytes.len() && bytes[start + 1] == b')' {
-            return start + 2;
-        }
-        if bytes[start] == b'[' && start + 1 < bytes.len() && bytes[start + 1] == b']' {
-            return start + 2;
-        }
-        if !Self::is_operator_token_start(bytes[start]) {
-            return start;
-        }
-
-        start += 1;
-        while start < bytes.len() && Self::is_operator_token_start(bytes[start]) {
-            start += 1;
-        }
-        start
-    }
-
-    fn normalize_line(line: &str) -> String {
-        if !line.contains("operator") {
-            return line.to_string();
-        }
-
-        const OPERATOR: &[u8] = b"operator";
-        let bytes = line.as_bytes();
-        let mut out = String::with_capacity(line.len());
-        let mut cursor = 0usize;
-
-        while let Some(op_start) = text_scan::find_subslice_from(bytes, OPERATOR, cursor) {
-            let op_end = op_start + "operator".len();
-
-            if op_start > 0 && Self::is_identifier_char(bytes[op_start - 1]) {
-                out.push_str(&line[cursor..op_end]);
-                cursor = op_end;
-                continue;
-            }
-
-            let mut token_start = op_end;
-            while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
-                token_start += 1;
-            }
-            let token_end = Self::consume_operator_token(bytes, token_start);
-            if token_end == token_start {
-                out.push_str(&line[cursor..op_end]);
-                cursor = op_end;
-                continue;
-            }
-
-            out.push_str(&line[cursor..op_end]);
-            out.push_str(&line[token_start..token_end]);
-            cursor = token_end;
-        }
-
-        out.push_str(&line[cursor..]);
-        out
-    }
-
-    const OPERATOR_QUERY: &str = r#"[
-        (function_declarator) @decl
-        (operator_name) @decl
-        (operator_cast) @decl
-    ]"#;
-
-    fn collect_candidate_lines(
+    fn collect_operator_spans(
         root: Node<'_>,
         text: &str,
         query_cache: Option<&TsQueryCache>,
-    ) -> HashSet<usize> {
-        let mut result = HashSet::new();
+    ) -> Vec<OperatorSpan> {
+        let mut spans = Vec::new();
 
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::OPERATOR_QUERY).ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    let snippet = capture.node.utf8_text(text.as_bytes()).unwrap_or("");
-                    if snippet.contains("operator") {
-                        let start = capture.node.start_position().row;
-                        let end = capture.node.end_position().row;
-                        for line_idx in start..=end {
-                            result.insert(line_idx);
-                        }
-                    }
+        ts_traversal::query_or_traverse(
+            root,
+            Self::OPERATOR_QUERY,
+            query_cache,
+            &["operator_name"],
+            |node| {
+                let snippet = node.utf8_text(text.as_bytes()).unwrap_or("");
+                if snippet.contains("operator") {
+                    spans.push(OperatorSpan {
+                        byte_start: node.start_byte(),
+                        byte_end: node.end_byte(),
+                        line: node.start_position().row,
+                    });
                 }
-            }
+            },
+        );
+
+        spans
+    }
+
+    fn canonical_from_clang(
+        context: &PolicyContext<'_>,
+        line: usize,
+    ) -> Option<String> {
+        let clang = context.clang_parse_result?;
+        let symbol = clang.symbol_on_line_by_kinds(
+            line,
+            &[
+                clang_sys::CXCursor_CXXMethod,
+                clang_sys::CXCursor_FunctionDecl,
+                clang_sys::CXCursor_FunctionTemplate,
+            ],
+        )?;
+        if symbol.name.starts_with("operator") {
+            Some(symbol.name.clone())
         } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if matches!(
-                    node.kind(),
-                    "function_declarator" | "operator_name" | "operator_cast"
-                ) {
-                    let snippet = node.utf8_text(text.as_bytes()).unwrap_or("");
-                    if snippet.contains("operator") {
-                        let start = node.start_position().row;
-                        let end = node.end_position().row;
-                        for line_idx in start..=end {
-                            result.insert(line_idx);
-                        }
-                    }
-                }
-                for child_idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(child_idx as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
+            None
         }
+    }
 
-        result
+    fn canonical_from_text(node_text: &str) -> String {
+        let Some(rest) = node_text.strip_prefix("operator") else {
+            return node_text.to_string();
+        };
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return node_text.to_string();
+        }
+        if trimmed.as_bytes()[0].is_ascii_alphanumeric() || trimmed.as_bytes()[0] == b'_' {
+            format!("operator {trimmed}")
+        } else {
+            format!("operator{trimmed}")
+        }
     }
 }
 
@@ -172,70 +95,74 @@ impl Policy for OperatorOverloadSpacingPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         let Some(tree) = context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "operator_overload_spacing: tree-sitter context unavailable".to_string()
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "operator_overload_spacing: tree-sitter context unavailable".to_string(),
+            );
         };
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "operator_overload_spacing: semantic context unavailable; skipping heuristic edits"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "operator_overload_spacing: semantic context unavailable; skipping heuristic edits"
+                    .to_string(),
+            );
         }
 
-        let eol = detect_line_ending(context.text);
-        let (mut lines, trailing_newline) = split_lines(context.text);
+        let shared = context.shared.unwrap();
+        let eol = shared.line_ending();
+        let mut lines = shared.lines_cow();
+        let trailing_newline = shared.trailing_newline();
         let mut edits = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
 
-        let mut candidate_lines =
-            Self::collect_candidate_lines(tree.root_node(), context.text, context.query_cache)
-            .into_iter()
-            .collect::<Vec<_>>();
-        candidate_lines.sort_unstable();
+        let mut spans =
+            Self::collect_operator_spans(tree.root_node(), context.text, context.query_cache);
+        spans.sort_by(|a, b| a.byte_start.cmp(&b.byte_start));
 
-        for idx in candidate_lines {
-            if idx >= lines.len() {
+        for span in &spans {
+            if span.line >= lines.len() {
                 continue;
             }
-            if semantic_query.is_available() && semantic_query.is_macro_region(idx + 1, 1) {
+            if shared.is_macro_line(span.line + 1) {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
                 continue;
             }
-            let original = lines[idx].clone();
-            if !original.contains("operator") {
-                continue;
-            }
-            let updated = Self::normalize_line(&original);
-            if updated != original {
-                lines[idx] = updated.clone();
-                edits.push(Edit {
-                    policy: self.name().into(),
-                    line: idx + 1,
-                    before: original,
-                    after: updated,
-                });
+
+            let node_text = &context.text[span.byte_start..span.byte_end];
+
+            let canonical = Self::canonical_from_clang(context, span.line + 1)
+                .unwrap_or_else(|| Self::canonical_from_text(node_text));
+
+            if canonical != node_text {
+                let original = lines[span.line].to_string();
+                let line_start = context.text[..span.byte_start]
+                    .rfind('\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let local_start = span.byte_start - line_start;
+                let local_end = span.byte_end - line_start;
+
+                let orig_bytes = original.as_bytes();
+                if local_end <= orig_bytes.len() {
+                    let mut updated = String::with_capacity(original.len());
+                    updated.push_str(&original[..local_start]);
+                    updated.push_str(&canonical);
+                    updated.push_str(&original[local_end..]);
+
+                    if updated != original {
+                        lines[span.line] = Cow::Owned(updated.clone());
+                        edits.push(Edit {
+                            policy: self.name().into(),
+                            line: span.line + 1,
+                            before: original,
+                            after: updated,
+                        });
+                    }
+                }
             }
         }
 
         if edits.is_empty() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits,
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
 
         let mut warnings = Vec::new();
@@ -247,7 +174,8 @@ impl Policy for OperatorOverloadSpacingPolicy {
         }
 
         PolicyResult {
-            text: join_lines(&lines, eol, trailing_newline),
+            text: join_lines_cow(&lines, eol, trailing_newline),
+            changed: true,
             violations: vec![Violation {
                 policy: self.name().into(),
                 message: "normalized operator overload spacing".to_string(),
@@ -270,6 +198,7 @@ mod tests {
     use crate::model::policy_context::PolicyContext;
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticFileContext;
+    use crate::policy::shared_data::PolicySharedData;
 
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
@@ -302,10 +231,12 @@ mod tests {
         let source = "struct X { X operator +(const X& rhs) const; };\n";
         let tree = parse_cpp(source);
         let (clang, semantic) = semantic_for(source, &path, &tree);
+        let shared = PolicySharedData::new(source, None);
         let ctx = PolicyContext::new(source, &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
         assert_eq!(
             result.text,
@@ -320,11 +251,13 @@ mod tests {
         let source = "struct X { explicit operator bool() const; };\n";
         let tree = parse_cpp(source);
         let (clang, semantic) = semantic_for(source, &path, &tree);
+        let shared = PolicySharedData::new(source, None);
         let ctx = PolicyContext::new(source, &path)
             .with_tree(Some(&tree))
             .with_clang(Some(&*clang))
-            .with_semantic(Some(&semantic));
+            .with_semantic(Some(&semantic))
+            .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, source);
+        assert!(!result.changed);
     }
 }

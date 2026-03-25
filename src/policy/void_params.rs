@@ -1,4 +1,4 @@
-use tree_sitter::{Node, StreamingIterator};
+use tree_sitter::Node;
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -43,35 +43,7 @@ impl FunctionVoidParamsPolicy {
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
     ) -> Vec<Node<'a>> {
-        let mut nodes = Vec::new();
-
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile("(function_declarator) @decl").ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    nodes.push(capture.node);
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if node.kind() == node_kind::FUNCTION_DECLARATOR {
-                    nodes.push(node);
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
-        nodes
+        ts_traversal::query_or_traverse_collect(root, "(function_declarator) @decl", query_cache, &[node_kind::FUNCTION_DECLARATOR])
     }
 
     fn line_edits(before: &str, after: &str) -> Vec<Edit> {
@@ -100,25 +72,15 @@ impl Policy for FunctionVoidParamsPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         let Some(tree) = context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec!["function_void_params: tree-sitter context unavailable".to_string()],
-            };
+            return PolicyResult::unchanged_with_warning("function_void_params: tree-sitter context unavailable".to_string());
         };
 
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "function_void_params: semantic context unavailable; skipping heuristic edits"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "function_void_params: semantic context unavailable; skipping heuristic edits"
+                    .to_string(),
+            );
         }
         let mut replacements: Vec<(usize, usize, String)> = Vec::new();
         let mut violations = Vec::new();
@@ -222,10 +184,10 @@ impl Policy for FunctionVoidParamsPolicy {
 
         if replacements.is_empty() {
             return PolicyResult {
-                text: context.text.to_string(),
+                changed: false,
                 violations,
-                edits: Vec::new(),
                 warnings,
+                ..Default::default()
             };
         }
 
@@ -239,6 +201,7 @@ impl Policy for FunctionVoidParamsPolicy {
 
         PolicyResult {
             text: updated,
+            changed: true,
             violations,
             edits,
             warnings,

@@ -1,11 +1,15 @@
 use std::collections::HashSet;
 
+use tree_sitter::{Node, Tree};
+
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::policy::Policy;
-use crate::policy::text_utils::{detect_line_ending, join_lines, split_lines};
+use std::borrow::Cow;
+
+use crate::policy::text_utils::join_lines_cow;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IncludeGuardMode {
@@ -44,14 +48,48 @@ impl IncludeGuardsPolicy {
             .any(|ext| lower.ends_with(ext.as_str()))
     }
 
-    fn has_pragma_once(lines: &[String]) -> bool {
+    fn has_pragma_once_ts(tree: &Tree, source: &[u8]) -> bool {
+        let root = tree.root_node();
+        for i in 0..root.child_count() {
+            let Some(child) = root.child(i as u32) else {
+                continue;
+            };
+            if child.kind() != "preproc_call" {
+                continue;
+            }
+            if let Some(directive) = child.child_by_field_name("directive") {
+                if let Ok(text) = directive.utf8_text(source) {
+                    if text == "#pragma" {
+                        if let Some(argument) = child.child_by_field_name("argument") {
+                            if let Ok(arg) = argument.utf8_text(source) {
+                                if arg.trim() == "once" {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn has_pragma_once_fallback(lines: &[Cow<'_, str>]) -> bool {
         lines
             .iter()
             .take(32)
             .any(|line| line.trim().eq_ignore_ascii_case("#pragma once"))
     }
 
-    fn find_top_insert(lines: &[String]) -> usize {
+    fn has_pragma_once(tree: Option<&Tree>, source: &[u8], lines: &[Cow<'_, str>]) -> bool {
+        if let Some(tree) = tree {
+            Self::has_pragma_once_ts(tree, source)
+        } else {
+            Self::has_pragma_once_fallback(lines)
+        }
+    }
+
+    fn find_top_insert(lines: &[Cow<'_, str>]) -> usize {
         let mut idx = 0usize;
         while idx < lines.len() {
             let trimmed = lines[idx].trim();
@@ -95,7 +133,51 @@ impl IncludeGuardsPolicy {
         macro_name
     }
 
-    fn has_include_guard(lines: &[String]) -> bool {
+    fn has_include_guard_ts(tree: &Tree, source: &[u8]) -> bool {
+        let root = tree.root_node();
+        for i in 0..root.child_count() {
+            let Some(child) = root.child(i as u32) else {
+                continue;
+            };
+            if child.kind() != "preproc_ifdef" {
+                continue;
+            }
+            let Some(name_node) = child.child_by_field_name("name") else {
+                continue;
+            };
+            let Ok(ifndef_name) = name_node.utf8_text(source) else {
+                continue;
+            };
+            if ifndef_name.is_empty() {
+                continue;
+            }
+            if Self::has_matching_define(&child, source, ifndef_name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_matching_define(ifdef_node: &Node<'_>, source: &[u8], guard_name: &str) -> bool {
+        for i in 0..ifdef_node.child_count() {
+            let Some(child) = ifdef_node.child(i as u32) else {
+                continue;
+            };
+            if child.kind() != "preproc_def" {
+                continue;
+            }
+            if let Some(name_node) = child.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    if name == guard_name {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn has_include_guard_fallback(lines: &[Cow<'_, str>]) -> bool {
         if lines.len() < 3 {
             return false;
         }
@@ -124,6 +206,14 @@ impl IncludeGuardsPolicy {
             _ => false,
         }
     }
+
+    fn has_include_guard(tree: Option<&Tree>, source: &[u8], lines: &[Cow<'_, str>]) -> bool {
+        if let Some(tree) = tree {
+            Self::has_include_guard_ts(tree, source)
+        } else {
+            Self::has_include_guard_fallback(lines)
+        }
+    }
 }
 
 impl Policy for IncludeGuardsPolicy {
@@ -133,34 +223,28 @@ impl Policy for IncludeGuardsPolicy {
 
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         if !self.is_header(context.path_str()) {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: Vec::new(),
-            };
+            return PolicyResult::unchanged();
         }
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "include_guards: semantic context unavailable; skipping heuristic edits"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "include_guards: semantic context unavailable; skipping heuristic edits"
+                    .to_string(),
+            );
         }
 
-        let eol = detect_line_ending(context.text);
-        let (mut lines, trailing_newline) = split_lines(context.text);
+        let shared = context.shared.unwrap();
+        let eol = shared.line_ending();
+        let mut lines = shared.lines_cow();
+        let trailing_newline = shared.trailing_newline();
         let mut edits = Vec::new();
         let mut violations = Vec::new();
         let mut skipped_semantic_unsafe = 0usize;
 
-        let has_pragma = Self::has_pragma_once(&lines);
-        let has_guard = Self::has_include_guard(&lines);
+        let tree = context.tree_sitter_tree;
+        let source = context.text.as_bytes();
+        let has_pragma = Self::has_pragma_once(tree, source, &lines);
+        let has_guard = Self::has_include_guard(tree, source, &lines);
 
         if matches!(
             self.mode,
@@ -171,7 +255,7 @@ impl Policy for IncludeGuardsPolicy {
             if !semantic_query.is_safe_global(insert + 1, 1) {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
             } else {
-                lines.insert(insert, "#pragma once".to_string());
+                lines.insert(insert, Cow::Owned("#pragma once".to_string()));
                 edits.push(Edit {
                     policy: self.name().into(),
                     line: insert + 1,
@@ -199,12 +283,12 @@ impl Policy for IncludeGuardsPolicy {
                 skipped_semantic_unsafe = skipped_semantic_unsafe.saturating_add(1);
             } else {
                 let guard = Self::derive_macro(context.path_str());
-                lines.insert(0, format!("#define {guard}"));
-                lines.insert(0, format!("#ifndef {guard}"));
+                lines.insert(0, Cow::Owned(format!("#define {guard}")));
+                lines.insert(0, Cow::Owned(format!("#ifndef {guard}")));
                 if !lines.last().is_some_and(|line| line.trim().is_empty()) {
-                    lines.push(String::new());
+                    lines.push(Cow::Owned(String::new()));
                 }
-                lines.push(format!("#endif  // {guard}"));
+                lines.push(Cow::Owned(format!("#endif  // {guard}")));
 
                 edits.push(Edit {
                     policy: self.name().into(),
@@ -229,12 +313,7 @@ impl Policy for IncludeGuardsPolicy {
                     skipped_semantic_unsafe
                 ));
             }
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings,
-            };
+            return PolicyResult::unchanged_with_warnings(warnings);
         }
 
         let mut warnings = Vec::new();
@@ -245,7 +324,8 @@ impl Policy for IncludeGuardsPolicy {
             ));
         }
         PolicyResult {
-            text: join_lines(&lines, eol, trailing_newline),
+            text: join_lines_cow(&lines, eol, trailing_newline),
+            changed: true,
             violations,
             edits,
             warnings,
@@ -261,6 +341,7 @@ mod tests {
     use super::*;
     use crate::model::policy_context::PolicyContext;
     use crate::parser::file_context::SemanticFileContext;
+    use crate::policy::shared_data::PolicySharedData;
 
     #[test]
     fn adds_pragma_once() {
@@ -270,8 +351,9 @@ mod tests {
         let text = "class A {};\n".to_string();
         let path = PathBuf::from("a.hpp");
         let semantic = SemanticFileContext::default();
+        let shared = PolicySharedData::new(text.as_str(), None);
         let ctx =
-            PolicyContext::new(text.as_str(), &path).with_semantic(Some(&semantic));
+            PolicyContext::new(text.as_str(), &path).with_semantic(Some(&semantic)).with_shared(Some(&shared));
         let result = policy.apply(&ctx);
         assert!(result.text.contains("#pragma once"));
     }
