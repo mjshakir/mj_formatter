@@ -337,6 +337,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "clang",
+ "clang-sys",
  "clap",
  "crc32fast",
  "crossbeam-channel",

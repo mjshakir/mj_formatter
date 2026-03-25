@@ -11,7 +11,8 @@ anyhow = "1.0"
 smallvec = { version = "1.15", features = ["serde"] }
 arc-swap = "1.9"
 postcard = { version = "1.1", features = ["alloc"] }
-clang = { version = "2.0", features = ["runtime"] }
+clang = { version = "2.0", features = ["runtime", "clang_10_0"] }
+clang-sys = { version = "1.8", features = ["runtime", "clang_10_0"] }
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5"
 crossbeam-channel = "0.5"
