@@ -1,8 +1,5 @@
 pub mod accuracy_gate;
-pub mod adaptive_rules;
 pub mod catalog;
-pub mod certainty_filter;
-pub mod confidence_context;
 pub mod conflict_detector;
 pub mod conflict_solver;
 pub mod context_tracker;
@@ -10,9 +7,6 @@ pub mod convergence;
 pub mod coordinator;
 pub mod edit_candidate;
 pub mod edit_guard;
-pub mod filter_store;
-pub mod fuzzy_inference;
-pub mod mat5;
 pub mod gate_decision;
 pub mod pipeline;
 pub mod population_context;
