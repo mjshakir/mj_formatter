@@ -2,6 +2,119 @@
 
 const NUM_RULES: usize = 9;
 
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn rls_matvec(p: &[[f64; NUM_RULES]; NUM_RULES], phi: &[f64; NUM_RULES]) -> [f64; NUM_RULES] {
+    unsafe {
+        use core::arch::aarch64::*;
+        let phi01 = vld1q_f64(phi.as_ptr());
+        let phi23 = vld1q_f64(phi.as_ptr().add(2));
+        let phi45 = vld1q_f64(phi.as_ptr().add(4));
+        let phi67 = vld1q_f64(phi.as_ptr().add(6));
+        let mut result = [0.0f64; NUM_RULES];
+        for i in 0..NUM_RULES {
+            let row = &p[i];
+            let mut acc = vmulq_f64(vld1q_f64(row.as_ptr()), phi01);
+            acc = vfmaq_f64(acc, vld1q_f64(row.as_ptr().add(2)), phi23);
+            acc = vfmaq_f64(acc, vld1q_f64(row.as_ptr().add(4)), phi45);
+            acc = vfmaq_f64(acc, vld1q_f64(row.as_ptr().add(6)), phi67);
+            result[i] = vaddvq_f64(acc) + row[8] * phi[8];
+        }
+        result
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn rls_matvec(p: &[[f64; NUM_RULES]; NUM_RULES], phi: &[f64; NUM_RULES]) -> [f64; NUM_RULES] {
+    unsafe {
+        use core::arch::x86_64::*;
+        let phi01 = _mm_loadu_pd(phi.as_ptr());
+        let phi23 = _mm_loadu_pd(phi.as_ptr().add(2));
+        let phi45 = _mm_loadu_pd(phi.as_ptr().add(4));
+        let phi67 = _mm_loadu_pd(phi.as_ptr().add(6));
+        let mut result = [0.0f64; NUM_RULES];
+        for i in 0..NUM_RULES {
+            let row = &p[i];
+            let mut acc = _mm_mul_pd(_mm_loadu_pd(row.as_ptr()), phi01);
+            acc = _mm_add_pd(acc, _mm_mul_pd(_mm_loadu_pd(row.as_ptr().add(2)), phi23));
+            acc = _mm_add_pd(acc, _mm_mul_pd(_mm_loadu_pd(row.as_ptr().add(4)), phi45));
+            acc = _mm_add_pd(acc, _mm_mul_pd(_mm_loadu_pd(row.as_ptr().add(6)), phi67));
+            result[i] = _mm_cvtsd_f64(_mm_add_sd(acc, _mm_unpackhi_pd(acc, acc))) + row[8] * phi[8];
+        }
+        result
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline(always)]
+fn rls_matvec(p: &[[f64; NUM_RULES]; NUM_RULES], phi: &[f64; NUM_RULES]) -> [f64; NUM_RULES] {
+    let mut result = [0.0f64; NUM_RULES];
+    for i in 0..NUM_RULES {
+        for j in 0..NUM_RULES {
+            result[i] += p[i][j] * phi[j];
+        }
+    }
+    result
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn rls_update_p(p: &mut [[f64; NUM_RULES]; NUM_RULES], p_phi: &[f64; NUM_RULES], denom: f64, lambda: f64) {
+    unsafe {
+        use core::arch::aarch64::*;
+        let inv_denom = vdupq_n_f64(1.0 / denom);
+        let inv_lambda = vdupq_n_f64(1.0 / lambda);
+        let pphi01 = vld1q_f64(p_phi.as_ptr());
+        let pphi23 = vld1q_f64(p_phi.as_ptr().add(2));
+        let pphi45 = vld1q_f64(p_phi.as_ptr().add(4));
+        let pphi67 = vld1q_f64(p_phi.as_ptr().add(6));
+        for i in 0..NUM_RULES {
+            let ki = vmulq_f64(vdupq_n_f64(p_phi[i]), inv_denom);
+            let row = &mut p[i];
+            // (p[i][j] - p_phi[i] * p_phi[j] / denom) / lambda
+            vst1q_f64(row.as_mut_ptr(),       vmulq_f64(vsubq_f64(vld1q_f64(row.as_ptr()),       vmulq_f64(ki, pphi01)), inv_lambda));
+            vst1q_f64(row.as_mut_ptr().add(2), vmulq_f64(vsubq_f64(vld1q_f64(row.as_ptr().add(2)), vmulq_f64(ki, pphi23)), inv_lambda));
+            vst1q_f64(row.as_mut_ptr().add(4), vmulq_f64(vsubq_f64(vld1q_f64(row.as_ptr().add(4)), vmulq_f64(ki, pphi45)), inv_lambda));
+            vst1q_f64(row.as_mut_ptr().add(6), vmulq_f64(vsubq_f64(vld1q_f64(row.as_ptr().add(6)), vmulq_f64(ki, pphi67)), inv_lambda));
+            row[8] = (row[8] - p_phi[i] * p_phi[8] / denom) / lambda;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn rls_update_p(p: &mut [[f64; NUM_RULES]; NUM_RULES], p_phi: &[f64; NUM_RULES], denom: f64, lambda: f64) {
+    unsafe {
+        use core::arch::x86_64::*;
+        let inv_denom = _mm_set1_pd(1.0 / denom);
+        let inv_lambda = _mm_set1_pd(1.0 / lambda);
+        let pphi01 = _mm_loadu_pd(p_phi.as_ptr());
+        let pphi23 = _mm_loadu_pd(p_phi.as_ptr().add(2));
+        let pphi45 = _mm_loadu_pd(p_phi.as_ptr().add(4));
+        let pphi67 = _mm_loadu_pd(p_phi.as_ptr().add(6));
+        for i in 0..NUM_RULES {
+            let ki = _mm_mul_pd(_mm_set1_pd(p_phi[i]), inv_denom);
+            let row = &mut p[i];
+            _mm_storeu_pd(row.as_mut_ptr(),       _mm_mul_pd(_mm_sub_pd(_mm_loadu_pd(row.as_ptr()),       _mm_mul_pd(ki, pphi01)), inv_lambda));
+            _mm_storeu_pd(row.as_mut_ptr().add(2), _mm_mul_pd(_mm_sub_pd(_mm_loadu_pd(row.as_ptr().add(2)), _mm_mul_pd(ki, pphi23)), inv_lambda));
+            _mm_storeu_pd(row.as_mut_ptr().add(4), _mm_mul_pd(_mm_sub_pd(_mm_loadu_pd(row.as_ptr().add(4)), _mm_mul_pd(ki, pphi45)), inv_lambda));
+            _mm_storeu_pd(row.as_mut_ptr().add(6), _mm_mul_pd(_mm_sub_pd(_mm_loadu_pd(row.as_ptr().add(6)), _mm_mul_pd(ki, pphi67)), inv_lambda));
+            row[8] = (row[8] - p_phi[i] * p_phi[8] / denom) / lambda;
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline(always)]
+fn rls_update_p(p: &mut [[f64; NUM_RULES]; NUM_RULES], p_phi: &[f64; NUM_RULES], denom: f64, lambda: f64) {
+    for i in 0..NUM_RULES {
+        for j in 0..NUM_RULES {
+            p[i][j] = (p[i][j] - p_phi[i] * p_phi[j] / denom) / lambda;
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveTSRuleBase {
     pub consequents: [f64; NUM_RULES],
@@ -58,12 +171,7 @@ impl AdaptiveTSRuleBase {
         let error = actual_outcome - prediction;
 
         // RLS: K = P*phi / (lambda + phi^T*P*phi)
-        let mut p_phi = [0.0f64; NUM_RULES];
-        for i in 0..NUM_RULES {
-            for j in 0..NUM_RULES {
-                p_phi[i] += self.rls_p[i][j] * phi[j];
-            }
-        }
+        let p_phi = rls_matvec(&self.rls_p, &phi);
         let denom = self.lambda
             + phi
                 .iter()
@@ -80,12 +188,7 @@ impl AdaptiveTSRuleBase {
         }
 
         // Update P: P = (P - K*phi^T*P) / lambda
-        for i in 0..NUM_RULES {
-            for j in 0..NUM_RULES {
-                self.rls_p[i][j] =
-                    (self.rls_p[i][j] - p_phi[i] * p_phi[j] / denom) / self.lambda;
-            }
-        }
+        rls_update_p(&mut self.rls_p, &p_phi, denom, self.lambda);
 
         self.project_constraints();
         self.update_count += 1;

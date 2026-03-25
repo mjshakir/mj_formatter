@@ -50,7 +50,26 @@ impl FuzzyVariable {
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    pub fn memberships(&self, x: f64) -> [f64; 3] {
+        unsafe {
+            use core::arch::x86_64::*;
+            let x_vec   = _mm_set1_pd(x);
+            let centers = _mm_set_pd(self.medium.center, self.low.center);
+            let sigmas  = _mm_set_pd(self.medium.sigma, self.low.sigma);
+            let z       = _mm_div_pd(_mm_sub_pd(x_vec, centers), sigmas);
+            let neg_half = _mm_set1_pd(-0.5);
+            let exp_arg = _mm_mul_pd(neg_half, _mm_mul_pd(z, z));
+            let z2c = (x - self.high.center) / self.high.sigma;
+            [
+                _mm_cvtsd_f64(exp_arg).exp(),
+                _mm_cvtsd_f64(_mm_unpackhi_pd(exp_arg, exp_arg)).exp(),
+                (-0.5 * z2c * z2c).exp(),
+            ]
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub fn memberships(&self, x: f64) -> [f64; 3] {
         [
             self.low.membership(x),
@@ -113,6 +132,37 @@ pub struct AdaptiveFiringRecord {
     pub acceptance_value: f64,
 }
 
+#[cfg(target_arch = "aarch64")]
+fn compute_firing_weights(m0: &[f64; 3], m1: &[f64; 3]) -> [f64; 9] {
+    unsafe {
+        use core::arch::aarch64::*;
+        let mut firing = [0.0f64; 9];
+        let m1_01 = vld1q_f64(m1.as_ptr());
+        for i in 0..3 {
+            let mi = vdupq_n_f64(m0[i]);
+            vst1q_f64(firing.as_mut_ptr().add(i * 3), vmulq_f64(mi, m1_01));
+            firing[i * 3 + 2] = m0[i] * m1[2];
+        }
+        firing
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn compute_firing_weights(m0: &[f64; 3], m1: &[f64; 3]) -> [f64; 9] {
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut firing = [0.0f64; 9];
+        let m1_01 = _mm_set_pd(m1[1], m1[0]);
+        for i in 0..3 {
+            let mi = _mm_set1_pd(m0[i]);
+            _mm_storeu_pd(firing.as_mut_ptr().add(i * 3), _mm_mul_pd(mi, m1_01));
+            firing[i * 3 + 2] = m0[i] * m1[2];
+        }
+        firing
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn compute_firing_weights(m0: &[f64; 3], m1: &[f64; 3]) -> [f64; 9] {
     let mut firing = [0.0f64; 9];
     for i in 0..3 {
@@ -148,13 +198,17 @@ fn evaluate_ts2_f64(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64; 9]) -> f64
     {
         unsafe { evaluate_ts2_f64_neon(m0, m1, consequents) }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { evaluate_ts2_f64_x86(m0, m1, consequents) }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         evaluate_ts2_f64_scalar(m0, m1, consequents)
     }
 }
 
-#[cfg(any(not(target_arch = "aarch64"), test))]
+#[cfg(any(not(any(target_arch = "aarch64", target_arch = "x86_64")), test))]
 fn evaluate_ts2_f64_scalar(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64; 9]) -> f64 {
     let mut num = 0.0f64;
     let mut den = 0.0f64;
@@ -195,6 +249,36 @@ unsafe fn evaluate_ts2_f64_neon(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64
 
     let num = vaddvq_f64(sum_01) + sum_2;
     let den = vaddvq_f64(wsum_01) + wsum_2;
+    if den < 1e-15 { 0.0 } else { (num / den).clamp(0.0, 1.0) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn evaluate_ts2_f64_x86(m0: &[f64; 3], m1: &[f64; 3], consequents: &[f64; 9]) -> f64 {
+    use core::arch::x86_64::*;
+    let m1_01 = _mm_set_pd(m1[1], m1[0]);
+
+    let mut sum_01 = _mm_setzero_pd();
+    let mut sum_2 = 0.0f64;
+    let mut wsum_01 = _mm_setzero_pd();
+    let mut wsum_2 = 0.0f64;
+
+    for i in 0..3 {
+        let mi = _mm_set1_pd(m0[i]);
+        let w01 = _mm_mul_pd(mi, m1_01);
+        let w2 = m0[i] * m1[2];
+
+        let c01 = _mm_loadu_pd(consequents[i * 3..].as_ptr());
+        let c2 = consequents[i * 3 + 2];
+
+        sum_01 = _mm_add_pd(sum_01, _mm_mul_pd(w01, c01));
+        sum_2 += w2 * c2;
+        wsum_01 = _mm_add_pd(wsum_01, w01);
+        wsum_2 += w2;
+    }
+
+    let num = _mm_cvtsd_f64(_mm_add_sd(sum_01, _mm_unpackhi_pd(sum_01, sum_01))) + sum_2;
+    let den = _mm_cvtsd_f64(_mm_add_sd(wsum_01, _mm_unpackhi_pd(wsum_01, wsum_01))) + wsum_2;
     if den < 1e-15 { 0.0 } else { (num / den).clamp(0.0, 1.0) }
 }
 
@@ -311,6 +395,34 @@ pub fn fuzzy_trust_general(certainty: &PolicyCertainty) -> f64 {
     let str_val = adaptive_variance_damp(certainty.structural, certainty.structural_variance, 0, mp, oc);
     let base = (sem * 0.5 + str_val * 0.5).clamp(0.0, 1.0);
     (base * modulation(certainty)).clamp(0.0, 1.0)
+}
+
+// 2D T-S rule base: (plan_confidence × file_trust) → acceptance [0,1].
+// Replaces the previous 1D sigmoid gate for rename plan filtering.
+// High-confidence plans pass even at low file trust (0.55 > 0.5 threshold).
+// Low-confidence plans need high file trust to pass.
+const RENAME_GATE_BASE: [TsRule2; 9] = [
+    TsRule2 { term0: 0, term1: 0, consequent: 0.10 },
+    TsRule2 { term0: 0, term1: 1, consequent: 0.30 },
+    TsRule2 { term0: 0, term1: 2, consequent: 0.55 },
+    TsRule2 { term0: 1, term1: 0, consequent: 0.35 },
+    TsRule2 { term0: 1, term1: 1, consequent: 0.60 },
+    TsRule2 { term0: 1, term1: 2, consequent: 0.85 },
+    TsRule2 { term0: 2, term1: 0, consequent: 0.55 },
+    TsRule2 { term0: 2, term1: 1, consequent: 0.85 },
+    TsRule2 { term0: 2, term1: 2, consequent: 1.00 },
+];
+
+pub fn fuzzy_rename_acceptance(plan_confidence: f64, file_trust: f64) -> f64 {
+    let conf_var = FuzzyVariable::new(
+        GaussianMF::new(0.0, 0.22),
+        GaussianMF::new(0.5, 0.22),
+        GaussianMF::new(1.0, 0.22),
+    );
+    let trust_var = ci_variable();
+    let conf_m = conf_var.memberships(plan_confidence);
+    let trust_m = trust_var.memberships(file_trust);
+    evaluate_ts2(&conf_m, &trust_m, &RENAME_GATE_BASE).clamp(0.0, 1.0)
 }
 
 pub fn fuzzy_style_weight(uncertainty: f64) -> f64 {

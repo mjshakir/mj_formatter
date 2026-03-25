@@ -212,14 +212,18 @@ impl PolicyContextTracker {
         {
             unsafe { self.batch_file_modifiers_neon(file_kind, &mut result) };
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            unsafe { self.batch_file_modifiers_x86(file_kind, &mut result) };
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             self.batch_file_modifiers_scalar(file_kind, &mut result);
         }
         result
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn batch_file_modifiers_scalar(&self, file_kind: FileContextKind, out: &mut [f32; 24]) {
         let fk = file_kind as usize;
         for p in 0..NUM_POLICIES {
@@ -277,14 +281,18 @@ impl PolicyContextTracker {
         {
             unsafe { self.batch_block_modifiers_neon(block_kind, &mut result) };
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            unsafe { self.batch_block_modifiers_x86(block_kind, &mut result) };
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             self.batch_block_modifiers_scalar(block_kind, &mut result);
         }
         result
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn batch_block_modifiers_scalar(&self, block_kind: BlockContextKind, out: &mut [f32; 24]) {
         let bk = block_kind as usize;
         for p in 0..NUM_POLICIES {
@@ -334,7 +342,7 @@ impl PolicyContextTracker {
 /// Piecewise linear interpolation: ema -> modifier
 /// [0.0] -> 0.5, [0.5] -> 1.0, [1.0] -> 1.3
 #[inline]
-#[cfg(any(test, not(target_arch = "aarch64")))]
+#[cfg(any(test, not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn interp_modifier(ema: f32) -> f32 {
     let x = ema.clamp(0.0, 1.0);
     if x <= 0.5 {
@@ -363,7 +371,111 @@ unsafe fn interp_modifier_neon(ema: core::arch::aarch64::float32x4_t) -> core::a
 
     // Select: x <= 0.5 ? low : high
     let mask = vcleq_f32(x, half);
-    vbslq_f32(vreinterpretq_u32_f32(vreinterpretq_f32_u32(mask)), low, high)
+    vbslq_f32(mask, low, high)
+}
+
+// ---------------------------------------------------------------------------
+// x86_64 SSE implementations
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn interp_modifier_x86(ema: core::arch::x86_64::__m128) -> core::arch::x86_64::__m128 {
+    use core::arch::x86_64::*;
+
+    let zero = _mm_setzero_ps();
+    let one = _mm_set1_ps(1.0);
+    let half = _mm_set1_ps(0.5);
+    // Clamp to [0, 1]
+    let x = _mm_min_ps(_mm_max_ps(ema, zero), one);
+
+    // Low branch: 0.5 + x
+    let low = _mm_add_ps(half, x);
+
+    // High branch: 1.0 + 0.6 * (x - 0.5)
+    let high = _mm_add_ps(one, _mm_mul_ps(_mm_set1_ps(0.6), _mm_sub_ps(x, half)));
+
+    // Select: x <= 0.5 ? low : high
+    let mask = _mm_cmple_ps(x, half);
+    // SSE: blendv selects from second operand where mask MSB is 1
+    // _mm_blendv_ps(a, b, mask) = mask ? b : a — but this requires SSE4.1
+    // Use SSE2-compatible: (mask & low) | (~mask & high)
+    _mm_or_ps(_mm_and_ps(mask, low), _mm_andnot_ps(mask, high))
+}
+
+#[cfg(target_arch = "x86_64")]
+impl PolicyContextTracker {
+    #[inline(always)]
+    unsafe fn batch_file_modifiers_x86(&self, file_kind: FileContextKind, out: &mut [f32; 24]) {
+        use core::arch::x86_64::*;
+
+        let fk = file_kind as usize;
+        let one = _mm_set1_ps(1.0);
+
+        let mut p = 0usize;
+        while p + 4 <= 24 {
+            let mut ema_vals = [0.5f32; 4];
+            let mut cnt_vals = [0i32; 4];
+            for i in 0..4 {
+                let pi = p + i;
+                if pi < NUM_POLICIES {
+                    let idx = pi * NUM_FILE_KINDS + fk;
+                    ema_vals[i] = self.file_ema[idx];
+                    cnt_vals[i] = self.file_cnt[idx] as i32;
+                }
+            }
+
+            let ema_v = _mm_loadu_ps(ema_vals.as_ptr());
+            let cnt_v = _mm_loadu_si128(cnt_vals.as_ptr() as *const __m128i);
+
+            let mod_v = interp_modifier_x86(ema_v);
+
+            // cnt >= min_obs ≡ cnt > (min_obs - 1)
+            let mask = _mm_cmpgt_epi32(cnt_v, _mm_set1_epi32(MIN_OBSERVATIONS as i32 - 1));
+            let mask_ps = _mm_castsi128_ps(mask);
+            let masked = _mm_or_ps(_mm_and_ps(mask_ps, mod_v), _mm_andnot_ps(mask_ps, one));
+
+            _mm_storeu_ps(out.as_mut_ptr().add(p), masked);
+            p += 4;
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn batch_block_modifiers_x86(&self, block_kind: BlockContextKind, out: &mut [f32; 24]) {
+        use core::arch::x86_64::*;
+
+        let bk = block_kind as usize;
+        let one = _mm_set1_ps(1.0);
+
+        let mut p = 0usize;
+        while p + 4 <= 24 {
+            let mut ema_vals = [0.5f32; 4];
+            let mut cnt_vals = [0i32; 4];
+            for i in 0..4 {
+                let pi = p + i;
+                if pi < NUM_POLICIES {
+                    let idx = pi * NUM_BLOCK_KINDS + bk;
+                    ema_vals[i] = self.block_ema[idx];
+                    cnt_vals[i] = self.block_cnt[idx] as i32;
+                }
+            }
+
+            let ema_v = _mm_loadu_ps(ema_vals.as_ptr());
+            let cnt_v = _mm_loadu_si128(cnt_vals.as_ptr() as *const __m128i);
+
+            let mod_v = interp_modifier_x86(ema_v);
+
+            let mask = _mm_or_si128(
+                _mm_cmpgt_epi32(cnt_v, _mm_sub_epi32(min_obs, _mm_set1_epi32(1))),
+                _mm_cmpeq_epi32(cnt_v, min_obs),
+            );
+            let mask_ps = _mm_castsi128_ps(mask);
+            let masked = _mm_or_ps(_mm_and_ps(mask_ps, mod_v), _mm_andnot_ps(mask_ps, one));
+
+            _mm_storeu_ps(out.as_mut_ptr().add(p), masked);
+            p += 4;
+        }
+    }
 }
 
 #[cfg(test)]

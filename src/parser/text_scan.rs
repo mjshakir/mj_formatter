@@ -159,7 +159,11 @@ impl TextScanEngine {
         {
             all_bytes_equal_neon(bytes, target)
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            all_bytes_equal_x86(bytes, target)
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             all_bytes_equal_scalar(bytes, target)
         }
@@ -171,7 +175,11 @@ impl TextScanEngine {
         {
             leading_whitespace_byte_count_neon(bytes)
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            leading_whitespace_byte_count_x86(bytes)
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             leading_whitespace_byte_count_scalar(bytes)
         }
@@ -190,7 +198,11 @@ impl TextScanEngine {
         {
             slices_equal_neon(a, b)
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            slices_equal_x86(a, b)
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             a == b
         }
@@ -227,7 +239,7 @@ fn all_bytes_equal_neon(bytes: &[u8], target: u8) -> bool {
     }
 
     unsafe {
-        use core::arch::aarch64::{vceqq_u8, vdupq_n_u8, vld1q_u8, vminvq_u8};
+        use core::arch::aarch64::{vandq_u8, vceqq_u8, vdupq_n_u8, vld1q_u8, vminvq_u8};
 
         let target_vec = vdupq_n_u8(target);
         let mut ptr = bytes.as_ptr();
@@ -240,11 +252,8 @@ fn all_bytes_equal_neon(bytes: &[u8], target: u8) -> bool {
             let c1 = vceqq_u8(vld1q_u8(ptr.add(16)), target_vec);
             let c2 = vceqq_u8(vld1q_u8(ptr.add(32)), target_vec);
             let c3 = vceqq_u8(vld1q_u8(ptr.add(48)), target_vec);
-            if vminvq_u8(c0) != 0xFF
-                || vminvq_u8(c1) != 0xFF
-                || vminvq_u8(c2) != 0xFF
-                || vminvq_u8(c3) != 0xFF
-            {
+            let merged = vandq_u8(vandq_u8(c0, c1), vandq_u8(c2, c3));
+            if vminvq_u8(merged) != 0xFF {
                 return false;
             }
             ptr = ptr.add(64);
@@ -332,27 +341,19 @@ fn slices_equal_neon(a: &[u8], b: &[u8]) -> bool {
     }
 
     unsafe {
-        use core::arch::aarch64::{vceqq_u8, vld1q_u8, vminvq_u8};
+        use core::arch::aarch64::{vandq_u8, vceqq_u8, vld1q_u8, vminvq_u8};
 
         let mut offset = 0usize;
 
         // Process 64 bytes per iteration (4x16B)
         let end64 = len & !63;
         while offset < end64 {
-            let a0 = vld1q_u8(a.as_ptr().add(offset));
-            let b0 = vld1q_u8(b.as_ptr().add(offset));
-            let a1 = vld1q_u8(a.as_ptr().add(offset + 16));
-            let b1 = vld1q_u8(b.as_ptr().add(offset + 16));
-            let a2 = vld1q_u8(a.as_ptr().add(offset + 32));
-            let b2 = vld1q_u8(b.as_ptr().add(offset + 32));
-            let a3 = vld1q_u8(a.as_ptr().add(offset + 48));
-            let b3 = vld1q_u8(b.as_ptr().add(offset + 48));
-
-            if vminvq_u8(vceqq_u8(a0, b0)) != 0xFF
-                || vminvq_u8(vceqq_u8(a1, b1)) != 0xFF
-                || vminvq_u8(vceqq_u8(a2, b2)) != 0xFF
-                || vminvq_u8(vceqq_u8(a3, b3)) != 0xFF
-            {
+            let e0 = vceqq_u8(vld1q_u8(a.as_ptr().add(offset)), vld1q_u8(b.as_ptr().add(offset)));
+            let e1 = vceqq_u8(vld1q_u8(a.as_ptr().add(offset + 16)), vld1q_u8(b.as_ptr().add(offset + 16)));
+            let e2 = vceqq_u8(vld1q_u8(a.as_ptr().add(offset + 32)), vld1q_u8(b.as_ptr().add(offset + 32)));
+            let e3 = vceqq_u8(vld1q_u8(a.as_ptr().add(offset + 48)), vld1q_u8(b.as_ptr().add(offset + 48)));
+            let merged = vandq_u8(vandq_u8(e0, e1), vandq_u8(e2, e3));
+            if vminvq_u8(merged) != 0xFF {
                 return false;
             }
             offset += 64;
@@ -364,6 +365,156 @@ fn slices_equal_neon(a: &[u8], b: &[u8]) -> bool {
             let av = vld1q_u8(a.as_ptr().add(offset));
             let bv = vld1q_u8(b.as_ptr().add(offset));
             if vminvq_u8(vceqq_u8(av, bv)) != 0xFF {
+                return false;
+            }
+            offset += 16;
+        }
+
+        // Scalar tail
+        a[offset..] == b[offset..]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// x86_64 SSE2 implementations
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn all_bytes_equal_x86(bytes: &[u8], target: u8) -> bool {
+    let len = bytes.len();
+    if len < 32 {
+        return all_bytes_equal_scalar(bytes, target);
+    }
+
+    unsafe {
+        use core::arch::x86_64::*;
+
+        let target_vec = _mm_set1_epi8(target as i8);
+        let mut offset = 0usize;
+
+        // Process 64 bytes per iteration (4x16B)
+        let end64 = len & !63;
+        while offset < end64 {
+            let c0 = _mm_cmpeq_epi8(_mm_loadu_si128(bytes.as_ptr().add(offset) as *const __m128i), target_vec);
+            let c1 = _mm_cmpeq_epi8(_mm_loadu_si128(bytes.as_ptr().add(offset + 16) as *const __m128i), target_vec);
+            let c2 = _mm_cmpeq_epi8(_mm_loadu_si128(bytes.as_ptr().add(offset + 32) as *const __m128i), target_vec);
+            let c3 = _mm_cmpeq_epi8(_mm_loadu_si128(bytes.as_ptr().add(offset + 48) as *const __m128i), target_vec);
+            let merged = _mm_and_si128(_mm_and_si128(c0, c1), _mm_and_si128(c2, c3));
+            if _mm_movemask_epi8(merged) != 0xFFFF {
+                return false;
+            }
+            offset += 64;
+        }
+
+        // Process remaining 16B chunks
+        let end16 = len & !15;
+        while offset < end16 {
+            let cmp = _mm_cmpeq_epi8(_mm_loadu_si128(bytes.as_ptr().add(offset) as *const __m128i), target_vec);
+            if _mm_movemask_epi8(cmp) != 0xFFFF {
+                return false;
+            }
+            offset += 16;
+        }
+
+        // Scalar tail
+        bytes[offset..].iter().all(|&b| b == target)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn leading_whitespace_byte_count_x86(bytes: &[u8]) -> usize {
+    let len = bytes.len();
+    if len < 32 {
+        return leading_whitespace_byte_count_scalar(bytes);
+    }
+
+    unsafe {
+        use core::arch::x86_64::*;
+
+        let space_vec = _mm_set1_epi8(b' ' as i8);
+        let tab_vec = _mm_set1_epi8(b'\t' as i8);
+
+        let mut offset = 0usize;
+
+        while offset + 16 <= len {
+            let chunk = _mm_loadu_si128(bytes.as_ptr().add(offset) as *const __m128i);
+            let cmp = _mm_or_si128(
+                _mm_cmpeq_epi8(chunk, space_vec),
+                _mm_cmpeq_epi8(chunk, tab_vec),
+            );
+            let mask = _mm_movemask_epi8(cmp) as u32;
+            if mask == 0xFFFF {
+                offset += 16;
+            } else {
+                // Find first non-whitespace byte
+                return offset + (!mask).trailing_zeros() as usize;
+            }
+        }
+
+        // Scalar tail
+        while offset < len {
+            let b = bytes[offset];
+            if b == b' ' || b == b'\t' {
+                offset += 1;
+            } else {
+                break;
+            }
+        }
+        offset
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn slices_equal_x86(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len();
+    debug_assert_eq!(len, b.len());
+
+    if len < 32 {
+        return a == b;
+    }
+
+    unsafe {
+        use core::arch::x86_64::*;
+
+        let mut offset = 0usize;
+
+        // Process 64 bytes per iteration (4x16B)
+        let end64 = len & !63;
+        while offset < end64 {
+            let e0 = _mm_cmpeq_epi8(
+                _mm_loadu_si128(a.as_ptr().add(offset) as *const __m128i),
+                _mm_loadu_si128(b.as_ptr().add(offset) as *const __m128i),
+            );
+            let e1 = _mm_cmpeq_epi8(
+                _mm_loadu_si128(a.as_ptr().add(offset + 16) as *const __m128i),
+                _mm_loadu_si128(b.as_ptr().add(offset + 16) as *const __m128i),
+            );
+            let e2 = _mm_cmpeq_epi8(
+                _mm_loadu_si128(a.as_ptr().add(offset + 32) as *const __m128i),
+                _mm_loadu_si128(b.as_ptr().add(offset + 32) as *const __m128i),
+            );
+            let e3 = _mm_cmpeq_epi8(
+                _mm_loadu_si128(a.as_ptr().add(offset + 48) as *const __m128i),
+                _mm_loadu_si128(b.as_ptr().add(offset + 48) as *const __m128i),
+            );
+            let merged = _mm_and_si128(_mm_and_si128(e0, e1), _mm_and_si128(e2, e3));
+            if _mm_movemask_epi8(merged) != 0xFFFF {
+                return false;
+            }
+            offset += 64;
+        }
+
+        // Process remaining 16B chunks
+        let end16 = len & !15;
+        while offset < end16 {
+            let cmp = _mm_cmpeq_epi8(
+                _mm_loadu_si128(a.as_ptr().add(offset) as *const __m128i),
+                _mm_loadu_si128(b.as_ptr().add(offset) as *const __m128i),
+            );
+            if _mm_movemask_epi8(cmp) != 0xFFFF {
                 return false;
             }
             offset += 16;
@@ -410,6 +561,11 @@ pub(crate) fn subslice_match_indices<'a>(
 }
 
 #[inline]
+pub(crate) fn is_identifier_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[inline]
 pub(crate) fn line_starts(text: &str, include_terminal_start: bool) -> Vec<usize> {
     TEXT_SCAN.line_starts(text, include_terminal_start)
 }
@@ -437,6 +593,7 @@ pub(crate) fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     TEXT_SCAN.contains_subslice(haystack, needle)
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn find_subslice_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     TEXT_SCAN.find_subslice_from(haystack, needle, from)
@@ -494,8 +651,7 @@ fn non_code_ranges_walk(
     loop {
         let node = cursor.node();
         let kind = node.kind();
-        if kind == "comment" || kind == "string_literal" || kind == "raw_string_literal"
-            || kind == "char_literal" || kind == "system_lib_string"
+        if kind == super::node_kind::COMMENT || super::node_kind::is_string_like(kind)
         {
             ranges.push((node.start_byte(), node.end_byte()));
         } else if cursor.goto_first_child() {
@@ -507,8 +663,6 @@ fn non_code_ranges_walk(
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
