@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::engine::accuracy_gate::AccuracyGateDecision;
-use crate::engine::catalog::PolicyCertainty;
 use crate::model::edit::Edit;
 use crate::model::exec_trace::PolicyExecutionTrace;
 use crate::model::rename_plan::SemanticRenamePlan;
@@ -28,7 +27,6 @@ pub struct FormatOutcome {
     pub violations: Vec<Violation>,
     pub edits: Vec<Edit>,
     pub accuracy_gate: Option<AccuracyGateDecision>,
-    pub certainty: Option<PolicyCertainty>,
     pub clang_parse: Option<Arc<ClangParseResult>>,
 }
 

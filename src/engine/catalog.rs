@@ -26,82 +26,11 @@ pub struct PolicyCapabilities {
     pub risk_tier: CandidateRiskTier,
 }
 
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct PolicyCertainty {
-    pub overall: f64,
-    pub structural: f64,
-    pub semantic: f64,
-    pub coverage: f64,
-    pub richness: f64,
-    pub semantic_variance: f64,
-    pub structural_variance: f64,
-    pub coverage_variance: f64,
-    pub richness_variance: f64,
-    pub edit_success: f64,
-    pub edit_success_variance: f64,
-    pub stable_model_prob: f64,
-    pub transitional_model_prob: f64,
-    pub noisy_model_prob: f64,
-    pub observation_count: u32,
-    pub raw_observation: Option<[f64; 5]>,
-}
-
-const Z_ALPHA: f64 = 1.645;
-
-impl PolicyCertainty {
-    pub fn semantic_lower_ci(&self) -> f64 {
-        (self.semantic - Z_ALPHA * self.semantic_variance.sqrt()).clamp(0.0, 1.0)
-    }
-
-    pub fn richness_lower_ci(&self) -> f64 {
-        (self.richness - Z_ALPHA * self.richness_variance.sqrt()).clamp(0.0, 1.0)
-    }
-
-    pub fn edit_success_lower_ci(&self) -> f64 {
-        (self.edit_success - Z_ALPHA * self.edit_success_variance.sqrt()).clamp(0.0, 1.0)
-    }
-
-    pub fn model_probs(&self) -> [f64; 3] {
-        [self.stable_model_prob, self.transitional_model_prob, self.noisy_model_prob]
-    }
-
-    pub fn trust_for_semantic_rewrite(&self) -> f64 {
-        crate::engine::fuzzy_inference::fuzzy_trust_rewrite(self)
-    }
-
-    pub fn trust_for_structural(&self) -> f64 {
-        crate::engine::fuzzy_inference::fuzzy_trust_structural(self)
-    }
-
-    pub fn trust_for_general(&self) -> f64 {
-        crate::engine::fuzzy_inference::fuzzy_trust_general(self)
-    }
-}
-
 impl PolicyCapabilities {
     pub fn allows_zone(&self, zone: PolicyZone) -> bool {
         self.allowed_zones.contains(&zone)
     }
 
-    pub fn effective_certainty(&self, certainty: &PolicyCertainty) -> f64 {
-        if self.semantic_rewrite {
-            certainty.semantic
-        } else if self.structural_safe {
-            certainty.structural
-        } else {
-            certainty.overall
-        }
-    }
-
-    pub fn policy_trust(&self, certainty: &PolicyCertainty) -> f64 {
-        if self.semantic_rewrite {
-            certainty.trust_for_semantic_rewrite()
-        } else if self.structural_safe {
-            certainty.trust_for_structural()
-        } else {
-            certainty.trust_for_general()
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -572,117 +501,6 @@ mod tests {
         assert_eq!(unknown.risk_tier, CatalogConvergenceRiskTier::Balanced);
     }
 
-    #[test]
-    fn zero_coverage_reduces() {
-        use super::PolicyCertainty;
-        let certainty = PolicyCertainty {
-            semantic: 0.90,
-            coverage: 0.0,
-            semantic_variance: 0.002,
-            coverage_variance: 0.002,
-            stable_model_prob: 0.70,
-            edit_success: 0.80,
-            edit_success_variance: 0.002,
-            ..Default::default()
-        };
-        let trust = certainty.trust_for_semantic_rewrite();
-        assert!(trust > 0.25 && trust < 0.65,
-            "zero coverage should reduce trust but not kill it, got {trust}");
-    }
-
-    #[test]
-    fn confidence_yields_high() {
-        use super::PolicyCertainty;
-        let certainty = PolicyCertainty {
-            overall: 0.85,
-            semantic: 0.90,
-            coverage: 0.85,
-            structural: 0.92,
-            richness: 0.60,
-            semantic_variance: 0.002,
-            coverage_variance: 0.002,
-            structural_variance: 0.002,
-            richness_variance: 0.002,
-            stable_model_prob: 0.80,
-            transitional_model_prob: 0.10,
-            noisy_model_prob: 0.10,
-            edit_success: 0.90,
-            edit_success_variance: 0.002,
-            ..Default::default()
-        };
-        assert!(certainty.trust_for_semantic_rewrite() > 0.60);
-        assert!(certainty.trust_for_structural() > 0.60);
-    }
-
-    #[test]
-    fn stable_model_boosts() {
-        use super::PolicyCertainty;
-        let base = PolicyCertainty {
-            semantic: 0.70,
-            coverage: 0.70,
-            structural: 0.70,
-            semantic_variance: 0.01,
-            coverage_variance: 0.01,
-            structural_variance: 0.01,
-            stable_model_prob: 0.30,
-            edit_success: 0.50,
-            edit_success_variance: 0.01,
-            ..Default::default()
-        };
-        let boosted = PolicyCertainty {
-            stable_model_prob: 0.90,
-            ..base
-        };
-        assert!(boosted.trust_for_semantic_rewrite() > base.trust_for_semantic_rewrite());
-    }
-
-    #[test]
-    fn edit_success_boosts() {
-        use super::PolicyCertainty;
-        let base = PolicyCertainty {
-            semantic: 0.70,
-            coverage: 0.70,
-            structural: 0.70,
-            semantic_variance: 0.01,
-            coverage_variance: 0.01,
-            structural_variance: 0.01,
-            stable_model_prob: 0.50,
-            edit_success: 0.30,
-            edit_success_variance: 0.01,
-            ..Default::default()
-        };
-        let boosted = PolicyCertainty {
-            edit_success: 0.95,
-            edit_success_variance: 0.001,
-            ..base
-        };
-        assert!(boosted.trust_for_general() > base.trust_for_general());
-    }
-
-    #[test]
-    fn both_bad_compounds() {
-        use super::PolicyCertainty;
-        let good = PolicyCertainty {
-            semantic: 0.80,
-            coverage: 0.80,
-            structural: 0.80,
-            semantic_variance: 0.002,
-            coverage_variance: 0.002,
-            structural_variance: 0.002,
-            stable_model_prob: 0.90,
-            edit_success: 0.95,
-            edit_success_variance: 0.001,
-            ..Default::default()
-        };
-        let bad = PolicyCertainty {
-            stable_model_prob: 0.10,
-            edit_success: 0.10,
-            edit_success_variance: 0.001,
-            ..good
-        };
-        let ratio = bad.trust_for_semantic_rewrite() / good.trust_for_semantic_rewrite();
-        assert!(ratio < 0.80, "both bad should compound reduction, ratio={ratio}");
-    }
 }
 
 // ── Capability matrix (thin dispatch helper) ──────────────────────────────────
@@ -692,37 +510,5 @@ pub struct PolicyCapabilityMatrix;
 impl PolicyCapabilityMatrix {
     pub fn for_policy(policy_name: &str) -> PolicyCapabilities {
         policy_catalog().capabilities(policy_name)
-    }
-}
-
-#[cfg(test)]
-mod capability_tests {
-    use super::{PolicyCapabilityMatrix, PolicyCertainty};
-
-    #[test]
-    fn rewrite_low_trust() {
-        let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
-        let certainty = PolicyCertainty {
-            overall: 0.85,
-            structural: 0.90,
-            semantic: 0.30,
-            ..Default::default()
-        };
-        let trust = capability.policy_trust(&certainty);
-        assert!(trust < 0.30, "low semantic → low trust: {}", trust);
-    }
-
-    #[test]
-    fn whitespace_low_semantic() {
-        let capability = PolicyCapabilityMatrix::for_policy("dash_comment_normalizer");
-        let certainty = PolicyCertainty {
-            overall: 0.40,
-            structural: 0.45,
-            semantic: 0.10,
-            structural_variance: 0.001,
-            ..Default::default()
-        };
-        let trust = capability.policy_trust(&certainty);
-        assert!(trust > 0.20, "whitespace policy uses structural, not semantic: {}", trust);
     }
 }

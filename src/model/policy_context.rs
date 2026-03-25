@@ -2,7 +2,6 @@ use std::path::Path;
 
 use tree_sitter::Tree;
 
-use crate::engine::catalog::PolicyCertainty;
 use crate::model::project_query::ProjectContextQuery;
 use crate::model::context_query::SemanticContextQuery;
 use crate::parser::clang_result::ClangDiagnosticSummary;
@@ -20,7 +19,6 @@ pub struct PolicyContext<'a> {
     pub clang_parse_result: Option<&'a ClangParseResult>,
     pub semantic_file_context: Option<&'a SemanticFileContext>,
     pub project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
-    pub policy_certainty: Option<PolicyCertainty>,
     pub query_cache: Option<&'a TsQueryCache>,
     pub forced_batch_size: Option<usize>,
     pub shared: Option<&'a PolicySharedData<'a>>,
@@ -35,16 +33,10 @@ impl<'a> PolicyContext<'a> {
             clang_parse_result: None,
             semantic_file_context: None,
             project_graph_snapshot: None,
-            policy_certainty: None,
             query_cache: None,
             forced_batch_size: None,
             shared: None,
         }
-    }
-
-    pub fn with_policy_certainty(mut self, policy_certainty: Option<PolicyCertainty>) -> Self {
-        self.policy_certainty = policy_certainty;
-        self
     }
 
     pub fn with_query_cache(mut self, query_cache: Option<&'a TsQueryCache>) -> Self {
