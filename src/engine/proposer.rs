@@ -5,7 +5,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::engine::convergence::ConvergencePolicySignal;
-use crate::engine::catalog::{PolicyCapabilities, PolicyCertainty};
+use crate::engine::catalog::PolicyCapabilities;
 use crate::engine::edit_candidate::PolicyEditCandidate;
 use crate::policy::zone::PolicyZone;
 use crate::engine::semantic_contract::{SemanticContract, SemanticInvariantClause, ALL_CLAUSES};
@@ -39,7 +39,6 @@ impl ProposerController {
         convergence_signal: &ConvergencePolicySignal,
         capability: &PolicyCapabilities,
         confidence: f64,
-        certainty: &PolicyCertainty,
     ) -> Vec<PolicyEditCandidate> {
         let mut candidates = Vec::<PolicyEditCandidate>::with_capacity(result.edits.len());
         for edit in &result.edits {
@@ -60,12 +59,7 @@ impl ProposerController {
             if !capability.allows_zone(zone) {
                 hard_constraints_touched |= SemanticInvariantClause::TouchContract.bit();
             }
-            let trust_deficit_penalty = if capability.semantic_rewrite {
-                let trust = capability.policy_trust(certainty);
-                crate::engine::fuzzy_inference::fuzzy_deficit_penalty(trust)
-            } else {
-                0.0
-            };
+            let trust_deficit_penalty = 0.0;
             let mut symbol_footprint: SmallVec<[u64; 8]> = convergence_signal
                 .symbol_ids
                 .get(&edit.line)
@@ -95,11 +89,8 @@ impl ProposerController {
                 .get(&edit.line)
                 .cloned()
                 .unwrap_or_else(|| smallvec::smallvec![(edit.line, edit.line)]);
-            let trust_for_penalty = certainty.trust_for_general();
-            let confidence_penalty = crate::engine::fuzzy_inference::fuzzy_constraint_penalty(
-                hard_constraints_touched.count_ones() as usize, trust_for_penalty,
-            );
-            let mut resolved_confidence =
+            let confidence_penalty = 0.0;
+            let resolved_confidence =
                 (confidence - confidence_penalty - trust_deficit_penalty).clamp(0.0, 1.0);
             let mut impact_radius = convergence_signal.impact_radius.max(1);
             let project_signal = project_query
@@ -108,21 +99,11 @@ impl ProposerController {
                     project_query.signal(symbol.stable_id.as_str())
                 })
                 .or_else(|| project_query.signal((edit.line, 1)));
-            let richness_multiplier =
-                crate::engine::fuzzy_inference::fuzzy_richness_mult(certainty.trust_for_general());
-            let richness_radius =
-                (certainty.richness_lower_ci() * richness_multiplier).round().clamp(1.0, 3.0) as usize;
+            let richness_multiplier = 1.0_f64;
+            let richness_radius = richness_multiplier.round().clamp(1.0, 3.0) as usize;
             impact_radius = impact_radius.max(richness_radius);
-            if let Some(signal) = project_signal {
-                let consensus_weakness = crate::engine::fuzzy_inference::GaussianMF::new(0.0, 0.40)
-                    .membership(signal.consensus_score);
-                let deficit = certainty.semantic_variance.sqrt().clamp(0.0, 0.5);
-                let trust = capability.policy_trust(certainty);
-                let penalty = crate::engine::fuzzy_inference::fuzzy_constraint_penalty(
-                    ((consensus_weakness * deficit * 10.0).round() as usize).min(5),
-                    trust,
-                );
-                resolved_confidence = (resolved_confidence - penalty).clamp(0.0, 1.0);
+            if let Some(_signal) = project_signal {
+                // No fuzzy penalty applied
             }
             candidates.push(PolicyEditCandidate {
                 policy: Arc::from(policy_name),
@@ -144,10 +125,8 @@ impl ProposerController {
     pub fn assess(
         candidates: &[PolicyEditCandidate],
         capability: &PolicyCapabilities,
-        certainty: Option<&crate::engine::catalog::PolicyCertainty>,
     ) -> GuardianAssessment {
-        let zone_relaxed =
-            crate::engine::fuzzy_inference::fuzzy_zone_relax(certainty);
+        let zone_relaxed = false;
         let mut allowed = Vec::<PolicyEditCandidate>::new();
         let mut blocked_zone_lines = BTreeSet::<usize>::new();
         let mut hard_blocked_lines = BTreeSet::<usize>::new();
@@ -169,7 +148,7 @@ impl ProposerController {
                     if !spec_hard {
                         return false;
                     }
-                    !crate::engine::fuzzy_inference::fuzzy_constraint_override(certainty, clause)
+                    true
                 });
             if has_hard_constraint {
                 hard_blocked_lines.insert(candidate.line);
@@ -236,10 +215,7 @@ impl ProposerController {
         let whitespace_change = (before_trimmed == after_trimmed) as u8 as f64;
         let delta = before_trimmed.len().abs_diff(after_trimmed.len()) as f64;
         let normalized_delta = (delta / 32.0).min(1.0);
-        let (base, ws_bonus, delta_bonus) =
-            crate::engine::fuzzy_inference::fuzzy_style_weights(
-                crate::engine::fuzzy_inference::DEFAULT_TRUST,
-            );
+        let (base, ws_bonus, delta_bonus) = (0.60, 0.40, 0.20);
         base + (whitespace_change * ws_bonus) + ((1.0 - normalized_delta) * delta_bonus)
     }
 }
@@ -249,7 +225,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::engine::convergence::ConvergencePolicySignal;
-    use crate::engine::catalog::{PolicyCapabilityMatrix, PolicyCertainty};
+    use crate::engine::catalog::PolicyCapabilityMatrix;
     use crate::engine::proposer::ProposerController;
     use crate::model::edit::Edit;
     use crate::model::policy_result::PolicyResult;
@@ -288,12 +264,6 @@ mod tests {
             changed: true,
         };
         let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
-        let certainty = PolicyCertainty {
-            overall: 0.9,
-            structural: 0.9,
-            semantic: 0.9,
-            ..Default::default()
-        };
         let candidates = ProposerController::new().propose(
             "compact_declarations",
             &result,
@@ -302,7 +272,6 @@ mod tests {
             &ConvergencePolicySignal::default(),
             &capability,
             0.9,
-            &certainty,
         );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].zone.as_str(), "preprocessor");

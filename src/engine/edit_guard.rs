@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use tree_sitter::{StreamingIterator, Tree};
 
 use crate::config::enums::TouchContract;
-use crate::engine::catalog::PolicyCertainty;
 use crate::model::edit::Edit;
 use crate::model::violation::Violation;
 use crate::parser::query_cache::TsQueryCache;
@@ -17,7 +16,6 @@ impl EditGuard {
         edits: &[Edit],
         tree: Option<&Tree>,
         query_cache: Option<&TsQueryCache>,
-        certainty: Option<&PolicyCertainty>,
         structural_safe: bool,
     ) -> Vec<Violation> {
         if edits.is_empty() || matches!(contract, TouchContract::Any) {
@@ -49,8 +47,7 @@ impl EditGuard {
         };
 
         let (comments, strings, preprocessor) = Self::collect_protected_lines(tree, query_cache);
-        let relax_comment_string =
-            structural_safe && crate::engine::fuzzy_inference::fuzzy_guard_relax(certainty);
+        let relax_comment_string = structural_safe;
         match contract {
             TouchContract::CodeOnly => {
                 let blocked = changed_lines
@@ -259,7 +256,6 @@ mod tests {
             edits.as_slice(),
             None,
             None,
-            None,
             false,
         );
         assert_eq!(violations.len(), 1);
@@ -285,7 +281,6 @@ mod tests {
             &TouchContract::CodeOnly,
             edits.as_slice(),
             Some(&tree),
-            None,
             None,
             false,
         );
