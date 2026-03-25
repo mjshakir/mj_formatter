@@ -1,25 +1,14 @@
-use tree_sitter::{Node, StreamingIterator};
+use tree_sitter::Node;
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
+use crate::parser::clang_result::ClangParseResult;
 use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_traversal;
 use crate::policy::Policy;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NumericType {
-    Float,
-    Double,
-    LongDouble,
-    Int,
-    UnsignedInt,
-    Long,
-    UnsignedLong,
-    LongLong,
-    UnsignedLongLong,
-}
 
 pub struct NumericLiteralSuffixPolicy;
 
@@ -28,60 +17,137 @@ impl NumericLiteralSuffixPolicy {
         Self
     }
 
-    fn classify_type(type_text: &str) -> Option<NumericType> {
-        let normalized = type_text.split_whitespace().collect::<Vec<_>>().join(" ");
-        match normalized.as_str() {
-            // Primitive floating-point
-            "float" => Some(NumericType::Float),
-            "double" => Some(NumericType::Double),
-            "long double" => Some(NumericType::LongDouble),
-            // Primitive signed integer
-            "int" | "signed" | "signed int" => Some(NumericType::Int),
-            "long" | "long int" | "signed long" | "signed long int" => Some(NumericType::Long),
-            "long long" | "long long int" | "signed long long" | "signed long long int" => {
-                Some(NumericType::LongLong)
-            }
-            // Primitive unsigned integer
-            "unsigned" | "unsigned int" => Some(NumericType::UnsignedInt),
-            "unsigned long" | "unsigned long int" => Some(NumericType::UnsignedLong),
-            "unsigned long long" | "unsigned long long int" => Some(NumericType::UnsignedLongLong),
-            // Fixed-width signed integer typedefs (<cstdint> / <stdint.h>)
-            "int8_t" | "int16_t" | "int32_t" | "int_fast8_t" | "int_fast16_t"
-            | "int_fast32_t" | "int_least8_t" | "int_least16_t" | "int_least32_t" => {
-                Some(NumericType::Int)
-            }
-            "int64_t" | "intmax_t" | "intptr_t" | "ptrdiff_t" | "ssize_t" | "int_fast64_t"
-            | "int_least64_t" => Some(NumericType::LongLong),
-            // Fixed-width unsigned integer typedefs (<cstdint> / <stdint.h>)
-            "uint8_t" | "uint16_t" | "uint32_t" | "uint_fast8_t" | "uint_fast16_t"
-            | "uint_fast32_t" | "uint_least8_t" | "uint_least16_t" | "uint_least32_t" => {
-                Some(NumericType::UnsignedInt)
-            }
-            "uint64_t" | "uintmax_t" | "uintptr_t" | "size_t" | "uint_fast64_t"
-            | "uint_least64_t" => Some(NumericType::UnsignedLongLong),
+    fn suffix_from_type_kind(kind: i32) -> Option<(&'static str, bool)> {
+        match kind {
+            clang_sys::CXType_Float => Some(("f", true)),
+            clang_sys::CXType_Double => Some(("", true)),
+            clang_sys::CXType_LongDouble => Some(("L", true)),
+            clang_sys::CXType_Float16 | clang_sys::CXType_Half => Some(("", true)),
+            clang_sys::CXType_Float128 => Some(("Q", true)),
+            clang_sys::CXType_SChar | clang_sys::CXType_Short | clang_sys::CXType_Int => Some(("", false)),
+            clang_sys::CXType_Long => Some(("L", false)),
+            clang_sys::CXType_LongLong => Some(("LL", false)),
+            clang_sys::CXType_UChar | clang_sys::CXType_UShort | clang_sys::CXType_UInt => Some(("U", false)),
+            clang_sys::CXType_ULong => Some(("UL", false)),
+            clang_sys::CXType_ULongLong => Some(("ULL", false)),
+            clang_sys::CXType_Int128 => Some(("LL", false)),
+            clang_sys::CXType_UInt128 => Some(("ULL", false)),
             _ => None,
         }
     }
 
-    fn target_suffix(t: NumericType) -> &'static str {
-        match t {
-            NumericType::Float => "f",
-            NumericType::Double => "",
-            NumericType::LongDouble => "L",
-            NumericType::Int => "",
-            NumericType::UnsignedInt => "U",
-            NumericType::Long => "L",
-            NumericType::UnsignedLong => "UL",
-            NumericType::LongLong => "LL",
-            NumericType::UnsignedLongLong => "ULL",
+    fn suffix_from_ts_type_node(type_node: &Node<'_>, source: &[u8]) -> Option<(&'static str, bool)> {
+        let kind = type_node.kind();
+        let text = type_node.utf8_text(source).ok()?;
+
+        match kind {
+            node_kind::PRIMITIVE_TYPE => match text {
+                "float" => Some(("f", true)),
+                "double" => Some(("", true)),
+                "int" | "short" | "char" => Some(("", false)),
+                _ => None,
+            },
+            node_kind::SIZED_TYPE_SPECIFIER => {
+                let mut unsigned = false;
+                let mut long_count: usize = 0;
+                let mut has_double = false;
+                let mut has_short = false;
+                for i in 0..type_node.child_count() {
+                    let Some(child) = type_node.child(i as u32) else {
+                        continue;
+                    };
+                    let Ok(child_text) = child.utf8_text(source) else {
+                        continue;
+                    };
+                    match child_text {
+                        "unsigned" => unsigned = true,
+                        "long" => long_count += 1,
+                        "short" => has_short = true,
+                        "double" => has_double = true,
+                        _ => {}
+                    }
+                }
+                if has_double {
+                    return Some((if long_count >= 1 { "L" } else { "" }, true));
+                }
+                let suffix = match (unsigned, long_count) {
+                    (_, 0) if has_short => {
+                        if unsigned { "U" } else { "" }
+                    }
+                    (false, 0) => "",
+                    (false, 1) => "L",
+                    (false, 2) => "LL",
+                    (true, 0) => "U",
+                    (true, 1) => "UL",
+                    (true, 2) => "ULL",
+                    _ => return None,
+                };
+                Some((suffix, false))
+            }
+            _ => None,
         }
     }
 
-    fn is_float_type(t: NumericType) -> bool {
-        matches!(
-            t,
-            NumericType::Float | NumericType::Double | NumericType::LongDouble
-        )
+    fn declarator_name<'a>(decl_node: &Node<'a>, source: &[u8]) -> Option<String> {
+        for i in 0..decl_node.child_count() {
+            let Some(child) = decl_node.child(i as u32) else { continue };
+            if child.kind() == node_kind::INIT_DECLARATOR {
+                if let Some(declarator) = child.child_by_field_name("declarator") {
+                    if declarator.kind() == node_kind::IDENTIFIER {
+                        return declarator.utf8_text(source).ok().map(|s| s.to_string());
+                    }
+                }
+            }
+            if child.kind() == node_kind::FIELD_IDENTIFIER {
+                return child.utf8_text(source).ok().map(|s| s.to_string());
+            }
+        }
+        None
+    }
+
+    fn resolve_suffix(
+        decl_node: &Node<'_>,
+        source: &[u8],
+        clang_parse: Option<&ClangParseResult>,
+    ) -> Option<(&'static str, bool)> {
+        let line = decl_node.start_position().row + 1;
+
+        if let Some(parse) = clang_parse {
+            if let Some(name) = Self::declarator_name(decl_node, source) {
+                if let Some(symbol) = parse.symbol_on_line(
+                    &name,
+                    line,
+                    &[clang_sys::CXCursor_VarDecl, clang_sys::CXCursor_FieldDecl],
+                ) {
+                    if let Some(result) = Self::suffix_from_type_kind(symbol.canonical_type_kind) {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+
+        if let Some(type_node) = Self::find_type_node(decl_node) {
+            return Self::suffix_from_ts_type_node(&type_node, source);
+        }
+
+        None
+    }
+
+    fn is_plausible_number_literal(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return false;
+        }
+        if !bytes[0].is_ascii_digit() {
+            return false;
+        }
+        bytes.iter().all(|&b| matches!(b,
+            b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'
+            | b'x' | b'X'
+            | b'u' | b'U' | b'l' | b'L'
+            | b'p' | b'P'
+            | b'.' | b'\'' | b'+' | b'-'
+        ))
     }
 
     fn is_float_literal(literal: &str) -> bool {
@@ -104,7 +170,6 @@ impl NumericLiteralSuffixPolicy {
             p == "0x" || p == "0b"
         };
         if is_hex_or_bin {
-            // Only u/U/l/L are valid suffixes; f/F are hex digits
             let n = bytes
                 .iter()
                 .rev()
@@ -112,7 +177,6 @@ impl NumericLiteralSuffixPolicy {
                 .count();
             &literal[..literal.len() - n]
         } else if Self::is_float_literal(literal) {
-            // Float suffix is a single trailing f/F/l/L
             let last = bytes[bytes.len() - 1];
             if matches!(last, b'f' | b'F' | b'l' | b'L') {
                 &literal[..literal.len() - 1]
@@ -120,7 +184,6 @@ impl NumericLiteralSuffixPolicy {
                 literal
             }
         } else {
-            // Integer: strip trailing combination of u/U/l/L
             let n = bytes
                 .iter()
                 .rev()
@@ -148,51 +211,46 @@ impl NumericLiteralSuffixPolicy {
         result
     }
 
-    fn rewrite_literal(literal: &str, target: NumericType) -> Option<String> {
-        let literal_is_float = Self::is_float_literal(literal);
-        let target_is_float = Self::is_float_type(target);
-        if literal_is_float != target_is_float {
+    fn rewrite_literal(literal: &str, suffix: &str, is_float: bool) -> Option<String> {
+        if Self::is_float_literal(literal) != is_float {
             return None;
         }
         let number_part = Self::strip_suffix(literal);
-        let suffix = Self::target_suffix(target);
-        // Only normalize (strip trailing zeros) when adding a non-empty suffix to a float
-        let normalized_number = if target_is_float && !suffix.is_empty() {
+        let normalized = if is_float && !suffix.is_empty() {
             Self::normalize_float_decimal(number_part)
         } else {
             number_part.to_string()
         };
-        let new_literal = format!("{normalized_number}{suffix}");
-        if new_literal == literal {
-            None
-        } else {
-            Some(new_literal)
-        }
+        let new_literal = format!("{normalized}{suffix}");
+        (new_literal != literal).then_some(new_literal)
     }
 
-    fn extract_type_text(node: &Node<'_>, source: &[u8]) -> Option<String> {
-        const TYPE_NODE_KINDS: &[&str] =
-            &[node_kind::PRIMITIVE_TYPE, node_kind::SIZED_TYPE_SPECIFIER, node_kind::TYPE_IDENTIFIER];
-        // Try named field first
+    fn find_type_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+        const TYPE_NODE_KINDS: &[&str] = &[
+            node_kind::PRIMITIVE_TYPE,
+            node_kind::SIZED_TYPE_SPECIFIER,
+            node_kind::TYPE_IDENTIFIER,
+        ];
         if let Some(type_node) = node.child_by_field_name("type") {
             if TYPE_NODE_KINDS.contains(&type_node.kind()) {
-                if let Ok(text) = type_node.utf8_text(source) {
-                    return Some(text.split_whitespace().collect::<Vec<_>>().join(" "));
-                }
+                return Some(type_node);
             }
         }
-        // Fallback: scan direct children for a type node
         for i in 0..node.child_count() {
             let Some(child) = node.child(i as u32) else {
                 continue;
             };
             if TYPE_NODE_KINDS.contains(&child.kind()) {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.split_whitespace().collect::<Vec<_>>().join(" "));
-                }
+                return Some(child);
             }
         }
         None
+    }
+
+    fn extract_type_text(node: &Node<'_>, source: &[u8]) -> Option<String> {
+        let type_node = Self::find_type_node(node)?;
+        let text = type_node.utf8_text(source).ok()?;
+        Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 
     fn collect_number_literals(node: Node<'_>) -> Vec<Node<'_>> {
@@ -221,38 +279,12 @@ impl NumericLiteralSuffixPolicy {
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
     ) -> Vec<Node<'a>> {
-        let mut nodes = Vec::new();
-
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::DECL_QUERY).ok())
-        {
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
-            while let Some(m) = {
-                matches.advance();
-                matches.get()
-            } {
-                for capture in m.captures {
-                    nodes.push(capture.node);
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if matches!(
-                    node.kind(),
-                    node_kind::DECLARATION | node_kind::FIELD_DECLARATION
-                ) {
-                    nodes.push(node);
-                }
-                for i in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(i as u32) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
-        nodes
+        ts_traversal::query_or_traverse_collect(
+            root,
+            Self::DECL_QUERY,
+            query_cache,
+            &[node_kind::DECLARATION, node_kind::FIELD_DECLARATION],
+        )
     }
 
     fn gather_initializer_literals<'a>(decl_node: Node<'a>) -> Vec<Node<'a>> {
@@ -267,7 +299,6 @@ impl NumericLiteralSuffixPolicy {
                 }
             }
         }
-        // field_declaration may carry a direct default_value field
         if decl_node.kind() == node_kind::FIELD_DECLARATION {
             if let Some(default) = decl_node.child_by_field_name("default_value") {
                 literals.extend(Self::collect_number_literals(default));
@@ -283,19 +314,14 @@ impl Policy for NumericLiteralSuffixPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         let Some(tree) = context.tree_sitter_tree else {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "numeric_literal_suffix: tree-sitter context unavailable".to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "numeric_literal_suffix: tree-sitter context unavailable".to_string(),
+            );
         };
 
         let text = context.text;
         let source = text.as_bytes();
-        // (start_byte, end_byte, line, column, new_text)
+        let clang_parse = context.clang_parse_result;
         let mut replacements: Vec<(usize, usize, usize, usize, String)> = Vec::new();
         let mut violations = Vec::new();
         let warnings = Vec::new();
@@ -304,51 +330,48 @@ impl Policy for NumericLiteralSuffixPolicy {
         let decl_nodes = Self::collect_decl_nodes(root, context.query_cache);
 
         for node in &decl_nodes {
-            if let Some(type_text) = Self::extract_type_text(node, source) {
-                if let Some(numeric_type) = Self::classify_type(&type_text) {
-                    for literal_node in Self::gather_initializer_literals(*node) {
-                        let start = literal_node.start_byte();
-                        let end = literal_node.end_byte();
-                        if start >= end || end > source.len() {
-                            continue;
-                        }
-                        let Ok(literal_text) = std::str::from_utf8(&source[start..end]) else {
-                            continue;
-                        };
-                        if let Some(new_text) =
-                            Self::rewrite_literal(literal_text, numeric_type)
-                        {
-                            let line = literal_node.start_position().row + 1;
-                            let column = literal_node.start_position().column + 1;
-                            violations.push(Violation {
-                                policy: self.name().into(),
-                                message: format!(
-                                    "literal '{literal_text}' should be '{new_text}' for type '{type_text}'"
-                                ),
-                                line,
-                                column: Some(column),
-                            });
-                            replacements.push((start, end, line, column, new_text));
-                        }
-                    }
+            if node.has_error() || node.is_error() {
+                continue;
+            }
+            let Some((suffix, is_float)) = Self::resolve_suffix(node, source, clang_parse) else {
+                continue;
+            };
+            let type_text = Self::extract_type_text(node, source).unwrap_or_default();
+            for literal_node in Self::gather_initializer_literals(*node) {
+                let start = literal_node.start_byte();
+                let end = literal_node.end_byte();
+                if start >= end || end > source.len() {
+                    continue;
+                }
+                let Ok(literal_text) = std::str::from_utf8(&source[start..end]) else {
+                    continue;
+                };
+                if !Self::is_plausible_number_literal(literal_text) {
+                    continue;
+                }
+                if let Some(new_text) = Self::rewrite_literal(literal_text, suffix, is_float) {
+                    let line = literal_node.start_position().row + 1;
+                    let column = literal_node.start_position().column + 1;
+                    violations.push(Violation {
+                        policy: self.name().into(),
+                        message: format!(
+                            "literal '{literal_text}' should be '{new_text}' for type '{type_text}'"
+                        ),
+                        line,
+                        column: Some(column),
+                    });
+                    replacements.push((start, end, line, column, new_text));
                 }
             }
         }
 
         if replacements.is_empty() {
-            return PolicyResult {
-                text: text.to_string(),
-                violations,
-                edits: Vec::new(),
-                warnings,
-            };
+            return PolicyResult::unchanged();
         }
 
-        // Sort by start byte and remove any duplicates (same start offset)
         replacements.sort_by_key(|(start, ..)| *start);
         replacements.dedup_by_key(|(start, ..)| *start);
 
-        // Apply in reverse byte order so earlier offsets stay valid
         let mut output = text.to_string();
         let mut edits = Vec::new();
         for (start, end, line, _column, new_text) in replacements.iter().rev() {
@@ -365,6 +388,7 @@ impl Policy for NumericLiteralSuffixPolicy {
 
         PolicyResult {
             text: output,
+            changed: true,
             violations,
             edits,
             warnings,
@@ -380,6 +404,8 @@ mod tests {
 
     use super::*;
     use crate::model::policy_context::PolicyContext;
+    use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
+    use crate::parser::clang_symbol::ClangSymbol;
 
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
@@ -387,6 +413,39 @@ mod tests {
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
             .expect("cpp language");
         parser.parse(text, None).expect("parse tree")
+    }
+
+    fn make_clang_var(
+        name: &str,
+        line: usize,
+        column: usize,
+        canonical_kind: i32,
+    ) -> ClangSymbol {
+        ClangSymbol {
+            name: name.to_string(),
+            kind: clang_sys::CXCursor_VarDecl,
+            line,
+            column,
+            usr: None,
+            scope_usr: None,
+            storage_class: None,
+            is_const: false,
+            is_volatile: false,
+            type_kind: clang_sys::CXType_Typedef,
+            type_display: String::new(),
+            canonical_type_kind: canonical_kind,
+            template_name: None,
+        }
+    }
+
+    fn make_parse_result(symbols: Vec<ClangSymbol>) -> ClangParseResult {
+        ClangParseResult::new(
+            true,
+            Vec::new(),
+            symbols,
+            ClangDiagnosticSummary::default(),
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -420,7 +479,7 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
     }
 
@@ -443,7 +502,7 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
     }
 
@@ -510,7 +569,7 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
     }
 
@@ -545,7 +604,7 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
     }
 
@@ -561,107 +620,117 @@ mod tests {
     }
 
     #[test]
-    fn uint8_gets_u() {
+    fn uint8_gets_u_via_clang() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "uint8_t x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
+        let clang = make_parse_result(vec![make_clang_var("x", 1, 9, clang_sys::CXType_UChar)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "uint8_t x = 1U;\n");
         assert_eq!(result.edits.len(), 1);
     }
 
     #[test]
-    fn uint64_gets_ull() {
+    fn uint64_gets_ull_via_clang() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "uint64_t x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
+        let clang = make_parse_result(vec![make_clang_var("x", 1, 10, clang_sys::CXType_ULongLong)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "uint64_t x = 1ULL;\n");
     }
 
     #[test]
-    fn int32_strips_suffix() {
+    fn int32_strips_suffix_via_clang() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "int32_t x = 1u;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
+        let clang = make_parse_result(vec![make_clang_var("x", 1, 9, clang_sys::CXType_Int)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int32_t x = 1;\n");
     }
 
     #[test]
-    fn int64_gets_ll() {
+    fn int64_gets_ll_via_clang() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "int64_t x = 1;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
+        let clang = make_parse_result(vec![make_clang_var("x", 1, 9, clang_sys::CXType_LongLong)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int64_t x = 1LL;\n");
     }
 
     #[test]
-    fn sizet_gets_ull() {
+    fn sizet_gets_platform_suffix_via_clang() {
+        let policy = NumericLiteralSuffixPolicy::new();
+        let text = "size_t x = 10;\n";
+        let tree = parse_cpp(text);
+        let path = PathBuf::from("sample.cpp");
+        // LP64: size_t is unsigned long
+        let clang = make_parse_result(vec![make_clang_var("x", 1, 8, clang_sys::CXType_ULong)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
+        let result = policy.apply(&ctx);
+        assert_eq!(result.text, "size_t x = 10UL;\n");
+    }
+
+    #[test]
+    fn sizet_lp64_ul_unchanged() {
+        let policy = NumericLiteralSuffixPolicy::new();
+        let text = "static constexpr size_t x = 2UL;\n";
+        let tree = parse_cpp(text);
+        let path = PathBuf::from("sample.cpp");
+        let clang = make_parse_result(vec![make_clang_var("x", 1, 25, clang_sys::CXType_ULong)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
+        let result = policy.apply(&ctx);
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn constexpr_class_field_via_clang() {
+        let policy = NumericLiteralSuffixPolicy::new();
+        let text = "class Foo {\n    static constexpr size_t C_MAX = 2;\n};\n";
+        let tree = parse_cpp(text);
+        let path = PathBuf::from("sample.hpp");
+        let clang = make_parse_result(vec![make_clang_var("C_MAX", 2, 29, clang_sys::CXType_ULong)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
+        let result = policy.apply(&ctx);
+        assert_eq!(
+            result.text,
+            "class Foo {\n    static constexpr size_t C_MAX = 2UL;\n};\n"
+        );
+    }
+
+    #[test]
+    fn typedef_skipped_without_clang() {
         let policy = NumericLiteralSuffixPolicy::new();
         let text = "size_t x = 10;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, "size_t x = 10ULL;\n");
-    }
-
-    #[test]
-    fn constexpr_sizet_ull() {
-        let policy = NumericLiteralSuffixPolicy::new();
-        let text = "static constexpr size_t x = 2;\n";
-        let tree = parse_cpp(text);
-        let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
-        let result = policy.apply(&ctx);
-        assert_eq!(result.text, "static constexpr size_t x = 2ULL;\n");
-    }
-
-    #[test]
-    fn constexpr_class_ull() {
-        let policy = NumericLiteralSuffixPolicy::new();
-        let text = "class Foo {\n    static constexpr size_t C_MAX = 2;\n};\n";
-        let tree = parse_cpp(text);
-        let path = PathBuf::from("sample.hpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
-        let result = policy.apply(&ctx);
-        assert_eq!(
-            result.text,
-            "class Foo {\n    static constexpr size_t C_MAX = 2ULL;\n};\n"
-        );
-    }
-
-    #[test]
-    fn sizet_ull_unchanged() {
-        let policy = NumericLiteralSuffixPolicy::new();
-        let text = "static constexpr size_t x = 2ULL;\n";
-        let tree = parse_cpp(text);
-        let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
-        let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
-        assert!(result.edits.is_empty());
-    }
-
-    #[test]
-    fn sizet_ul_corrected() {
-        let policy = NumericLiteralSuffixPolicy::new();
-        let text = "static constexpr size_t x = 6UL;\n";
-        let tree = parse_cpp(text);
-        let path = PathBuf::from("sample.cpp");
-        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
-        let result = policy.apply(&ctx);
-        assert_eq!(result.text, "static constexpr size_t x = 6ULL;\n");
+        assert!(!result.changed);
     }
 
     #[test]
@@ -672,8 +741,7 @@ mod tests {
         let path = PathBuf::from("sample.hpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        // Template parameters are not declarations, should be untouched
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
     }
 
     #[test]
@@ -684,7 +752,48 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
         let result = policy.apply(&ctx);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
+    }
+
+    #[test]
+    fn error_node_skipped() {
+        let policy = NumericLiteralSuffixPolicy::new();
+        let text = "int x = ;;\nfloat y = 1.0;\n";
+        let tree = parse_cpp(text);
+        let path = PathBuf::from("sample.cpp");
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
+        let result = policy.apply(&ctx);
+        // The first declaration has an error; only the valid float decl should be touched
+        assert_eq!(result.text, "int x = ;;\nfloat y = 1.f;\n");
+    }
+
+    #[test]
+    fn identifier_not_rewritten() {
+        let policy = NumericLiteralSuffixPolicy::new();
+        // Ensure identifiers like C_WORD_BITS are never corrupted
+        let text = "static constexpr size_t C_WORD_BITS = static_cast<size_t>(64);\n";
+        let tree = parse_cpp(text);
+        let path = PathBuf::from("sample.hpp");
+        let ctx = PolicyContext::new(text, &path).with_tree(Some(&tree));
+        let result = policy.apply(&ctx);
+        // size_t is a typedef — without clang, policy should skip it entirely
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn clang_name_mismatch_falls_back() {
+        let policy = NumericLiteralSuffixPolicy::new();
+        let text = "float x = 1.0;\n";
+        let tree = parse_cpp(text);
+        let path = PathBuf::from("sample.cpp");
+        // Provide a clang symbol with a different name — should fall back to tree-sitter
+        let clang = make_parse_result(vec![make_clang_var("y", 1, 7, clang_sys::CXType_ULong)]);
+        let ctx = PolicyContext::new(text, &path)
+            .with_tree(Some(&tree))
+            .with_clang(Some(&clang));
+        let result = policy.apply(&ctx);
+        // Tree-sitter sees "float" type → suffix "f", not ULong's "UL"
+        assert_eq!(result.text, "float x = 1.f;\n");
     }
 }
