@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::engine::fuzzy_inference;
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -67,7 +69,27 @@ impl ClangFormatPolicy {
             .collect::<String>()
     }
 
-    fn is_delete_default_function_line(line: &str) -> bool {
+    fn delete_default_lines_from_tree(tree: &tree_sitter::Tree) -> BTreeSet<usize> {
+        let mut lines = BTreeSet::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "default_method_clause" || node.kind() == "delete_method_clause" {
+                if let Some(parent) = node.parent() {
+                    for line in parent.start_position().row + 1..=parent.end_position().row + 1 {
+                        lines.insert(line);
+                    }
+                }
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        lines
+    }
+
+    fn is_delete_default_function_line_text(line: &str) -> bool {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('#') {
             return false;
@@ -144,7 +166,11 @@ impl ClangFormatPolicy {
         (rebuilt, safe_edits, warnings)
     }
 
-    fn preserve_sensitive_lines(before: &str, after: &str) -> String {
+    fn preserve_sensitive_lines(
+        before: &str,
+        after: &str,
+        delete_default_lines: Option<&BTreeSet<usize>>,
+    ) -> String {
         let before_lines = Self::split_keep_ends(before);
         let mut after_lines = Self::split_keep_ends(after);
         if before_lines.is_empty() || after_lines.is_empty() {
@@ -156,9 +182,14 @@ impl ClangFormatPolicy {
             .map(|l| Self::normalize_line_for_match(l.as_str()))
             .collect();
         let mut consumed = vec![false; after_lines.len()];
-        for source in &before_lines {
-            if !Self::is_delete_default_function_line(source) && !Self::is_end_comment_line(source)
-            {
+        for (line_idx, source) in before_lines.iter().enumerate() {
+            let line_1 = line_idx + 1;
+            let is_sensitive = if let Some(dd_lines) = delete_default_lines {
+                dd_lines.contains(&line_1) || Self::is_end_comment_line(source)
+            } else {
+                Self::is_delete_default_function_line_text(source) || Self::is_end_comment_line(source)
+            };
+            if !is_sensitive {
                 continue;
             }
             let key = Self::normalize_line_for_match(source);
@@ -258,28 +289,18 @@ impl Policy for ClangFormatPolicy {
         if let Some(parse) = context.clang_parse_result {
             let summary = parse.diagnostic_summary();
             if summary.fatal > 0 {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: vec![format!(
-                        "clang_format: skipped due fatal clang diagnostics (fatal={})",
-                        summary.fatal
-                    )],
-                };
+                return PolicyResult::unchanged_with_warning(format!(
+                    "clang_format: skipped due fatal clang diagnostics (fatal={})",
+                    summary.fatal
+                ));
             }
         }
         let semantic_query = context.semantic_query();
         if !semantic_query.is_available() {
-            return PolicyResult {
-                text: context.text.to_string(),
-                violations: Vec::new(),
-                edits: Vec::new(),
-                warnings: vec![
-                    "clang_format: semantic context unavailable; skipping heuristic formatting"
-                        .to_string(),
-                ],
-            };
+            return PolicyResult::unchanged_with_warning(
+                "clang_format: semantic context unavailable; skipping heuristic formatting"
+                    .to_string(),
+            );
         }
 
         let before_error_count = context
@@ -297,43 +318,33 @@ impl Policy for ClangFormatPolicy {
         });
         let regions = Self::compute_line_regions(line_count, batch_size);
 
+        let dd_lines = context.tree_sitter_tree
+            .map(|t| Self::delete_default_lines_from_tree(t));
+        let dd_ref = dd_lines.as_ref();
+
         if regions.len() <= 1 {
             // Fast path: whole-file formatting (original behavior)
             let formatted = match self.run_clang_format(context.text, context.path_str(), None) {
                 Ok(f) => f,
                 Err(warning) => {
-                    return PolicyResult {
-                        text: context.text.to_string(),
-                        violations: Vec::new(),
-                        edits: Vec::new(),
-                        warnings: vec![warning],
-                    };
+                    return PolicyResult::unchanged_with_warning(warning);
                 }
             };
 
-            let updated = Self::preserve_sensitive_lines(context.text, formatted.as_str());
+            let updated = Self::preserve_sensitive_lines(context.text, formatted.as_str(), dd_ref);
             if updated == context.text {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: Vec::new(),
-                };
+                return PolicyResult::unchanged();
             }
 
             let edits = self.diff_lines(context.text, &updated);
             let (validated_text, validated_edits, warnings) =
                 self.self_validate_tree_sitter(context.text, &updated, before_error_count, edits);
             if validated_edits.is_empty() {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings,
-                };
+                return PolicyResult::unchanged_with_warnings(warnings);
             }
             PolicyResult {
                 text: validated_text,
+                changed: true,
                 violations: vec![Violation {
                     policy: self.name().into(),
                     message: "clang-format adjusted formatting".to_string(),
@@ -359,7 +370,7 @@ impl Policy for ClangFormatPolicy {
                     }
                 };
 
-                let updated = Self::preserve_sensitive_lines(&current_text, formatted.as_str());
+                let updated = Self::preserve_sensitive_lines(&current_text, formatted.as_str(), dd_ref);
                 if updated == current_text {
                     continue;
                 }
@@ -379,15 +390,11 @@ impl Policy for ClangFormatPolicy {
             }
 
             if all_edits.is_empty() {
-                return PolicyResult {
-                    text: context.text.to_string(),
-                    violations: Vec::new(),
-                    edits: Vec::new(),
-                    warnings: all_warnings,
-                };
+                return PolicyResult::unchanged_with_warnings(all_warnings);
             }
             PolicyResult {
                 text: current_text,
+                changed: true,
                 violations: vec![Violation {
                     policy: self.name().into(),
                     message: "clang-format adjusted formatting".to_string(),
@@ -416,7 +423,7 @@ mod tests {
     fn preserve_restores_spacing() {
         let before = "    Hasher(void)                    = delete;\n    ~Hasher(void)                   = delete;\n";
         let after = "    Hasher(void) = delete;\n    ~Hasher(void) = delete;\n";
-        let restored = ClangFormatPolicy::preserve_sensitive_lines(before, after);
+        let restored = ClangFormatPolicy::preserve_sensitive_lines(before, after, None);
         assert_eq!(restored, before);
     }
 
@@ -424,7 +431,7 @@ mod tests {
     fn preserve_restores_comment() {
         let before = "            } // end bool swap(const Key& key, std::shared_ptr<T> old_data, std::shared_ptr<T> new_data)\n";
         let after = "            } // end bool swap(const Key& key, std::shared_ptr<T> old_data, std::shared_ptr<T>\n              // new_data)\n";
-        let restored = ClangFormatPolicy::preserve_sensitive_lines(before, after);
+        let restored = ClangFormatPolicy::preserve_sensitive_lines(before, after, None);
         assert_eq!(restored, before);
     }
 
@@ -459,7 +466,7 @@ mod tests {
         let path = PathBuf::from("fatal.cpp");
         let context = PolicyContext::new(text, &path).with_clang(Some(&parse));
         let result = policy.apply(&context);
-        assert_eq!(result.text, text);
+        assert!(!result.changed);
         assert!(result.edits.is_empty());
         assert!(result
             .warnings
