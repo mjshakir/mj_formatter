@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::engine::accuracy_gate::AccuracyGateDecision;
 use crate::engine::catalog::PolicyCertainty;
 use crate::model::exec_trace::PolicyExecutionTrace;
 use crate::model::policy_result::PolicyResult;
+use crate::parser::clang_result::ClangParseResult;
 
 #[derive(Clone, Debug, Default)]
 pub struct FormatPassMetrics {
@@ -31,4 +33,5 @@ pub struct FormatPassResult {
     pub policy_certainty: Option<PolicyCertainty>,
     pub rollback_count: usize,
     pub boot_parse_ms: f64,
+    pub clang_parse: Option<Arc<ClangParseResult>>,
 }

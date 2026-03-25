@@ -163,6 +163,7 @@ impl FileProcessor {
                 edits: policy_result.edits,
                 accuracy_gate: pass_result.accuracy_gate,
                 certainty: pass_result.policy_certainty,
+                clang_parse: pass_result.clang_parse,
             },
             traces: pass_result.policy_traces,
             error: None,

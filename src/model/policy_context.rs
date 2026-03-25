@@ -10,26 +10,7 @@ use crate::parser::clang_result::ClangParseResult;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::query_cache::TsQueryCache;
 use crate::graph::snapshot::ProjectGraphSnapshot;
-
-#[derive(Clone, Copy, Debug)]
-pub struct ParserTrust {
-    pub semantic_rewrite: f64,
-}
-
-impl Default for ParserTrust {
-    fn default() -> Self {
-        Self {
-            semantic_rewrite: 1.0,
-        }
-    }
-}
-
-impl ParserTrust {
-    #[inline]
-    pub fn scaled_edit_willingness(&self) -> f64 {
-        1.0 / (1.0 + (-5.0_f64 * (self.semantic_rewrite - 0.5)).exp())
-    }
-}
+use crate::policy::shared_data::PolicySharedData;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PolicyContext<'a> {
@@ -39,10 +20,10 @@ pub struct PolicyContext<'a> {
     pub clang_parse_result: Option<&'a ClangParseResult>,
     pub semantic_file_context: Option<&'a SemanticFileContext>,
     pub project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
-    pub parser_trust: ParserTrust,
     pub policy_certainty: Option<PolicyCertainty>,
     pub query_cache: Option<&'a TsQueryCache>,
     pub forced_batch_size: Option<usize>,
+    pub shared: Option<&'a PolicySharedData<'a>>,
 }
 
 impl<'a> PolicyContext<'a> {
@@ -54,16 +35,11 @@ impl<'a> PolicyContext<'a> {
             clang_parse_result: None,
             semantic_file_context: None,
             project_graph_snapshot: None,
-            parser_trust: ParserTrust::default(),
             policy_certainty: None,
             query_cache: None,
             forced_batch_size: None,
+            shared: None,
         }
-    }
-
-    pub fn with_parser_trust(mut self, parser_trust: ParserTrust) -> Self {
-        self.parser_trust = parser_trust;
-        self
     }
 
     pub fn with_policy_certainty(mut self, policy_certainty: Option<PolicyCertainty>) -> Self {
@@ -102,6 +78,11 @@ impl<'a> PolicyContext<'a> {
         project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
     ) -> Self {
         self.project_graph_snapshot = project_graph_snapshot;
+        self
+    }
+
+    pub fn with_shared(mut self, shared: Option<&'a PolicySharedData<'a>>) -> Self {
+        self.shared = shared;
         self
     }
 

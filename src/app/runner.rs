@@ -581,9 +581,14 @@ impl App {
             Self::apply_write_phase(&file_io, &mut results, parallel_pool.as_ref());
         }
 
-        // Run graph refresh in parallel with backup manifest writing.
-        // Graph refresh reads files from disk (needs write phase complete) and uses
-        // pre-extracted owned data. Backup manifest is independent.
+        // Ensure clang parse service has enough lanes for graph refresh targets.
+        if let Some(ref input) = graph_input {
+            let need_parse = input.targets.iter().filter(|t| t.cached_clang.is_none()).count();
+            if need_parse > 0 {
+                ClangParseService::configure(need_parse);
+            }
+        }
+
         let graph_started = Instant::now();
         let (project_graph_stats, graph_warnings) = std::thread::scope(|s| {
             let graph_handle = if let (Some(input), Some(project_graph)) =
@@ -1004,6 +1009,7 @@ impl App {
                 edits: result.edits,
                 accuracy_gate: result.accuracy_gate,
                 certainty: result.policy_certainty,
+                clang_parse: None,
             },
             traces: result.policy_traces,
             error: result.error,

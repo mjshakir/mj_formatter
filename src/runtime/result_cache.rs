@@ -233,6 +233,7 @@ impl CheckResultCache {
                 edits: cached.edits.clone(),
                 accuracy_gate: cached.accuracy_gate.clone(),
                 certainty: None,
+                clang_parse: None,
             },
             traces: cached.policy_traces.clone(),
             error: None,

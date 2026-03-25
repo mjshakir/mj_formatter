@@ -623,6 +623,7 @@ impl FormatterEngine {
                 violations,
                 edits: Vec::new(),
                 warnings: all_warnings,
+                changed: false,
             },
             convergence_pairs: BTreeMap::new(),
             policy_traces: Vec::new(),
@@ -631,6 +632,7 @@ impl FormatterEngine {
             policy_certainty: None,
             rollback_count: 0,
             boot_parse_ms: 0.0,
+            clang_parse: None,
         })
     }
 

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::engine::accuracy_gate::AccuracyGateDecision;
 use crate::engine::catalog::PolicyCertainty;
@@ -7,6 +8,7 @@ use crate::model::edit::Edit;
 use crate::model::exec_trace::PolicyExecutionTrace;
 use crate::model::rename_plan::SemanticRenamePlan;
 use crate::model::violation::Violation;
+use crate::parser::clang_result::ClangParseResult;
 
 #[derive(Clone, Debug, Default)]
 pub struct FileMeta {
@@ -27,6 +29,7 @@ pub struct FormatOutcome {
     pub edits: Vec<Edit>,
     pub accuracy_gate: Option<AccuracyGateDecision>,
     pub certainty: Option<PolicyCertainty>,
+    pub clang_parse: Option<Arc<ClangParseResult>>,
 }
 
 #[derive(Clone, Debug, Default)]

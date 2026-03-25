@@ -285,6 +285,7 @@ mod tests {
                 after: "x ".to_string(),
             }],
             warnings: Vec::new(),
+            changed: true,
         };
         let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
         let certainty = PolicyCertainty {
