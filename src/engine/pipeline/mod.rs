@@ -18,7 +18,6 @@ use rustc_hash::FxHashMap;
 use crate::config::types::ConfidenceConfig;
 use crate::config::enums::Enforcement;
 use crate::config::policy_config::PolicyConfig;
-use crate::engine::confidence_context::ConfidenceContext;
 use crate::engine::gate_decision::{ConfidenceGateDecision, ConfidenceReasonCode};
 use crate::engine::convergence::ConvergenceController;
 use crate::engine::convergence::ConvergencePolicyProfile;
@@ -28,7 +27,6 @@ use crate::engine::edit_guard::EditGuard;
 use crate::engine::conflict_solver::GlobalConflictSolver;
 use crate::engine::catalog::PolicyCapabilities;
 use crate::engine::catalog::PolicyCapabilityMatrix;
-use crate::engine::catalog::PolicyCertainty;
 use crate::engine::catalog::policy_catalog;
 use crate::engine::conflict_detector::PolicyConflictDetector;
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
@@ -64,7 +62,6 @@ use crate::runtime::telemetry::{
 };
 use crate::parser::text_scan;
 use tree_sitter::Tree;
-use crate::engine::filter_store::CertaintyFilterStore;
 use crate::engine::context_tracker::{
     BlockContextKind, FileContextKind, PolicyContextTracker,
 };
@@ -85,7 +82,6 @@ pub struct PolicyPipeline {
     confidence_default_enforcement: Enforcement,
     conflict_detection_enabled: bool,
     conflict_touch_threshold: usize,
-    certainty_filter_store: CertaintyFilterStore,
     context_tracker: ArcSwap<PolicyContextTracker>,
     query_cache: TsQueryCache,
 }
@@ -99,7 +95,6 @@ struct ParseCache {
     comment_lines: Option<BTreeSet<usize>>,
     summary: Option<SemanticSummary>,
     error_lines: Option<BTreeSet<usize>>,
-    certainty: Option<PolicyCertainty>,
     clang_edits_since: usize,
     exact_compdb: bool,
     semantic_kind: SemanticCompdbContextKind,
@@ -132,15 +127,6 @@ impl ParseCache {
             self.clang_edits_since = 0;
         } else {
             self.clang_edits_since += 1;
-            let reobs_trust = self
-                .certainty
-                .map(|c| c.trust_for_general())
-                .unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
-            let reobs_interval =
-                crate::engine::fuzzy_inference::fuzzy_reobs_interval(reobs_trust);
-            if self.clang_edits_since.is_multiple_of(reobs_interval) {
-                self.certainty = None;
-            }
         }
         self.semantic = None;
         self.comment_lines = None;
@@ -166,7 +152,6 @@ pub(super) struct PipelineState<'a> {
     path: &'a Path,
     options: &'a PolicyRunOptions,
     current: Arc<str>,
-    content_hash: u64,
     parse: ParseCache,
     cand: CandidateState,
     telem: TelemetryState,
@@ -175,14 +160,12 @@ pub(super) struct PipelineState<'a> {
     all_warnings: Vec<String>,
     policy_traces: Vec<PolicyExecutionTrace>,
     convergence_controller: ConvergenceController,
-    rollback_count: usize,
     retry_batch_size: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
 struct PreparedPolicyStage {
     capability: PolicyCapabilities,
-    policy_certainty: PolicyCertainty,
     guidance_mode: PolicyGuidanceMode,
 }
 
@@ -205,11 +188,9 @@ struct ConvergenceSignalInput<'a> {
     result: &'a PolicyResult,
     semantic: Option<&'a SemanticFileContext>,
     summary: crate::parser::file_context::SemanticSummary,
-    semantic_fidelity_score: f64,
     previous_contract_failures: &'a BTreeSet<SemanticInvariantClause>,
     capability: &'a PolicyCapabilities,
     cluster_radius_cap: Option<usize>,
-    trust: f64,
 }
 
 struct CommitPolicyInput<'a> {
@@ -233,7 +214,6 @@ pub(super) struct PartialRollbackInput<'a> {
 struct ExecutedPolicyStage {
     result: PolicyResult,
     capability: PolicyCapabilities,
-    policy_certainty: PolicyCertainty,
     context_cluster: u64,
     confidence_sample: Option<PolicyConfidenceSample>,
     confidence_outcome: Option<PolicyDecisionOutcome>,
@@ -277,10 +257,9 @@ impl PolicyPipeline {
         confidence_config: ConfidenceConfig,
         conflict_detection_enabled: bool,
         conflict_touch_threshold: usize,
-        population_context: Option<crate::engine::population_context::PopulationContext>,
+        _population_context: Option<crate::engine::population_context::PopulationContext>,
     ) -> Self {
         let convergence_profiles = Arc::new(Self::build_convergence_profiles(&policy_settings));
-        let certainty_filter_store = CertaintyFilterStore::new(population_context.as_ref());
         let query_cache = TsQueryCache::new(tree_sitter_cpp::LANGUAGE.into());
         Self {
             policies,
@@ -291,7 +270,6 @@ impl PolicyPipeline {
             confidence_default_enforcement: confidence_config.default_enforcement,
             conflict_detection_enabled,
             conflict_touch_threshold,
-            certainty_filter_store,
             context_tracker: ArcSwap::new(Arc::new(PolicyContextTracker::new())),
             query_cache,
         }
@@ -323,34 +301,6 @@ impl PolicyPipeline {
         (**tracker).save_to_path(path)
     }
 
-    pub fn save_certainty_state(&self, path: &Path) -> anyhow::Result<()> {
-        self.certainty_filter_store.save_to_path(path)
-    }
-
-    pub fn record_edit_outcome(&self, path: &Path, outcome: f64) {
-        self.certainty_filter_store.record_edit_outcome(&path.to_string_lossy(), outcome);
-    }
-
-    pub fn adaptive_rules(&self) -> std::sync::MutexGuard<'_, crate::engine::adaptive_rules::AdaptiveRuleBases> {
-        self.certainty_filter_store.adaptive_rules()
-    }
-
-    pub fn update_adaptive_rules(&self, record: &crate::engine::fuzzy_inference::AdaptiveFiringRecord, outcome: f64) {
-        self.certainty_filter_store.update_adaptive_rules(record, outcome);
-    }
-
-    pub fn correlate_paired_certainty(&self, path: &Path, estimates: [f64; crate::engine::certainty_filter::NUM_DIMS]) {
-        use crate::files::file_unit::FileUnitKind;
-        let trust = estimates[0].clamp(0.0, 1.0);
-        let damping = crate::engine::fuzzy_inference::fuzzy_damping_factor(trust);
-        let companions = FileUnitKind::paired_companion_paths_on_disk(path);
-        for companion in companions {
-            let key = companion.to_string_lossy();
-            self.certainty_filter_store
-                .correlate_paired_observation(&key, estimates, damping);
-        }
-    }
-
     pub fn run_with_options(
         &self,
         text: &str,
@@ -359,44 +309,14 @@ impl PolicyPipeline {
     ) -> Result<FormatPassResult> {
         let mut state = self.initialize_run_state(text, path, options);
         let boot_parse_started = Instant::now();
-        // Eagerly compute certainty before the policy loop so that
-        // fuzzy_execution_level() and all downstream gates
-        // receive real Kalman state instead of None/defaults.
         if let Some(first_policy) = self.policies.first() {
             let boot = Instant::now();
             self.ensure_policy_parse_stage(&mut state, first_policy.as_ref(), first_policy.name(), boot)?;
-        }
-        if state.parse.certainty.is_none() {
-            let mut confidence = ConfidenceContext::from_parsers_and_semantic(
-                state.parse.tree.as_ref(),
-                state.parse.clang.as_deref(),
-                state.parse.semantic.as_ref(),
-                &state.current,
-                state.parse.tree.as_ref(),
-            );
-            confidence.rename_coverage_signal = state.cand.rename_signal;
-            let measurement = Self::extract_raw_observation(
-                &confidence,
-                state.parse.summary,
-                state.parse.has_semantic_compdb,
-                state.parse.clang_edits_since,
-            );
-            let certainty = self.apply_certainty_filter(
-                state.path,
-                measurement,
-                state.content_hash,
-            );
-            state.parse.certainty = Some(certainty);
-            state.parse.fidelity_score = crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
-                state.parse.semantic_kind,
-                Some(&certainty),
-            );
         }
         let boot_parse_ms = boot_parse_started.elapsed().as_secs_f64() * 1000.0;
         if options.observation_only {
             PolicyTelemetry::record_batch(&state.telem.samples);
             return Ok(FormatPassResult {
-                policy_certainty: state.parse.certainty,
                 boot_parse_ms,
                 ..Default::default()
             });
@@ -433,8 +353,6 @@ impl PolicyPipeline {
             policy_traces: state.policy_traces,
             accuracy_gate: None,
             metrics: FormatPassMetrics::default(),
-            policy_certainty: state.parse.certainty,
-            rollback_count: state.rollback_count,
             boot_parse_ms,
             clang_parse: state.parse.clang.clone(),
         })
@@ -465,7 +383,6 @@ impl PolicyPipeline {
             path,
             options,
             current: Arc::from(text),
-            content_hash: crc32fast::hash(text.as_bytes()) as u64,
             parse: ParseCache {
                 tree: None,
                 prev_tree: None,
@@ -474,15 +391,11 @@ impl PolicyPipeline {
                 comment_lines: None,
                 summary: None,
                 error_lines: None,
-                certainty: None,
                 clang_edits_since: 0,
                 exact_compdb: exact_compdb_for_file,
                 semantic_kind: semantic_context_kind,
                 has_semantic_compdb: semantic_compdb_context_for_file,
-                fidelity_score: crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
-                    semantic_context_kind,
-                    None,
-                ),
+                fidelity_score: 1.0,
             },
             cand: CandidateState {
                 internal: Vec::new(),
@@ -504,7 +417,6 @@ impl PolicyPipeline {
             all_warnings: Vec::new(),
             policy_traces: Vec::with_capacity(self.policies.len()),
             convergence_controller,
-            rollback_count: 0,
             retry_batch_size: None,
         }
     }
@@ -726,16 +638,12 @@ impl PolicyPipeline {
             PolicyCheckpointResult::Rollback { reason, after_error_count } => {
                 let mut retried = false;
                 if state.retry_batch_size.is_none() && after_error_count > 0 {
-                    let retry_batch = state.parse.certainty
-                        .as_ref()
-                        .map(|c| crate::engine::fuzzy_inference::fuzzy_batch_lines(c, after_error_count))
-                        .unwrap_or(50);
+                    let retry_batch = usize::MAX;
                     if retry_batch < state.current.lines().count() {
                         state.retry_batch_size = Some(retry_batch);
                         self.ensure_policy_parse_stage(state, policy, policy_name, policy_started)?;
                         let Some(prepared) = self.prepare_policy_stage(state, policy_name, policy_started) else {
                             state.all_warnings.push(reason);
-                            state.rollback_count += 1;
                             return Ok(());
                         };
                         let retry_executed = self.execute_policy_stage(state, policy, prepared, policy_started)?;
@@ -784,7 +692,6 @@ impl PolicyPipeline {
                     policy_started.elapsed(),
                     false,
                 ));
-                state.rollback_count += 1;
             }
         }
         Ok(())
@@ -891,7 +798,6 @@ impl PolicyPipeline {
         if needs_clang && state.parse.semantic.is_some() {
             state.parse.semantic = None;
             state.parse.summary = None;
-            state.parse.certainty = None;
         }
         if state.parse.semantic.is_none() {
             let semantic = SemanticFileContext::from_parses_cached(
@@ -912,40 +818,11 @@ impl PolicyPipeline {
 
     fn prepare_policy_stage(
         &self,
-        state: &mut PipelineState<'_>,
+        _state: &mut PipelineState<'_>,
         policy_name: &str,
         _policy_started: Instant,
     ) -> Option<PreparedPolicyStage> {
         let capability = PolicyCapabilityMatrix::for_policy(policy_name);
-        let policy_certainty = if let Some(cached) = state.parse.certainty {
-            cached
-        } else {
-            let mut confidence = ConfidenceContext::from_parsers_and_semantic(
-                state.parse.tree.as_ref(),
-                state.parse.clang.as_deref(),
-                state.parse.semantic.as_ref(),
-                &state.current,
-                state.parse.tree.as_ref(),
-            );
-            confidence.rename_coverage_signal = state.cand.rename_signal;
-            let measurement = Self::extract_raw_observation(
-                &confidence,
-                state.parse.summary,
-                state.parse.has_semantic_compdb,
-                state.parse.clang_edits_since,
-            );
-            let filtered = self.apply_certainty_filter(
-                state.path,
-                measurement,
-                state.content_hash,
-            );
-            state.parse.certainty = Some(filtered);
-            state.parse.fidelity_score = crate::engine::fuzzy_inference::fuzzy_semantic_fidelity(
-                state.parse.semantic_kind,
-                Some(&filtered),
-            );
-            filtered
-        };
         let guidance_mode = self
             .policy_settings
             .get(policy_name)
@@ -953,7 +830,6 @@ impl PolicyPipeline {
             .unwrap_or(PolicyGuidanceMode::SoftGuideline);
         Some(PreparedPolicyStage {
             capability,
-            policy_certainty,
             guidance_mode,
         })
     }
@@ -973,7 +849,6 @@ impl PolicyPipeline {
             .with_clang(state.parse.clang.as_deref())
             .with_semantic(state.parse.semantic.as_ref())
             .with_graph(state.options.project_graph_snapshot.as_deref())
-            .with_policy_certainty(Some(prepared.policy_certainty))
             .with_query_cache(Some(&self.query_cache))
             .with_shared(Some(&shared));
         context.forced_batch_size = state.retry_batch_size.take();
@@ -1107,7 +982,6 @@ impl PolicyPipeline {
                 result.edits.as_slice(),
                 state.parse.tree.as_ref(),
                 Some(&self.query_cache),
-                Some(&prepared.policy_certainty),
                 prepared.capability.structural_safe,
             );
             if !guard_violations.is_empty() {
@@ -1132,11 +1006,7 @@ impl PolicyPipeline {
                         "policy confidence mode downgraded to 'tree-sitter' due unavailable clang semantic context".to_string(),
                     );
                 }
-                let score = if is_semantic {
-                    prepared.policy_certainty.semantic
-                } else {
-                    prepared.policy_certainty.structural
-                };
+                let score = 1.0;
                 let base_enforcement = if settings.has_key("enforcement") {
                     settings.enforcement
                 } else {
@@ -1186,18 +1056,14 @@ impl PolicyPipeline {
             result: &result,
             semantic: state.parse.semantic.as_ref(),
             summary: state.parse.summary_or_default(),
-            semantic_fidelity_score: state.parse.fidelity_score,
             previous_contract_failures: &state.options.previous_contract_failures,
             capability: &prepared.capability,
             cluster_radius_cap: cluster_controls.max_impact_radius_cap,
-            trust: prepared.capability.policy_trust(&prepared.policy_certainty)
-                * self.context_modifier_for_policy(state, policy_name, None),
         });
 
         Ok(ExecutedPolicyStage {
             result,
             capability: prepared.capability,
-            policy_certainty: prepared.policy_certainty,
             context_cluster,
             confidence_sample,
             confidence_outcome,
@@ -1219,16 +1085,11 @@ impl PolicyPipeline {
             .with_clang(state.parse.clang.as_deref())
             .with_semantic(state.parse.semantic.as_ref())
             .with_graph(state.options.project_graph_snapshot.as_deref())
-            .with_policy_certainty(Some(executed.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
         let project_query = context.project_query();
         let edit_block_kind = Self::dominant_block_kind(state, &executed.result.edits);
         let context_mod = self.context_modifier_for_policy(state, policy_name, Some(edit_block_kind));
-        let candidate_confidence = executed.confidence_score.unwrap_or(
-            executed
-                .capability
-                .effective_certainty(&executed.policy_certainty),
-        ) * context_mod;
+        let candidate_confidence = executed.confidence_score.unwrap_or(1.0) * context_mod;
         let proposed_candidates = state.cand.proposer.propose(
             policy_name,
             &executed.result,
@@ -1237,10 +1098,9 @@ impl PolicyPipeline {
             &executed.convergence_signal,
             &executed.capability,
             candidate_confidence,
-            &executed.policy_certainty,
         );
         let guardian_assessment = ProposerController::assess(
-            proposed_candidates.as_slice(), &executed.capability, Some(&executed.policy_certainty));
+            proposed_candidates.as_slice(), &executed.capability);
         let disallowed_zone_lines = guardian_assessment.blocked_zone_lines;
         let guardian_hard_blocked_lines = guardian_assessment.hard_blocked_lines;
         let mut guardian_suppressed_lines = BTreeSet::new();
@@ -1284,7 +1144,6 @@ impl PolicyPipeline {
         let solve_result = GlobalConflictSolver::solve(
             candidates.as_slice(),
             state.cand.selected.as_slice(),
-            &executed.policy_certainty,
             state.options.retry_scope_stage,
         );
         let mut hard_blocked_lines = guardian_hard_blocked_lines;
@@ -1326,9 +1185,7 @@ impl PolicyPipeline {
                     &state.current,
                     executed.result.text.as_str(),
                 )
-                && solve_result.dropped_lines.len() <= crate::engine::fuzzy_inference::fuzzy_batch_dropped_cap(
-                    executed.policy_certainty.trust_for_general()
-                )
+                && solve_result.dropped_lines.len() <= usize::MAX
             {
                 executed.result.warnings.push(format!(
                     "global conflict solver: kept non-local '{}' batch ({} conflicting line(s)) to avoid unsafe partial rollback",
@@ -1389,7 +1246,6 @@ impl PolicyPipeline {
             .saturating_add(convergence_dropped);
         let candidate_trace = Self::build_policy_candidate_trace(
             proposed_candidates.as_slice(),
-            &executed.policy_certainty,
             state.options.retry_scope_stage,
             &disallowed_zone_lines,
             &hard_blocked_lines,
@@ -1678,88 +1534,59 @@ impl PolicyPipeline {
             result,
             semantic,
             summary,
-            semantic_fidelity_score,
             previous_contract_failures,
             capability,
             cluster_radius_cap,
-            trust,
         } = input;
-        let mut semantic_confidence_bp =
-            crate::engine::fuzzy_inference::fuzzy_confidence_bonus(0, trust);
+        let mut semantic_confidence_bp = 200u16;
         let mut impact_radius = 0usize;
         if let Some(context) = semantic {
             if context.clang_success {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(1, trust),
-                );
+                semantic_confidence_bp = semantic_confidence_bp.saturating_add(200);
             }
             if !context.tree_has_error {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(2, trust),
-                );
+                semantic_confidence_bp = semantic_confidence_bp.saturating_add(150);
             }
             if context.diagnostic_summary.error_total() == 0 {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(3, trust),
-                );
+                semantic_confidence_bp = semantic_confidence_bp.saturating_add(150);
             } else {
-                let error_cap = crate::engine::fuzzy_inference::fuzzy_error_cap(trust);
-                let penalty = context.diagnostic_summary.error_total().min(error_cap) as u16 * 20;
+                let penalty = context.diagnostic_summary.error_total().min(10) as u16 * 20;
                 semantic_confidence_bp = semantic_confidence_bp.saturating_sub(penalty);
             }
             if summary.usr_backed_declaration_count > 0 {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(
-                    crate::engine::fuzzy_inference::fuzzy_confidence_bonus(4, trust),
-                );
+                semantic_confidence_bp = semantic_confidence_bp.saturating_add(100);
             }
-            let ref_radius = crate::engine::fuzzy_inference::fuzzy_ref_radius(
-                summary.reference_count,
-                trust,
-            );
+            let ref_radius = if summary.reference_count > 2000 { 3 }
+                else if summary.reference_count > 500 { 2 }
+                else { 1 };
             impact_radius = impact_radius.max(ref_radius);
         } else {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_failure_deduction(0, trust),
-            );
-        }
-        let fidelity_deduction = crate::engine::fuzzy_inference::fuzzy_fidelity_deduction(
-            semantic_fidelity_score,
-            trust,
-        );
-        if fidelity_deduction > 0 {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(fidelity_deduction);
+            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(100);
         }
         if previous_contract_failures.contains(&SemanticInvariantClause::SymbolIdentity)
             || previous_contract_failures
                 .contains(&SemanticInvariantClause::DeclarationReferenceIntegrity)
         {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_failure_deduction(2, trust),
-            );
+            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(80);
             impact_radius = impact_radius.max(2);
         }
         if previous_contract_failures.contains(&SemanticInvariantClause::ScopeIntegrity) {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_failure_deduction(3, trust),
-            );
+            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(60);
             impact_radius = impact_radius.max(2);
         }
         if previous_contract_failures.contains(&SemanticInvariantClause::EditSafety) {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(
-                crate::engine::fuzzy_inference::fuzzy_failure_deduction(4, trust),
-            );
+            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(40);
         }
-        let edit_radius = crate::engine::fuzzy_inference::fuzzy_edit_radius(
-            result.edits.len(),
-            trust,
-        );
+        let edit_radius = if result.edits.len() > 40 { 3 }
+            else if result.edits.len() > 10 { 2 }
+            else { 1 };
         impact_radius = impact_radius.max(edit_radius);
         let mut resolved_radius = impact_radius.min(8);
         if let Some(cap) = cluster_radius_cap {
             resolved_radius = resolved_radius.min(cap.max(1));
         }
         let (impact_ranges, symbol_ids) =
-            Self::build_semantic_impact_maps(result, semantic, resolved_radius, trust);
+            Self::build_semantic_impact_maps(result, semantic, resolved_radius);
         ConvergencePolicySignal {
             semantic_confidence_bp: semantic_confidence_bp.min(1_000),
             impact_radius: resolved_radius,
@@ -1777,11 +1604,10 @@ impl PolicyPipeline {
         result: &PolicyResult,
         semantic: Option<&SemanticFileContext>,
         base_radius: usize,
-        trust: f64,
     ) -> (SemanticImpactRangesByLine, SemanticImpactSymbolsByLine) {
-        let impact_cap = crate::engine::fuzzy_inference::fuzzy_impact_cap(trust);
-        let scope_cap = crate::engine::fuzzy_inference::fuzzy_scope_cap(trust);
-        let symbol_cap = crate::engine::fuzzy_inference::fuzzy_symbol_cap(trust);
+        let impact_cap = 256usize;
+        let scope_cap = 512usize;
+        let symbol_cap = 512usize;
         let fallback_radius = base_radius.max(1);
         let mut edit_lines = result
             .edits
@@ -2538,106 +2364,6 @@ impl PolicyPipeline {
         lines
     }
 
-    pub(crate) fn extract_raw_observation(
-        confidence: &ConfidenceContext,
-        semantic_summary: Option<SemanticSummary>,
-        semantic_compdb_context_for_file: bool,
-        clang_staleness: usize,
-    ) -> [f64; 4] {
-        let structural = if confidence.tree_available {
-            1.0 - confidence.tree_error_ratio
-        } else {
-            0.0
-        };
-
-        let error_count = semantic_summary
-            .as_ref()
-            .map(|s| s.diagnostic_error_count)
-            .unwrap_or(0);
-        let semantic = crate::engine::fuzzy_inference::fuzzy_semantic_obs(
-            semantic_compdb_context_for_file,
-            confidence.clang_success,
-            confidence.semantic_usr_ratio,
-            confidence.tree_available,
-            error_count,
-        );
-
-        let coverage = if let Some(rename_sig) = confidence.rename_coverage_signal {
-            (confidence.semantic_usr_ratio * 0.5
-                + confidence.text_scan_agreement * 0.3
-                + rename_sig * 0.2)
-                .clamp(0.0, 1.0)
-        } else {
-            (confidence.semantic_usr_ratio * 0.6 + confidence.text_scan_agreement * 0.4)
-                .clamp(0.0, 1.0)
-        };
-
-        let richness = if let Some(summary) = semantic_summary {
-            let combined = (summary.scope_count + summary.reference_count) as f64;
-            1.0 / (1.0 + (-0.05 * (combined - 40.0)).exp())
-        } else {
-            0.0
-        };
-
-        if clang_staleness > 0 {
-            let tree_scope_count = semantic_summary.map(|s| s.scope_count).unwrap_or(0);
-            let clang_decl_count = semantic_summary.map(|s| s.declaration_count).unwrap_or(0);
-            let agreement = crate::engine::fuzzy_inference::fuzzy_cross_validation(
-                tree_scope_count,
-                clang_decl_count,
-                confidence.tree_error_ratio,
-                error_count,
-                clang_staleness,
-            );
-            return [structural, semantic * agreement, coverage * agreement, richness];
-        }
-
-        [structural, semantic, coverage, richness]
-    }
-
-    fn apply_certainty_filter(
-        &self,
-        path: &Path,
-        parser_measurement: [f64; 4],
-        content_hash: u64,
-    ) -> PolicyCertainty {
-        let key = path.to_string_lossy();
-        let edit_outcome = self.certainty_filter_store.last_edit_outcome(&key);
-        let fallback = self.certainty_filter_store.edit_estimate(&key);
-        let measurement: [f64; 5] = [
-            parser_measurement[0],
-            parser_measurement[1],
-            parser_measurement[2],
-            parser_measurement[3],
-            edit_outcome.unwrap_or(fallback),
-        ];
-        let result = self.certainty_filter_store.observe(&key, measurement, content_hash);
-        let structural = result.structural();
-        let semantic = result.semantic();
-        let coverage = result.coverage();
-        let richness = result.richness();
-        let coverage_weight = crate::engine::fuzzy_inference::fuzzy_coverage_weight(coverage);
-        let overall = (coverage_weight * semantic + (1.0 - coverage_weight) * structural).clamp(0.0, 1.0);
-        PolicyCertainty {
-            overall,
-            structural,
-            semantic,
-            coverage,
-            richness,
-            semantic_variance: result.within_semantic_variance(),
-            structural_variance: result.within_structural_variance(),
-            coverage_variance: result.within_coverage_variance(),
-            richness_variance: result.within_richness_variance(),
-            edit_success: result.edit_success(),
-            edit_success_variance: result.edit_variance(),
-            stable_model_prob: result.model_probs[0],
-            transitional_model_prob: result.model_probs[1],
-            noisy_model_prob: result.model_probs[2],
-            observation_count: result.observation_count,
-            raw_observation: Some(measurement),
-        }
-    }
-
     #[cfg(test)]
     fn needs_exact_compdb(policy_name: &str) -> bool {
         policy_catalog()
@@ -2657,7 +2383,6 @@ impl PolicyPipeline {
 
     fn build_policy_candidate_trace(
         all_candidates: &[PolicyEditCandidate],
-        certainty: &PolicyCertainty,
         scope_stage: crate::engine::run_options::RetryScopeStage,
         disallowed_zone_lines: &BTreeSet<usize>,
         hard_blocked_lines: &BTreeSet<usize>,
@@ -2682,7 +2407,7 @@ impl PolicyPipeline {
                     line: candidate.line,
                     confidence: candidate.confidence,
                     style_gain: candidate.style_gain,
-                    utility: GlobalConflictSolver::utility_score(candidate, certainty, scope_stage),
+                    utility: GlobalConflictSolver::utility_score(candidate, scope_stage),
                     risk_tier: candidate.risk_tier,
                     impact_radius: candidate.impact_radius,
                     symbol_footprint_count: candidate.symbol_footprint.len(),
@@ -2719,7 +2444,7 @@ mod tests {
     use crate::config::policy_config::PolicyConfig;
     use crate::engine::conflict_solver::GlobalConflictSolver;
     use crate::engine::catalog::{
-        PolicyCapabilities, PolicyCapabilityMatrix, PolicyCertainty,
+        PolicyCapabilities, PolicyCapabilityMatrix,
     };
     use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
     use crate::engine::pipeline::PolicyPipeline;
@@ -3123,11 +2848,9 @@ mod tests {
             result: &result,
             semantic: Some(&semantic),
             summary,
-            semantic_fidelity_score: 1.0,
             previous_contract_failures: &BTreeSet::new(),
             capability: &capability,
             cluster_radius_cap: None,
-            trust: 0.5,
         });
         assert!(signal.semantic_confidence_bp >= 700);
         assert!(signal.impact_radius >= 2);
@@ -3193,11 +2916,9 @@ mod tests {
             result: &result,
             semantic: Some(&semantic),
             summary: semantic.summary(),
-            semantic_fidelity_score: 1.0,
             previous_contract_failures: &BTreeSet::new(),
             capability: &capability,
             cluster_radius_cap: None,
-            trust: 0.5,
         });
 
         let line10_ranges = signal
@@ -3252,11 +2973,9 @@ mod tests {
             result: &result,
             semantic: Some(&semantic),
             summary: semantic.summary(),
-            semantic_fidelity_score: 1.0,
             previous_contract_failures: &BTreeSet::new(),
             capability: &capability,
             cluster_radius_cap: None,
-            trust: 0.5,
         });
         let failures = BTreeSet::from([
             SemanticInvariantClause::EditSafety,
@@ -3266,67 +2985,12 @@ mod tests {
             result: &result,
             semantic: Some(&semantic),
             summary: semantic.summary(),
-            semantic_fidelity_score: 1.0,
             previous_contract_failures: &failures,
             capability: &capability,
             cluster_radius_cap: None,
-            trust: 0.5,
         });
         assert!(penalized.semantic_confidence_bp < base.semantic_confidence_bp);
         assert!(penalized.impact_radius >= base.impact_radius);
-    }
-
-    #[test]
-    fn low_semantic_trust() {
-        let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
-        let certainty = PolicyCertainty {
-            overall: 0.80,
-            structural: 0.90,
-            semantic: 0.35,
-            ..Default::default()
-        };
-        assert!(capability.policy_trust(&certainty) < 0.20);
-    }
-
-    #[test]
-    fn certainty_yields_high() {
-        let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
-        let certainty = PolicyCertainty {
-            overall: 0.74,
-            structural: 0.70,
-            semantic: 0.88,
-            coverage: 0.60,
-            semantic_variance: 0.002,
-            structural_variance: 0.002,
-            coverage_variance: 0.002,
-            stable_model_prob: 0.70,
-            edit_success: 0.80,
-            edit_success_variance: 0.002,
-            ..Default::default()
-        };
-        assert!(capability.policy_trust(&certainty) > 0.40);
-    }
-
-    #[test]
-    fn variance_yields_lower() {
-        let capability = PolicyCapabilityMatrix::for_policy("naming_conventions");
-        let low_var = PolicyCertainty {
-            semantic: 0.70,
-            coverage: 0.60,
-            semantic_variance: 0.002,
-            coverage_variance: 0.002,
-            stable_model_prob: 0.50,
-            edit_success: 0.50,
-            edit_success_variance: 0.01,
-            observation_count: 10,
-            ..Default::default()
-        };
-        let high_var = PolicyCertainty {
-            semantic_variance: 0.03,
-            coverage_variance: 0.03,
-            ..low_var
-        };
-        assert!(capability.policy_trust(&low_var) > capability.policy_trust(&high_var));
     }
 
     #[test]
@@ -3469,16 +3133,9 @@ mod tests {
             after_fingerprint: 2,
             style_gain: 1.2,
         };
-        let certainty = PolicyCertainty {
-            overall: 0.50,
-            structural: 0.65,
-            semantic: 0.45,
-            ..Default::default()
-        };
         let result = GlobalConflictSolver::solve(
             &[incoming],
             &[existing],
-            &certainty,
             RetryScopeStage::LineLocal,
         );
         assert!(result.accepted.is_empty());
