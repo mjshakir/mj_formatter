@@ -1,7 +1,57 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Parser, StreamingIterator, Tree};
+
+use crate::parser::query_cache::TsQueryCache;
+
+pub fn query_or_traverse<'a, F>(
+    root: Node<'a>,
+    pattern: &str,
+    query_cache: Option<&TsQueryCache>,
+    fallback_kinds: &[&str],
+    mut process: F,
+) where
+    F: FnMut(Node<'a>),
+{
+    if let Some(query) = query_cache.and_then(|qc| qc.get_or_compile(pattern).ok()) {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut matches = cursor.matches(&query, root, "".as_bytes());
+        while let Some(m) = {
+            matches.advance();
+            matches.get()
+        } {
+            for capture in m.captures {
+                process(capture.node);
+            }
+        }
+    } else {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if fallback_kinds.contains(&node.kind()) {
+                process(node);
+            }
+            for idx in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(idx as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+}
+
+pub fn query_or_traverse_collect<'a>(
+    root: Node<'a>,
+    pattern: &str,
+    query_cache: Option<&TsQueryCache>,
+    fallback_kinds: &[&str],
+) -> Vec<Node<'a>> {
+    let mut nodes = Vec::new();
+    query_or_traverse(root, pattern, query_cache, fallback_kinds, |node| {
+        nodes.push(node);
+    });
+    nodes
+}
 
 pub fn first_descendant<'a>(
     node: Node<'a>,
@@ -132,6 +182,30 @@ thread_local! {
         let _ = parser.set_language(&tree_sitter_cpp::LANGUAGE.into());
         parser
     });
+}
+
+pub fn declarator_identifier(decl_node: Node<'_>) -> Option<Node<'_>> {
+    use crate::parser::node_kind;
+    let mut current = decl_node.child_by_field_name("declarator")?;
+    loop {
+        let kind = current.kind();
+        if kind == node_kind::IDENTIFIER || kind == node_kind::FIELD_IDENTIFIER {
+            return Some(current);
+        }
+        if let Some(child) = current.child_by_field_name("declarator") {
+            current = child;
+            continue;
+        }
+        for i in 0..current.child_count() {
+            if let Some(child) = current.child(i as u32) {
+                let ck = child.kind();
+                if ck == node_kind::IDENTIFIER || ck == node_kind::FIELD_IDENTIFIER {
+                    return Some(child);
+                }
+            }
+        }
+        return None;
+    }
 }
 
 pub fn quick_error_stats_cpp(text: &str) -> Option<TreeErrorStats> {

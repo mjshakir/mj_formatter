@@ -37,6 +37,7 @@ pub const STRUCT_SPECIFIER: &str = "struct_specifier";
 pub const SWITCH_STATEMENT: &str = "switch_statement";
 pub const SYSTEM_LIB_STRING: &str = "system_lib_string";
 pub const TEMPLATE_PARAMETER_LIST: &str = "template_parameter_list";
+pub const TEMPLATE_TYPE: &str = "template_type";
 pub const TYPE_IDENTIFIER: &str = "type_identifier";
 pub const WHILE_STATEMENT: &str = "while_statement";
 

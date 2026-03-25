@@ -31,6 +31,7 @@ pub mod id;
 pub mod registry;
 pub mod pragma_once;
 pub mod section_title;
+pub mod shared_data;
 pub mod snake_case;
 pub mod stub;
 pub mod text_utils;

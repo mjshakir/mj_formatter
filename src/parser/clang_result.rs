@@ -1,11 +1,12 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::clang_symbol::ClangSymbol;
 use crate::parser::clang_types::ClangSymbolKey;
-use crate::parser::clang_types::ClangSymbolKind;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClangParseResult {
@@ -14,9 +15,11 @@ pub struct ClangParseResult {
     pub symbols: Vec<ClangSymbol>,
     diagnostic_summary: ClangDiagnosticSummary,
     diagnostic_entries: Vec<ClangDiagnosticEntry>,
-    symbols_by_line: HashMap<usize, Vec<usize>>,
-    rename_offsets_by_symbol: HashMap<ClangSymbolKey, Vec<usize>>,
-    reference_offsets_by_decl: HashMap<ClangDeclKey, Vec<usize>>,
+    symbols_by_line: FxHashMap<usize, Vec<usize>>,
+    rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
+    reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
+    #[serde(skip)]
+    name_lines: FxHashMap<String, SmallVec<[usize; 4]>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -88,8 +91,8 @@ impl ClangParseResult {
             success,
             diagnostics,
             symbols,
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             diagnostic_summary,
             diagnostic_entries,
         )
@@ -100,7 +103,7 @@ impl ClangParseResult {
         success: bool,
         diagnostics: Vec<String>,
         symbols: Vec<ClangSymbol>,
-        rename_offsets_by_symbol: HashMap<ClangSymbolKey, Vec<usize>>,
+        rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
         diagnostic_summary: ClangDiagnosticSummary,
         diagnostic_entries: Vec<ClangDiagnosticEntry>,
     ) -> Self {
@@ -109,7 +112,7 @@ impl ClangParseResult {
             diagnostics,
             symbols,
             rename_offsets_by_symbol,
-            HashMap::new(),
+            FxHashMap::default(),
             diagnostic_summary,
             diagnostic_entries,
         )
@@ -119,8 +122,8 @@ impl ClangParseResult {
         success: bool,
         diagnostics: Vec<String>,
         symbols: Vec<ClangSymbol>,
-        rename_offsets_by_symbol: HashMap<ClangSymbolKey, Vec<usize>>,
-        reference_offsets_by_decl: HashMap<ClangDeclKey, Vec<usize>>,
+        rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
+        reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
         diagnostic_summary: ClangDiagnosticSummary,
         diagnostic_entries: Vec<ClangDiagnosticEntry>,
     ) -> Self {
@@ -134,9 +137,11 @@ impl ClangParseResult {
             diagnostics.len(),
             "clang diagnostic entries count must match diagnostic payload size"
         );
-        let mut symbols_by_line: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut symbols_by_line: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        let mut name_lines: FxHashMap<String, SmallVec<[usize; 4]>> = FxHashMap::default();
         for (index, symbol) in symbols.iter().enumerate() {
             symbols_by_line.entry(symbol.line).or_default().push(index);
+            name_lines.entry(symbol.name.clone()).or_default().push(symbol.line);
         }
 
         Self {
@@ -148,6 +153,7 @@ impl ClangParseResult {
             symbols_by_line,
             rename_offsets_by_symbol,
             reference_offsets_by_decl,
+            name_lines,
         }
     }
 
@@ -180,7 +186,7 @@ impl ClangParseResult {
         &self,
         name: &str,
         line: usize,
-        allowed_kinds: &[ClangSymbolKind],
+        allowed_kinds: &[i32],
     ) -> Option<&ClangSymbol> {
         let symbol_indexes = self.symbols_by_line.get(&line)?;
         symbol_indexes
@@ -192,11 +198,23 @@ impl ClangParseResult {
             })
     }
 
+    pub fn symbol_on_line_by_kinds(
+        &self,
+        line: usize,
+        allowed_kinds: &[i32],
+    ) -> Option<&ClangSymbol> {
+        let indexes = self.symbols_by_line.get(&line)?;
+        indexes
+            .iter()
+            .filter_map(|i| self.symbols.get(*i))
+            .find(|s| allowed_kinds.contains(&s.kind))
+    }
+
     pub fn rename_offsets(
         &self,
         name: &str,
         line: usize,
-        allowed_kinds: &[ClangSymbolKind],
+        allowed_kinds: &[i32],
     ) -> Vec<usize> {
         let mut offsets = Vec::new();
         let Some(symbol_indexes) = self.symbols_by_line.get(&line) else {
@@ -225,9 +243,9 @@ impl ClangParseResult {
     }
 
     pub fn has_name_elsewhere(&self, name: &str, except_line: usize) -> bool {
-        self.symbols
-            .iter()
-            .any(|symbol| symbol.name == name && symbol.line != except_line)
+        self.name_lines
+            .get(name)
+            .is_some_and(|lines| lines.iter().any(|&l| l != except_line))
     }
 
     pub fn ref_offsets(&self, decl_key: &ClangDeclKey) -> Vec<usize> {
@@ -237,11 +255,11 @@ impl ClangParseResult {
             .unwrap_or_default()
     }
 
-    pub fn reference_offsets_map(&self) -> &HashMap<ClangDeclKey, Vec<usize>> {
+    pub fn reference_offsets_map(&self) -> &FxHashMap<ClangDeclKey, Vec<usize>> {
         &self.reference_offsets_by_decl
     }
 
-    pub fn rename_offsets_map(&self) -> &HashMap<ClangSymbolKey, Vec<usize>> {
+    pub fn rename_offsets_map(&self) -> &FxHashMap<ClangSymbolKey, Vec<usize>> {
         &self.rename_offsets_by_symbol
     }
 }

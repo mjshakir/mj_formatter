@@ -11,5 +11,6 @@ pub mod node_kind;
 pub mod query_cache;
 pub mod semantic_extractor;
 pub mod semantic_region;
+pub mod simd_classify;
 pub mod text_scan;
 pub mod ts_traversal;
