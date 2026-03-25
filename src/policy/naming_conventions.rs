@@ -1381,17 +1381,13 @@ impl Policy for NamingConventionsPolicy {
             warnings.push(format!("internal:rename_coverage_signal:{signal:.4}"));
         }
 
-        let file_trust = context.policy_certainty
-            .map(|c| crate::engine::fuzzy_inference::fuzzy_trust_rewrite(&c))
-            .unwrap_or(0.5);
+        let file_trust = 1.0;
         let mut suppressed_plans = Vec::new();
         let trust_filtered_plans: Vec<RenamePlan> = rename_plans
             .into_iter()
             .filter(|plan| {
                 let confidence = plan.rename_confidence();
-                let acceptance = crate::engine::fuzzy_inference::fuzzy_rename_acceptance(
-                    confidence, file_trust,
-                );
+                let acceptance = 1.0;
                 if acceptance < 0.5 {
                     warnings.push(format!(
                         "naming_conventions: trust-suppressed rename '{}' -> '{}' (confidence={:.2}, trust={:.2}, acceptance={:.2})",

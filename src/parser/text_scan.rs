@@ -599,43 +599,6 @@ pub(crate) fn find_subslice_from(haystack: &[u8], needle: &[u8], from: usize) ->
     TEXT_SCAN.find_subslice_from(haystack, needle, from)
 }
 
-#[inline]
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-pub(crate) fn count_id_excluded(
-    text: &str,
-    name: &str,
-    excluded: &[(usize, usize)],
-) -> usize {
-    let name_bytes = name.as_bytes();
-    let text_bytes = text.as_bytes();
-    let len = name_bytes.len();
-    if len == 0 || text_bytes.len() < len {
-        return 0;
-    }
-    let mut count = 0usize;
-    let last = text_bytes.len() - len;
-    let first_byte = name_bytes[0];
-    let mut excl_cursor = 0usize;
-    for pos in memchr::memchr_iter(first_byte, &text_bytes[..=last]) {
-        if text_bytes[pos..pos + len] == *name_bytes {
-            let before_ok = pos == 0 || !is_ident_byte(text_bytes[pos - 1]);
-            let after_ok = pos + len >= text_bytes.len() || !is_ident_byte(text_bytes[pos + len]);
-            if before_ok && after_ok {
-                while excl_cursor < excluded.len() && excluded[excl_cursor].1 <= pos {
-                    excl_cursor += 1;
-                }
-                if excl_cursor >= excluded.len() || excluded[excl_cursor].0 > pos {
-                    count += 1;
-                }
-            }
-        }
-    }
-    count
-}
-
 pub(crate) fn non_code_ranges(tree: &tree_sitter::Tree) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut cursor = tree.walk();

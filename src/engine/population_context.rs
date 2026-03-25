@@ -1,7 +1,41 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::fuzzy_inference::{FuzzyVariable, GaussianMF};
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GaussianMF {
+    pub center: f64,
+    pub sigma: f64,
+}
+
+impl GaussianMF {
+    pub fn new(center: f64, sigma: f64) -> Self {
+        Self { center, sigma }
+    }
+
+    #[cfg(test)]
+    pub fn membership(&self, x: f64) -> f64 {
+        let diff = x - self.center;
+        (-0.5 * (diff / self.sigma).powi(2)).exp()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FuzzyVariable {
+    pub low: GaussianMF,
+    pub medium: GaussianMF,
+    pub high: GaussianMF,
+}
+
+impl FuzzyVariable {
+    #[cfg(test)]
+    pub fn memberships(&self, x: f64) -> [f64; 3] {
+        [
+            self.low.membership(x),
+            self.medium.membership(x),
+            self.high.membership(x),
+        ]
+    }
+}
 
 const MIN_FILES_FOR_POPULATION: usize = 3;
 const MIN_SPREAD: f64 = 0.10;
@@ -41,7 +75,11 @@ impl Default for PopulationContext {
                 DimStats { mean: 0.50, variance: 0.10, p10: 0.10, p25: 0.25, p50: 0.50, p75: 0.75, p90: 0.90 },
                 DimStats { mean: 0.85, variance: 0.05, p10: 0.60, p25: 0.70, p50: 0.85, p75: 0.92, p90: 0.98 },
             ],
-            coverage_variable: crate::engine::fuzzy_inference::ci_variable(),
+            coverage_variable: FuzzyVariable {
+                low: GaussianMF::new(0.0, 0.15),
+                medium: GaussianMF::new(0.5, 0.15),
+                high: GaussianMF::new(1.0, 0.15),
+            },
             prior_estimates: [0.85, 0.50, 0.50, 0.50, 0.85],
             prior_variances: [0.06, 0.11, 0.11, 0.11, 0.06],
             file_count: 0,

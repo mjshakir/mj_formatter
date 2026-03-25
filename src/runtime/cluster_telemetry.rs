@@ -423,11 +423,13 @@ impl PolicyClusterTelemetry {
             } else {
                 ClusterEnforcementBias::Neutral
             },
-            max_impact_radius_cap: crate::engine::fuzzy_inference::fuzzy_radius_cap(
-                stability_score,
-                uncertainty,
-                reliability_lower,
-            ),
+            max_impact_radius_cap: if stability_score < 0.40 || reliability_lower < 0.30 {
+                Some(1)
+            } else if stability_score < 0.60 || uncertainty > 0.35 {
+                Some(3)
+            } else {
+                None
+            },
         }
     }
 

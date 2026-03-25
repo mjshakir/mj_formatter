@@ -85,37 +85,9 @@ pub struct BlockedLineReport {
 
 impl From<&FileResult> for ReportRecord {
     fn from(result: &FileResult) -> Self {
-        use crate::engine::fuzzy_inference;
         use crate::model::exec_trace::PolicyCandidateOutcome;
 
-        let certainty = result.outcome.certainty.as_ref().map(|cert| {
-            let trust_semantic_rewrite = fuzzy_inference::fuzzy_trust_rewrite(cert);
-            let trust_structural = fuzzy_inference::fuzzy_trust_structural(cert);
-            let trust_general = fuzzy_inference::fuzzy_trust_general(cert);
-            let (model_prob_transitional, model_prob_noisy) =
-                derive_model_probs(cert.stable_model_prob);
-
-            FileCertaintyReport {
-                structural: cert.structural,
-                semantic: cert.semantic,
-                coverage: cert.coverage,
-                richness: cert.richness,
-                edit_success: cert.edit_success,
-                structural_variance: cert.structural_variance,
-                semantic_variance: cert.semantic_variance,
-                coverage_variance: cert.coverage_variance,
-                richness_variance: cert.richness_variance,
-                edit_success_variance: cert.edit_success_variance,
-                model_prob_stable: cert.stable_model_prob,
-                model_prob_transitional,
-                model_prob_noisy,
-                trust_semantic_rewrite,
-                trust_structural,
-                trust_general,
-                observation_count: cert.observation_count,
-                raw_observation: cert.raw_observation,
-            }
-        });
+        let certainty: Option<FileCertaintyReport> = None;
 
         let mut policies = Vec::with_capacity(result.traces.len());
         for trace in &result.traces {
@@ -189,11 +161,6 @@ impl From<&FileResult> for ReportRecord {
             policies,
         }
     }
-}
-
-fn derive_model_probs(stable_prob: f64) -> (f64, f64) {
-    let remaining = (1.0 - stable_prob).max(0.0);
-    (remaining * 0.6, remaining * 0.4)
 }
 
 fn derive_outcome(
