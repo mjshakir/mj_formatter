@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::engine::catalog::PolicyCertainty;
 use crate::engine::semantic_contract::{
     SemanticContract, SemanticContractSnapshot,
 };
@@ -34,9 +33,6 @@ pub struct PostEditCheckResult {
     pub messages: Vec<String>,
     pub failure_kinds: BTreeSet<PostEditFailureKind>,
     pub culprit_lines: BTreeSet<usize>,
-    pub identity_severity: f64,
-    pub reference_severity: f64,
-    pub scope_severity: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -84,7 +80,6 @@ impl PostEditChecker {
         before_text: &str,
         after_text: &str,
         edited_lines: Option<&BTreeSet<usize>>,
-        certainty: Option<&PolicyCertainty>,
     ) -> PostEditCheckResult {
         if before_text == after_text {
             return PostEditCheckResult {
@@ -92,14 +87,11 @@ impl PostEditChecker {
                 messages: Vec::new(),
                 failure_kinds: BTreeSet::new(),
                 culprit_lines: BTreeSet::new(),
-                identity_severity: 0.0,
-                reference_severity: 0.0,
-                scope_severity: 0.0,
             };
         }
 
         let baseline = self.build_baseline(path, before_text);
-        self.validate_with_baseline_for_edits(path, after_text, &baseline, edited_lines, certainty)
+        self.validate_with_baseline_for_edits(path, after_text, &baseline, edited_lines)
     }
 
     pub fn build_baseline(&self, path: &Path, before_text: &str) -> CheckBaseline {
@@ -112,9 +104,8 @@ impl PostEditChecker {
         after_text: &str,
         baseline: &CheckBaseline,
         edited_lines: Option<&BTreeSet<usize>>,
-        certainty: Option<&PolicyCertainty>,
     ) -> PostEditCheckResult {
-        delta::validate(self, path, after_text, baseline, edited_lines, certainty)
+        delta::validate(self, path, after_text, baseline, edited_lines)
     }
 
     pub fn validate_structural_only(
@@ -122,9 +113,8 @@ impl PostEditChecker {
         path: &Path,
         after_text: &str,
         baseline: &CheckBaseline,
-        certainty: Option<&PolicyCertainty>,
     ) -> PostEditCheckResult {
-        delta::validate_structural_only(self, path, after_text, baseline, certainty)
+        delta::validate_structural_only(self, path, after_text, baseline)
     }
 
     pub(crate) fn semantic_context_kind_for_path(&self, path: &Path) -> SemanticCompdbContextKind {
@@ -147,14 +137,14 @@ impl PostEditChecker {
 
     #[cfg(test)]
     fn diagnostic_weighted_score(summary: ClangDiagnosticSummary) -> u32 {
-        Self::diagnostic_weighted_score_with_trust(summary, crate::engine::fuzzy_inference::DEFAULT_TRUST)
+        Self::diagnostic_weighted_score_impl(summary)
     }
 
-    fn diagnostic_weighted_score_with_trust(summary: ClangDiagnosticSummary, trust: f64) -> u32 {
-        let note_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(0, trust);
-        let warn_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(1, trust);
-        let err_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(2, trust);
-        let fatal_w = crate::engine::fuzzy_inference::fuzzy_severity_weight(3, trust);
+    fn diagnostic_weighted_score_impl(summary: ClangDiagnosticSummary) -> u32 {
+        let note_w: u32 = 1;
+        let warn_w: u32 = 3;
+        let err_w: u32 = 8;
+        let fatal_w: u32 = 12;
         (summary.note as u32).saturating_mul(note_w)
             .saturating_add((summary.warning as u32).saturating_mul(warn_w))
             .saturating_add((summary.error as u32).saturating_mul(err_w))
@@ -261,18 +251,14 @@ impl PostEditChecker {
         if severe_delta > 1 {
             return false;
         }
-        let context_kind_index = match context_kind {
-            SemanticCompdbContextKind::PairedSourceHeuristic => 0,
-            SemanticCompdbContextKind::HeaderConsensus => 1,
-            SemanticCompdbContextKind::SourceConsensus => 2,
+        let (delta_limit, radius): (usize, usize) = match context_kind {
+            SemanticCompdbContextKind::PairedSourceHeuristic => (0, 0),
+            SemanticCompdbContextKind::HeaderConsensus => (24, 4),
+            SemanticCompdbContextKind::SourceConsensus => (6, 4),
             SemanticCompdbContextKind::Exact | SemanticCompdbContextKind::None => {
                 return false;
             }
         };
-        let (delta_limit, radius) = crate::engine::fuzzy_inference::fuzzy_context_tol(
-            context_kind_index,
-            crate::engine::fuzzy_inference::DEFAULT_TRUST,
-        );
         if weighted_delta > delta_limit as u32 {
             return false;
         }
@@ -314,7 +300,6 @@ impl PostEditChecker {
         delta_lines: &BTreeSet<usize>,
         severe_delta: usize,
         weighted_delta: u32,
-        certainty: Option<&PolicyCertainty>,
     ) -> bool {
         if !failure_kinds.contains(&PostEditFailureKind::ClangDiagnosticsIncreased) {
             return false;
@@ -339,11 +324,11 @@ impl PostEditChecker {
             | SemanticCompdbContextKind::SourceConsensus => 1,
             SemanticCompdbContextKind::Exact | SemanticCompdbContextKind::None => return false,
         };
-        let (severe_limit, weighted_limit) =
-            crate::engine::fuzzy_inference::fuzzy_relaxation_limits(
-                context_kind_index,
-                certainty,
-            );
+        let (severe_limit, weighted_limit): (usize, u32) = match context_kind_index {
+            0 => (8, 48),
+            1 => (1, 10),
+            _ => (0, 0),
+        };
         if severe_delta > severe_limit || weighted_delta > weighted_limit {
             return false;
         }
@@ -367,7 +352,6 @@ impl PostEditChecker {
         context_kind: SemanticCompdbContextKind,
         _exact_compdb: bool,
         edited_lines: Option<&BTreeSet<usize>>,
-        certainty: Option<&PolicyCertainty>,
     ) -> (usize, usize) {
         let base_reference_drop_tolerance: usize = match context_kind {
             SemanticCompdbContextKind::Exact => 2,
@@ -377,12 +361,24 @@ impl PostEditChecker {
             SemanticCompdbContextKind::Exact => 1,
             _ => 3,
         };
-        crate::engine::fuzzy_inference::fuzzy_transition_tols(
-            context_kind,
-            base_reference_drop_tolerance,
-            base_scope_drift_tolerance,
-            certainty,
-            edited_lines,
+        let context_extra_ref = match context_kind {
+            SemanticCompdbContextKind::Exact => 0,
+            SemanticCompdbContextKind::PairedSourceHeuristic => 24,
+            SemanticCompdbContextKind::HeaderConsensus => 6,
+            SemanticCompdbContextKind::SourceConsensus => 4,
+            SemanticCompdbContextKind::None => 2,
+        };
+        let context_extra_scope = match context_kind {
+            SemanticCompdbContextKind::Exact => 0,
+            SemanticCompdbContextKind::PairedSourceHeuristic
+            | SemanticCompdbContextKind::HeaderConsensus => 4,
+            SemanticCompdbContextKind::SourceConsensus => 2,
+            SemanticCompdbContextKind::None => 0,
+        };
+        let _ = edited_lines;
+        (
+            base_reference_drop_tolerance.saturating_add(context_extra_ref),
+            base_scope_drift_tolerance.saturating_add(context_extra_scope),
         )
     }
 
@@ -430,7 +426,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
-    use crate::engine::catalog::PolicyCertainty;
     use crate::engine::semantic_contract::{
         ScopeStructure, SemanticContract, SemanticContractSnapshot, SemanticScopeCounts,
         SymbolIdentity,
@@ -454,7 +449,7 @@ mod tests {
         let after = "int main( { return 0; }\n";
 
         let baseline = checker.build_baseline(&path, before);
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, None);
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
 
         assert!(!result.accepted);
         assert!(result
@@ -477,7 +472,7 @@ mod tests {
         let after = "int main() { return 1; }\n";
 
         let baseline = checker.build_baseline(&path, before);
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, None);
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
 
         assert!(result.accepted);
         assert!(result.culprit_lines.is_empty());
@@ -496,11 +491,6 @@ mod tests {
         reference_counts.insert("usr:c:@F@value#".to_string(), 12usize);
         let mut reference_lines = BTreeMap::new();
         reference_lines.insert("usr:c:@F@value#".to_string(), 1usize);
-        let high_cert = PolicyCertainty {
-            structural: 0.95, semantic: 0.95, coverage: 0.95,
-            richness: 0.95, edit_success: 0.95, stable_model_prob: 0.90,
-            ..crate::engine::catalog::PolicyCertainty::default()
-        };
         let baseline = CheckBaseline {
             before_tree_error: Some(false),
             before_tree_error_ratio: Some(0.0),
@@ -534,7 +524,7 @@ mod tests {
             warnings: Vec::new(),
         };
         let after = "int main() { return 0; }\n";
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, Some(&high_cert));
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
 
         assert!(!result.accepted);
         assert!(result
@@ -550,17 +540,12 @@ mod tests {
             0.0,
             SemanticContract::new(),
         );
-        let high_cert = PolicyCertainty {
-            structural: 0.95, semantic: 0.95, coverage: 0.95,
-            richness: 0.95, edit_success: 0.95, stable_model_prob: 0.90,
-            ..crate::engine::catalog::PolicyCertainty::default()
-        };
         let path = PathBuf::from("semantic_scope.cpp");
         let before = "namespace A {\nnamespace B {\nnamespace C {\nnamespace D {\nint value = 0;\n}\n}\n}\n}\n";
         let after = "int value = 0;\n";
 
         let baseline = checker.build_baseline(&path, before);
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, Some(&high_cert));
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
 
         assert!(!result.accepted);
         assert!(result
@@ -611,7 +596,6 @@ mod tests {
             "int main() { return 0; }\n",
             &baseline,
             None,
-            None,
         );
         assert!(!result
             .failure_kinds
@@ -630,18 +614,13 @@ mod tests {
             0.0,
             SemanticContract::new(),
         );
-        let high_cert = PolicyCertainty {
-            structural: 0.95, semantic: 0.95, coverage: 0.95,
-            richness: 0.95, edit_success: 0.95, stable_model_prob: 0.90,
-            ..crate::engine::catalog::PolicyCertainty::default()
-        };
         let path = PathBuf::from("semantic_ready.cpp");
         let before = "int main() { return 0; }\n";
         let after = "#include \"missing.hpp\"\nint main() { return 0; }\n";
 
         let baseline = checker.build_baseline(&path, before);
         assert!(baseline.semantic_ready());
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, Some(&high_cert));
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
 
         // Binary readiness: parsers available = ready. Adding an include
         // does not make parsers unavailable, so no readiness regression.
@@ -773,19 +752,19 @@ mod tests {
         let lines = BTreeSet::from([1usize, 2, 3, 4, 5, 6, 7, 8]);
         let exact = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::Exact,
-            false, Some(&lines), None,
+            false, Some(&lines),
         );
         let paired = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::PairedSourceHeuristic,
-            false, Some(&lines), None,
+            false, Some(&lines),
         );
         let source = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::SourceConsensus,
-            false, Some(&lines), None,
+            false, Some(&lines),
         );
         let header = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::HeaderConsensus,
-            false, Some(&lines), None,
+            false, Some(&lines),
         );
 
         assert!(paired.0 > exact.0 && paired.1 > exact.1,

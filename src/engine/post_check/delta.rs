@@ -8,8 +8,6 @@ use crate::engine::semantic_contract::SemanticReadinessInput;
 use crate::parser::clang_result::{ClangDiagnosticSeverity, ClangParseResult};
 use crate::parser::file_context::SemanticFileContext;
 
-use crate::engine::catalog::PolicyCertainty;
-
 use super::{CheckBaseline, PostEditCheckResult, PostEditChecker, PostEditFailureKind};
 
 pub(super) fn validate(
@@ -18,7 +16,6 @@ pub(super) fn validate(
     after_text: &str,
     baseline: &CheckBaseline,
     edited_lines: Option<&BTreeSet<usize>>,
-    certainty: Option<&PolicyCertainty>,
 ) -> PostEditCheckResult {
     let mut messages = baseline.warnings.clone();
     let mut failure_kinds = BTreeSet::<PostEditFailureKind>::new();
@@ -27,16 +24,9 @@ pub(super) fn validate(
     let mut after_clang = None::<Arc<ClangParseResult>>;
     let mut after_tree_unavailable = false;
     let mut after_clang_unavailable = false;
-    let mut after_tree_error_ratio = None::<f64>;
-    let mut after_clang_error_count = None::<usize>;
-    let mut after_clang_fatal_count = None::<usize>;
     let mut clang_delta_lines = BTreeSet::<usize>::new();
     let mut clang_weighted_delta = 0u32;
     let mut clang_severe_delta = 0usize;
-    let mut identity_severity = 0.0f64;
-    let mut reference_severity = 0.0f64;
-    let mut scope_severity = 0.0f64;
-
     if baseline.before_tree_unavailable {
         failure_kinds.insert(PostEditFailureKind::ParserUnavailableTree);
     }
@@ -56,7 +46,6 @@ pub(super) fn validate(
         Ok(tree) => {
             let (after_ratio, tree_error_lines) =
                 PostEditChecker::tree_error_ratio_and_lines(&tree);
-            after_tree_error_ratio = Some(after_ratio);
             if matches!(baseline.before_tree_error, Some(false)) && tree.root_node().has_error() {
                 failure_kinds.insert(PostEditFailureKind::TreeErrorRegressed);
                 messages.push(
@@ -65,10 +54,7 @@ pub(super) fn validate(
                 culprit_lines.extend(tree_error_lines.iter().copied());
             }
             if let Some(before_ratio) = baseline.before_tree_error_ratio {
-                let adaptive_tolerance = crate::engine::fuzzy_inference::fuzzy_error_tolerance(
-                    checker.tree_error_ratio_tolerance,
-                    certainty,
-                );
+                let adaptive_tolerance = checker.tree_error_ratio_tolerance;
                 let allowed = (before_ratio + adaptive_tolerance).clamp(0.0, 1.0);
                 if after_ratio > allowed {
                     failure_kinds.insert(PostEditFailureKind::TreeErrorRatioRegressed);
@@ -97,15 +83,10 @@ pub(super) fn validate(
         match clang_result {
             Ok(parse) => {
                 let after_count = PostEditChecker::clang_error_count(&parse);
-                after_clang_error_count = Some(after_count);
-                after_clang_fatal_count = Some(PostEditChecker::clang_fatal_count(&parse));
                 let after_summary = parse.diagnostic_summary();
                 if let Some(before_summary) = baseline.before_clang_summary {
-                    let trust = certainty
-                        .map(|c| c.trust_for_general())
-                        .unwrap_or(crate::engine::fuzzy_inference::DEFAULT_TRUST);
-                    let before_weight = PostEditChecker::diagnostic_weighted_score_with_trust(before_summary, trust);
-                    let after_weight = PostEditChecker::diagnostic_weighted_score_with_trust(after_summary, trust);
+                    let before_weight = PostEditChecker::diagnostic_weighted_score_impl(before_summary);
+                    let after_weight = PostEditChecker::diagnostic_weighted_score_impl(after_summary);
                     let weighted_delta = after_weight.saturating_sub(before_weight);
                     let severe_delta = after_summary
                         .error_total()
@@ -212,12 +193,8 @@ pub(super) fn validate(
         SemanticReadinessInput {
             tree_unavailable: after_tree_unavailable,
             clang_unavailable: after_clang_unavailable,
-            tree_error_ratio: after_tree_error_ratio,
-            clang_error_count: after_clang_error_count,
-            clang_fatal_count: after_clang_fatal_count,
         },
         Some(&after_snapshot),
-        certainty,
     );
     if baseline.before_semantic_ready {
         if !after_readiness.ready {
@@ -236,12 +213,8 @@ pub(super) fn validate(
                     context_kind,
                     exact_compdb,
                     edited_lines,
-                    certainty,
                 );
-            let identity_shift_tol = crate::engine::fuzzy_inference::fuzzy_migration_tol(
-                edited_lines.map(|e| e.len()).unwrap_or(0),
-                certainty,
-            );
+            let identity_shift_tol = 4usize;
             let transition = checker.semantic_contract.evaluate_transition(
                 before_semantic,
                 &after_snapshot,
@@ -259,9 +232,6 @@ pub(super) fn validate(
             if transition.scope_integrity_regressed {
                 failure_kinds.insert(PostEditFailureKind::SemanticScopeDriftRegressed);
             }
-            identity_severity = transition.identity_severity;
-            reference_severity = transition.reference_severity;
-            scope_severity = transition.scope_severity;
             messages.extend(transition.failure_messages);
             messages.extend(transition.warning_messages);
             culprit_lines.extend(transition.culprit_lines);
@@ -280,7 +250,6 @@ pub(super) fn validate(
         &clang_delta_lines,
         clang_severe_delta,
         clang_weighted_delta,
-        certainty,
     ) {
         failure_kinds.remove(&PostEditFailureKind::ClangDiagnosticsIncreased);
         messages.retain(|item| {
@@ -304,9 +273,6 @@ pub(super) fn validate(
         messages,
         failure_kinds,
         culprit_lines,
-        identity_severity,
-        reference_severity,
-        scope_severity,
     }
 }
 
@@ -315,7 +281,6 @@ pub(super) fn validate_structural_only(
     path: &Path,
     after_text: &str,
     baseline: &CheckBaseline,
-    certainty: Option<&PolicyCertainty>,
 ) -> PostEditCheckResult {
     let mut messages = baseline.warnings.clone();
     let mut failure_kinds = BTreeSet::<PostEditFailureKind>::new();
@@ -334,11 +299,7 @@ pub(super) fn validate_structural_only(
                 culprit_lines.extend(tree_error_lines.iter().copied());
             }
             if let Some(before_ratio) = baseline.before_tree_error_ratio {
-                let adaptive_tolerance =
-                    crate::engine::fuzzy_inference::fuzzy_error_tolerance(
-                        checker.tree_error_ratio_tolerance,
-                        certainty,
-                    );
+                let adaptive_tolerance = checker.tree_error_ratio_tolerance;
                 let allowed = (before_ratio + adaptive_tolerance).clamp(0.0, 1.0);
                 if after_ratio > allowed {
                     failure_kinds.insert(PostEditFailureKind::TreeErrorRatioRegressed);
@@ -367,8 +328,5 @@ pub(super) fn validate_structural_only(
         messages,
         failure_kinds,
         culprit_lines,
-        identity_severity: 0.0,
-        reference_severity: 0.0,
-        scope_severity: 0.0,
     }
 }

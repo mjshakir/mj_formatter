@@ -85,12 +85,8 @@ pub(super) fn build(
         SemanticReadinessInput {
             tree_unavailable: baseline.before_tree_unavailable,
             clang_unavailable: baseline.before_clang_unavailable,
-            tree_error_ratio: baseline.before_tree_error_ratio,
-            clang_error_count: baseline.before_clang_error_count,
-            clang_fatal_count: baseline.before_clang_fatal_count,
         },
         Some(&before_snapshot),
-        None,
     );
     baseline.before_semantic_ready = readiness.ready;
     if !readiness.ready {

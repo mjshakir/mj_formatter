@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::policy_config::PolicyConfig;
-use crate::engine::catalog::{policy_catalog, PolicyCertainty};
+use crate::engine::catalog::policy_catalog;
 use crate::parser::file_context::{SemanticFileContext, SemanticSummary};
 
 mod context;
@@ -186,9 +186,6 @@ pub struct SemanticContract {
 pub struct SemanticReadinessInput {
     pub tree_unavailable: bool,
     pub clang_unavailable: bool,
-    pub tree_error_ratio: Option<f64>,
-    pub clang_error_count: Option<usize>,
-    pub clang_fatal_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -303,18 +300,16 @@ impl SemanticContract {
     pub fn evaluate_readiness(
         &self,
         input: SemanticReadinessInput,
-        certainty: Option<&PolicyCertainty>,
     ) -> SemanticReadinessAssessment {
-        readiness::evaluate(input, certainty)
+        readiness::evaluate(input)
     }
 
     pub fn evaluate_readiness_with_snapshot(
         &self,
         input: SemanticReadinessInput,
         snapshot: Option<&SemanticContractSnapshot>,
-        certainty: Option<&PolicyCertainty>,
     ) -> SemanticReadinessAssessment {
-        let mut readiness = self.evaluate_readiness(input, certainty);
+        let mut readiness = self.evaluate_readiness(input);
         if let Some(snapshot) = snapshot {
             let context = self.evaluate_context(snapshot);
             readiness.reasons.extend(context.hard_failures);
@@ -446,7 +441,6 @@ mod tests {
 
     use crate::parser::node_kind;
 
-    use crate::engine::catalog::PolicyCertainty;
     use super::{PolicyGuidanceMode, SemanticContract, SemanticReadinessInput};
 
     fn policy_config() -> PolicyConfig {
@@ -466,28 +460,17 @@ mod tests {
         let assessment = contract.evaluate_readiness(SemanticReadinessInput {
             tree_unavailable: false,
             clang_unavailable: false,
-            tree_error_ratio: Some(0.0),
-            clang_error_count: Some(2),
-            clang_fatal_count: Some(0),
-        }, None);
+        });
         assert!(assessment.ready);
     }
 
     #[test]
     fn rejects_tree_ratio() {
         let contract = SemanticContract::new();
-        let high_cert = PolicyCertainty {
-            structural: 0.95, semantic: 0.95, coverage: 0.95,
-            richness: 0.95, edit_success: 0.10, stable_model_prob: 0.90,
-            ..PolicyCertainty::default()
-        };
         let assessment = contract.evaluate_readiness(SemanticReadinessInput {
             tree_unavailable: false,
             clang_unavailable: false,
-            tree_error_ratio: Some(0.25),
-            clang_error_count: Some(0),
-            clang_fatal_count: Some(0),
-        }, Some(&high_cert));
+        });
         // Readiness is now binary: parsers available = ready.
         // Error ratios are informational only and do not block.
         assert!(assessment.ready);
@@ -496,18 +479,10 @@ mod tests {
     #[test]
     fn rejects_fatal_diagnostics() {
         let contract = SemanticContract::new();
-        let high_cert = PolicyCertainty {
-            structural: 0.95, semantic: 0.95, coverage: 0.95,
-            richness: 0.95, edit_success: 0.10, stable_model_prob: 0.90,
-            ..PolicyCertainty::default()
-        };
         let assessment = contract.evaluate_readiness(SemanticReadinessInput {
             tree_unavailable: false,
             clang_unavailable: false,
-            tree_error_ratio: Some(0.0),
-            clang_error_count: Some(1),
-            clang_fatal_count: Some(5),
-        }, Some(&high_cert));
+        });
         // Readiness is now binary: parsers available = ready.
         // Clang fatals are informational only and do not block.
         assert!(assessment.ready);
@@ -515,23 +490,12 @@ mod tests {
 
     #[test]
     fn certainty_overrides_threshold() {
-        use crate::engine::catalog::PolicyCertainty;
         let contract = SemanticContract::new();
-        let high_certainty = PolicyCertainty {
-            structural: 0.90,
-            edit_success: 0.85,
-            stable_model_prob: 0.80,
-            coverage: 0.30,
-            ..PolicyCertainty::default()
-        };
         let assessment = contract.evaluate_readiness(SemanticReadinessInput {
             tree_unavailable: false,
             clang_unavailable: false,
-            tree_error_ratio: Some(0.025),
-            clang_error_count: Some(0),
-            clang_fatal_count: Some(0),
-        }, Some(&high_certainty));
-        assert!(assessment.ready, "high Kalman certainty should override marginal tree error ratio violation");
+        });
+        assert!(assessment.ready, "parsers available should mean ready");
     }
 
     #[test]
