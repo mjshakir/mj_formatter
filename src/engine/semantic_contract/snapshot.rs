@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::file_context::{
     SemanticFileContext, SemanticIdProvenance, SemanticScopeKind,
 };
@@ -27,7 +26,7 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
     let mut preprocessor_ranges = Vec::<(usize, usize)>::new();
 
     for declaration in &context.declarations {
-        if declaration.kind == ClangSymbolKind::FunctionTemplate {
+        if declaration.kind == clang_sys::CXCursor_FunctionTemplate {
             continue;
         }
         decl_ids.insert(declaration.stable_id.clone());

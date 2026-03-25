@@ -93,7 +93,6 @@ impl ConfidenceContext {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::parser::file_context::SemanticDeclaration;
     use crate::parser::file_context::SemanticFileContext;
     use crate::parser::file_context::SemanticIdProvenance;
@@ -128,7 +127,7 @@ mod tests {
                 stable_id: "usr:demo".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "DemoFn".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 6,
                 column: 1,
                 usr: Some("usr:demo".to_string()),
@@ -163,7 +162,7 @@ mod tests {
                 stable_id: "usr:myVar".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "myVar".to_string(),
-                kind: ClangSymbolKind::Variable,
+                kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
                 column: 5,
                 usr: Some("usr:myVar".to_string()),
@@ -173,7 +172,7 @@ mod tests {
                 stable_id: "usr:myVar".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "test.cpp".to_string(),
-                decl_kind: ClangSymbolKind::Variable,
+                decl_kind: clang_sys::CXCursor_VarDecl,
                 offset: 19,
                 line: 2,
                 column: 9,
@@ -211,7 +210,7 @@ mod tests {
                 stable_id: "usr:val".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "val".to_string(),
-                kind: ClangSymbolKind::Variable,
+                kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
                 column: 5,
                 usr: Some("usr:val".to_string()),
@@ -221,7 +220,7 @@ mod tests {
                 stable_id: "usr:val".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "test.cpp".to_string(),
-                decl_kind: ClangSymbolKind::Variable,
+                decl_kind: clang_sys::CXCursor_VarDecl,
                 offset: 17,
                 line: 2,
                 column: 9,
@@ -266,7 +265,7 @@ mod tests {
                 stable_id: "usr:foo".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "foo".to_string(),
-                kind: ClangSymbolKind::Variable,
+                kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
                 column: 5,
                 usr: Some("usr:foo".to_string()),
@@ -277,7 +276,7 @@ mod tests {
                     stable_id: "usr:foo".to_string(),
                     provenance: SemanticIdProvenance::Usr,
                     decl_path: "test.cpp".to_string(),
-                    decl_kind: ClangSymbolKind::Variable,
+                    decl_kind: clang_sys::CXCursor_VarDecl,
                     offset: 17,
                     line: 2,
                     column: 9,
@@ -286,7 +285,7 @@ mod tests {
                     stable_id: "usr:foo".to_string(),
                     provenance: SemanticIdProvenance::Usr,
                     decl_path: "test.cpp".to_string(),
-                    decl_kind: ClangSymbolKind::Variable,
+                    decl_kind: clang_sys::CXCursor_VarDecl,
                     offset: 29,
                     line: 3,
                     column: 9,
@@ -319,7 +318,7 @@ mod tests {
                 stable_id: "usr:demo".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "DemoFn".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 1,
                 column: 1,
                 usr: Some("usr:demo".to_string()),

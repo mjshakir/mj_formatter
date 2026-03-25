@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::clang_result::ClangParseResult;
-use crate::parser::clang_types::ClangSymbolKind;
 use crate::graph::types::GraphEdge;
 use crate::graph::types::GraphEdgeKind;
 use crate::graph::types::GraphNode;
@@ -257,30 +256,29 @@ impl GraphUpdater {
         state.upsert_node(node);
     }
 
-    fn graph_node_kind_for_decl_kind(kind: ClangSymbolKind) -> GraphNodeKind {
+    fn graph_node_kind_for_decl_kind(kind: i32) -> GraphNodeKind {
         match kind {
-            ClangSymbolKind::Function
-            | ClangSymbolKind::FunctionTemplate
-            | ClangSymbolKind::Constructor
-            | ClangSymbolKind::Destructor => GraphNodeKind::Function,
-            ClangSymbolKind::Method => GraphNodeKind::Method,
-            ClangSymbolKind::Variable => GraphNodeKind::Variable,
-            ClangSymbolKind::Field => GraphNodeKind::Field,
-            ClangSymbolKind::Parameter => GraphNodeKind::Parameter,
-            ClangSymbolKind::Type
-            | ClangSymbolKind::Struct
-            | ClangSymbolKind::Class
-            | ClangSymbolKind::Union
-            | ClangSymbolKind::Enum
-            | ClangSymbolKind::Typedef
-            | ClangSymbolKind::TypeAlias => GraphNodeKind::Type,
-            ClangSymbolKind::Namespace => GraphNodeKind::Namespace,
-            ClangSymbolKind::Macro => GraphNodeKind::Macro,
-            ClangSymbolKind::ConversionFunction => GraphNodeKind::Function,
-            ClangSymbolKind::UsingDecl
-            | ClangSymbolKind::EnumConstant
-            | ClangSymbolKind::FriendDecl
-            | ClangSymbolKind::Other => GraphNodeKind::Variable,
+            clang_sys::CXCursor_FunctionDecl
+            | clang_sys::CXCursor_FunctionTemplate
+            | clang_sys::CXCursor_Constructor
+            | clang_sys::CXCursor_Destructor => GraphNodeKind::Function,
+            clang_sys::CXCursor_CXXMethod => GraphNodeKind::Method,
+            clang_sys::CXCursor_VarDecl => GraphNodeKind::Variable,
+            clang_sys::CXCursor_FieldDecl => GraphNodeKind::Field,
+            clang_sys::CXCursor_ParmDecl => GraphNodeKind::Parameter,
+            clang_sys::CXCursor_TypedefDecl
+            | clang_sys::CXCursor_StructDecl
+            | clang_sys::CXCursor_ClassDecl
+            | clang_sys::CXCursor_UnionDecl
+            | clang_sys::CXCursor_EnumDecl
+            | clang_sys::CXCursor_TypeAliasDecl => GraphNodeKind::Type,
+            clang_sys::CXCursor_Namespace => GraphNodeKind::Namespace,
+            clang_sys::CXCursor_MacroDefinition => GraphNodeKind::Macro,
+            clang_sys::CXCursor_ConversionFunction => GraphNodeKind::Function,
+            clang_sys::CXCursor_UsingDeclaration
+            | clang_sys::CXCursor_EnumConstantDecl
+            | clang_sys::CXCursor_FriendDecl => GraphNodeKind::Variable,
+            _ => GraphNodeKind::Variable,
         }
     }
 
@@ -381,13 +379,12 @@ fn current_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::path::PathBuf;
 
+    use rustc_hash::FxHashMap;
     use crate::parser::clang_types::ClangDeclKey;
     use crate::parser::clang_result::ClangParseResult;
     use crate::parser::clang_symbol::ClangSymbol;
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::graph::types::GraphEdgeKind;
     use crate::graph::state::ProjectGraphState;
     use crate::graph::state_updater::GraphUpdater;
@@ -402,11 +399,10 @@ mod tests {
             Vec::new(),
             vec![ClangSymbol {
                 name: "DemoFn".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 12,
                 column: 4,
-                usr: None,
-                scope_usr: None,
+                ..Default::default()
             }],
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -427,19 +423,17 @@ mod tests {
             vec![
                 ClangSymbol {
                     name: "DemoFn".to_string(),
-                    kind: ClangSymbolKind::Function,
+                    kind: clang_sys::CXCursor_FunctionDecl,
                     line: 12,
                     column: 4,
-                    usr: None,
-                    scope_usr: None,
+                    ..Default::default()
                 },
                 ClangSymbol {
                     name: "OldFn".to_string(),
-                    kind: ClangSymbolKind::Function,
+                    kind: clang_sys::CXCursor_FunctionDecl,
                     line: 24,
                     column: 3,
-                    usr: None,
-                    scope_usr: None,
+                    ..Default::default()
                 },
             ],
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
@@ -450,11 +444,10 @@ mod tests {
             Vec::new(),
             vec![ClangSymbol {
                 name: "DemoFn".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 12,
                 column: 4,
-                usr: None,
-                scope_usr: None,
+                ..Default::default()
             }],
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -490,15 +483,15 @@ mod tests {
             .unwrap_or_else(|_| decl_path.clone())
             .to_string_lossy()
             .to_string();
-        let decl_key = ClangDeclKey::new(canonical_decl, 10, 3, ClangSymbolKind::Function);
+        let decl_key = ClangDeclKey::new(canonical_decl, 10, 3, clang_sys::CXCursor_FunctionDecl);
 
-        let mut references = HashMap::<ClangDeclKey, Vec<usize>>::new();
+        let mut references = FxHashMap::<ClangDeclKey, Vec<usize>>::default();
         references.insert(decl_key.clone(), vec![5, 17]);
         let use_parse = ClangParseResult::with_semantic_offsets(
             true,
             Vec::new(),
             Vec::new(),
-            HashMap::new(),
+            FxHashMap::default(),
             references,
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -509,11 +502,10 @@ mod tests {
             Vec::new(),
             vec![ClangSymbol {
                 name: "TargetFn".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 10,
                 column: 3,
-                usr: None,
-                scope_usr: None,
+                ..Default::default()
             }],
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -540,14 +532,14 @@ mod tests {
     #[test]
     fn replaces_same_file() {
         let use_path = PathBuf::from("src/ref_refresh.cpp");
-        let key_a = ClangDeclKey::new("src/a.hpp".to_string(), 1, 1, ClangSymbolKind::Function);
-        let key_b = ClangDeclKey::new("src/b.hpp".to_string(), 2, 1, ClangSymbolKind::Function);
+        let key_a = ClangDeclKey::new("src/a.hpp".to_string(), 1, 1, clang_sys::CXCursor_FunctionDecl);
+        let key_b = ClangDeclKey::new("src/b.hpp".to_string(), 2, 1, clang_sys::CXCursor_FunctionDecl);
         let parse_a = ClangParseResult::with_semantic_offsets(
             true,
             Vec::new(),
             Vec::new(),
-            HashMap::new(),
-            HashMap::from([(key_a.clone(), vec![3, 9])]),
+            FxHashMap::default(),
+            FxHashMap::from_iter([(key_a.clone(), vec![3, 9])]),
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
             Vec::new(),
         );
@@ -555,8 +547,8 @@ mod tests {
             true,
             Vec::new(),
             Vec::new(),
-            HashMap::new(),
-            HashMap::from([(key_b.clone(), vec![5])]),
+            FxHashMap::default(),
+            FxHashMap::from_iter([(key_b.clone(), vec![5])]),
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
             Vec::new(),
         );

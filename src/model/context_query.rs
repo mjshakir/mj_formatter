@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 
 use crate::parser::clang_result::ClangDiagnosticSeverity;
-use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::file_context::{
     SemanticDeclaration, SemanticFileContext, SemanticReference, SemanticScope, SemanticScopeKind,
     SourceLocation,
@@ -103,7 +102,7 @@ impl<'a> SemanticContextQuery<'a> {
         &self,
         line: usize,
         column: usize,
-        allowed_kinds: &[ClangSymbolKind],
+        allowed_kinds: &[i32],
     ) -> Option<&'a SemanticDeclaration> {
         self.symbol_at_location(SourceLocation::new(line, column), allowed_kinds)
     }
@@ -111,11 +110,11 @@ impl<'a> SemanticContextQuery<'a> {
     pub fn symbol_at_location(
         &self,
         location: SourceLocation,
-        allowed_kinds: &[ClangSymbolKind],
+        allowed_kinds: &[i32],
     ) -> Option<&'a SemanticDeclaration> {
         let semantic = self.semantic?;
         let allow_kind =
-            |kind: ClangSymbolKind| allowed_kinds.is_empty() || allowed_kinds.contains(&kind);
+            |kind: i32| allowed_kinds.is_empty() || allowed_kinds.contains(&kind);
         if let Some(declaration) = semantic.declaration_at_location(location, allowed_kinds) {
             return Some(declaration);
         }
@@ -185,23 +184,17 @@ impl<'a> SemanticContextQuery<'a> {
     }
 
     pub fn is_macro_region_at(&self, location: SourceLocation) -> bool {
-        if let Some(semantic) = self.semantic {
-            return semantic.is_macro_region(location);
-        }
-        let mut left = 0usize;
-        let mut right = self.preprocessor_ranges.len();
-        while left < right {
-            let mid = left + (right - left) / 2;
-            let (start, end) = self.preprocessor_ranges[mid];
-            if location.line < start {
-                right = mid;
-            } else if location.line > end {
-                left = mid + 1;
-            } else {
-                return true;
-            }
-        }
-        false
+        self.preprocessor_ranges
+            .binary_search_by(|&(start, end)| {
+                if location.line < start {
+                    std::cmp::Ordering::Greater
+                } else if location.line > end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
     }
 
     pub fn has_diag_error(&self, line: usize) -> bool {
@@ -424,7 +417,6 @@ mod tests {
     use crate::parser::clang_result::{
         ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary,
     };
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
         SemanticScope, SemanticScopeKind,
@@ -439,7 +431,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "foo".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 2,
                 column: 5,
                 usr: Some("c:@F@foo#".to_string()),
@@ -450,7 +442,7 @@ mod tests {
                     stable_id: "usr:c:@F@foo#".to_string(),
                     provenance: SemanticIdProvenance::Usr,
                     decl_path: "a.cpp".to_string(),
-                    decl_kind: ClangSymbolKind::Function,
+                    decl_kind: clang_sys::CXCursor_FunctionDecl,
                     offset: 10,
                     line: 2,
                     column: 5,
@@ -459,7 +451,7 @@ mod tests {
                     stable_id: "usr:c:@F@foo#".to_string(),
                     provenance: SemanticIdProvenance::Usr,
                     decl_path: "a.cpp".to_string(),
-                    decl_kind: ClangSymbolKind::Function,
+                    decl_kind: clang_sys::CXCursor_FunctionDecl,
                     offset: 40,
                     line: 4,
                     column: 12,
@@ -477,7 +469,7 @@ mod tests {
         };
         let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let declaration = query
-            .symbol_at(2, 5, &[ClangSymbolKind::Function])
+            .symbol_at(2, 5, &[clang_sys::CXCursor_FunctionDecl])
             .expect("declaration at location");
         assert_eq!(declaration.name, "foo");
         assert!(query.decl_by_id("usr:c:@F@foo#").is_some());
@@ -508,7 +500,7 @@ mod tests {
                 stable_id: "usr:c:@F@broken#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "broken".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 8,
                 column: 1,
                 usr: Some("c:@F@broken#".to_string()),
@@ -551,7 +543,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "foo".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 3,
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
@@ -561,7 +553,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "a.cpp".to_string(),
-                decl_kind: ClangSymbolKind::Function,
+                decl_kind: clang_sys::CXCursor_FunctionDecl,
                 offset: 30,
                 line: 5,
                 column: 3,
@@ -615,7 +607,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "foo".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 3,
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
@@ -625,7 +617,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "a.cpp".to_string(),
-                decl_kind: ClangSymbolKind::Function,
+                decl_kind: clang_sys::CXCursor_FunctionDecl,
                 offset: 30,
                 line: 5,
                 column: 3,

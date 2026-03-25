@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::model::context_query::SemanticContextQuery;
-use crate::parser::clang_types::ClangSymbolKind;
+use crate::parser::clang_types;
 use crate::parser::file_context::{
     SemanticDeclaration, SemanticReference, SemanticScope, SourceLocation,
 };
@@ -10,28 +10,27 @@ use crate::graph::snapshot::ProjectGraphSnapshot;
 use crate::graph::types::ProjectSignal;
 use crate::graph::symbol_id::SymbolId;
 
-const ALL_SYMBOL_KINDS: [ClangSymbolKind; 21] = [
-    ClangSymbolKind::Function,
-    ClangSymbolKind::FunctionTemplate,
-    ClangSymbolKind::Method,
-    ClangSymbolKind::Constructor,
-    ClangSymbolKind::Destructor,
-    ClangSymbolKind::Variable,
-    ClangSymbolKind::Field,
-    ClangSymbolKind::Parameter,
-    ClangSymbolKind::Type,
-    ClangSymbolKind::Namespace,
-    ClangSymbolKind::Macro,
-    ClangSymbolKind::Struct,
-    ClangSymbolKind::Class,
-    ClangSymbolKind::Union,
-    ClangSymbolKind::Enum,
-    ClangSymbolKind::Typedef,
-    ClangSymbolKind::TypeAlias,
-    ClangSymbolKind::ConversionFunction,
-    ClangSymbolKind::UsingDecl,
-    ClangSymbolKind::EnumConstant,
-    ClangSymbolKind::FriendDecl,
+const ALL_SYMBOL_KINDS: [i32; 20] = [
+    clang_sys::CXCursor_FunctionDecl,
+    clang_sys::CXCursor_FunctionTemplate,
+    clang_sys::CXCursor_CXXMethod,
+    clang_sys::CXCursor_Constructor,
+    clang_sys::CXCursor_Destructor,
+    clang_sys::CXCursor_VarDecl,
+    clang_sys::CXCursor_FieldDecl,
+    clang_sys::CXCursor_ParmDecl,
+    clang_sys::CXCursor_Namespace,
+    clang_sys::CXCursor_MacroDefinition,
+    clang_sys::CXCursor_StructDecl,
+    clang_sys::CXCursor_ClassDecl,
+    clang_sys::CXCursor_UnionDecl,
+    clang_sys::CXCursor_EnumDecl,
+    clang_sys::CXCursor_TypedefDecl,
+    clang_sys::CXCursor_TypeAliasDecl,
+    clang_sys::CXCursor_ConversionFunction,
+    clang_sys::CXCursor_UsingDeclaration,
+    clang_sys::CXCursor_EnumConstantDecl,
+    clang_sys::CXCursor_FriendDecl,
 ];
 
 pub trait SignalKey {
@@ -90,7 +89,7 @@ impl<'a> ProjectContextQuery<'a> {
         &self,
         line: usize,
         column: usize,
-        allowed_kinds: &[ClangSymbolKind],
+        allowed_kinds: &[i32],
     ) -> Option<&'a SemanticDeclaration> {
         self.semantic_query.symbol_at(line, column, allowed_kinds)
     }
@@ -181,14 +180,14 @@ impl<'a> ProjectContextQuery<'a> {
         {
             ids.push(SymbolId::new(format!(
                 "scoped|{}|{}|{}",
-                Self::kind_label(declaration.kind),
+                clang_types::entity_kind_label(declaration.kind, true),
                 Self::sanitize_component(scope_usr),
                 Self::sanitize_component(declaration.name.as_str())
             )));
         }
         ids.push(SymbolId::new(format!(
             "bucket|{}|{}",
-            Self::kind_label(declaration.kind),
+            clang_types::entity_kind_label(declaration.kind, true),
             Self::sanitize_component(declaration.name.as_str())
         )));
         ids.extend(Self::symbol_ids_for_stable_id(
@@ -205,32 +204,6 @@ impl<'a> ProjectContextQuery<'a> {
         deduped
     }
 
-    fn kind_label(kind: ClangSymbolKind) -> &'static str {
-        match kind {
-            ClangSymbolKind::Function | ClangSymbolKind::FunctionTemplate => "function",
-            ClangSymbolKind::Method => "method",
-            ClangSymbolKind::Constructor => "constructor",
-            ClangSymbolKind::Destructor => "destructor",
-            ClangSymbolKind::Variable => "variable",
-            ClangSymbolKind::Field => "field",
-            ClangSymbolKind::Parameter => "parameter",
-            ClangSymbolKind::Type => "type",
-            ClangSymbolKind::Namespace => "namespace",
-            ClangSymbolKind::Macro => "macro",
-            ClangSymbolKind::Struct => "struct",
-            ClangSymbolKind::Class => "class",
-            ClangSymbolKind::Union => "union",
-            ClangSymbolKind::Enum => "enum",
-            ClangSymbolKind::Typedef => "typedef",
-            ClangSymbolKind::TypeAlias => "type_alias",
-            ClangSymbolKind::ConversionFunction => "conversion_function",
-            ClangSymbolKind::UsingDecl => "using_decl",
-            ClangSymbolKind::EnumConstant => "enum_constant",
-            ClangSymbolKind::FriendDecl => "friend_decl",
-            ClangSymbolKind::Other => "other",
-        }
-    }
-
     fn sanitize_component(raw: &str) -> String {
         raw.replace('|', "%7C")
     }
@@ -242,7 +215,6 @@ mod tests {
 
     use crate::model::project_query::ProjectContextQuery;
     use crate::model::context_query::SemanticContextQuery;
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance,
     };
@@ -258,7 +230,7 @@ mod tests {
                 stable_id: "usr:c:@S@Demo@FI@m_value".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "m_value".to_string(),
-                kind: ClangSymbolKind::Field,
+                kind: clang_sys::CXCursor_FieldDecl,
                 line: 10,
                 column: 5,
                 usr: Some("c:@S@Demo@FI@m_value".to_string()),

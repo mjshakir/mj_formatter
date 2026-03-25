@@ -440,7 +440,7 @@ impl ParserManager {
 }
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -451,7 +451,6 @@ mod tests {
         ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
     };
     use crate::parser::clang_symbol::ClangSymbol;
-    use crate::parser::clang_types::ClangSymbolKind;
 
     #[test]
     fn parse_collects_symbols() {
@@ -467,13 +466,13 @@ mod tests {
             .symbols
             .iter()
             .any(|symbol| symbol.name == "BadName"
-                && matches!(symbol.kind, ClangSymbolKind::Function)));
+                && symbol.kind == clang_sys::CXCursor_FunctionDecl));
         assert!(result
             .symbols
             .iter()
             .any(|symbol| symbol.name == "local_value"
-                && matches!(symbol.kind, ClangSymbolKind::Variable)));
-        let offsets = result.rename_offsets("local_value", 1, &[ClangSymbolKind::Variable]);
+                && symbol.kind == clang_sys::CXCursor_VarDecl));
+        let offsets = result.rename_offsets("local_value", 1, &[clang_sys::CXCursor_VarDecl]);
         assert!(
             offsets.len() >= 2,
             "expected declaration and reference offsets for local_value"
@@ -516,18 +515,25 @@ mod tests {
     fn consensus_ignores_unrecoverable() {
         let failed_symbol = ClangSymbol {
             name: "m_data".to_string(),
-            kind: ClangSymbolKind::Field,
+            kind: clang_sys::CXCursor_FieldDecl,
             line: 7,
             column: 9,
             usr: Some("usr:test:field:m_data".to_string()),
             scope_usr: Some("usr:test:scope:Holder".to_string()),
+            storage_class: None,
+            is_const: false,
+            is_volatile: false,
+            type_kind: clang_sys::CXType_Unexposed,
+            type_display: String::new(),
+        canonical_type_kind: clang_sys::CXType_Unexposed,
+        template_name: None,
         };
         let failed_parse = ClangParseResult::with_semantic_offsets(
             false,
             vec!["fatal-1".to_string(), "fatal-2".to_string()],
             vec![failed_symbol],
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             ClangDiagnosticSummary {
                 fatal: 2,
                 ..ClangDiagnosticSummary::default()
@@ -567,18 +573,25 @@ mod tests {
     fn consensus_accepts_recoverable() {
         let failed_symbol = ClangSymbol {
             name: "m_data".to_string(),
-            kind: ClangSymbolKind::Field,
+            kind: clang_sys::CXCursor_FieldDecl,
             line: 7,
             column: 9,
             usr: Some("usr:test:field:m_data".to_string()),
             scope_usr: Some("usr:test:scope:Holder".to_string()),
+            storage_class: None,
+            is_const: false,
+            is_volatile: false,
+            type_kind: clang_sys::CXType_Unexposed,
+            type_display: String::new(),
+        canonical_type_kind: clang_sys::CXType_Unexposed,
+        template_name: None,
         };
         let failed_parse = ClangParseResult::with_semantic_offsets(
             false,
             vec!["fatal".to_string()],
             vec![failed_symbol.clone()],
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             ClangDiagnosticSummary {
                 fatal: 1,
                 ..ClangDiagnosticSummary::default()

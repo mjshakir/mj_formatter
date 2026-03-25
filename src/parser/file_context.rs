@@ -11,7 +11,6 @@ use crate::parser::clang_result::{
     ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
 };
 use crate::parser::clang_symbol::ClangSymbol;
-use crate::parser::clang_types::ClangSymbolKind;
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::text_scan;
 
@@ -37,7 +36,7 @@ pub struct SemanticDeclaration {
     pub stable_id: String,
     pub provenance: SemanticIdProvenance,
     pub name: String,
-    pub kind: ClangSymbolKind,
+    pub kind: i32,
     pub line: usize,
     pub column: usize,
     pub usr: Option<String>,
@@ -49,7 +48,7 @@ pub struct SemanticReference {
     pub stable_id: String,
     pub provenance: SemanticIdProvenance,
     pub decl_path: String,
-    pub decl_kind: ClangSymbolKind,
+    pub decl_kind: i32,
     pub offset: usize,
     pub line: usize,
     pub column: usize,
@@ -246,10 +245,10 @@ impl SemanticFileContext {
     pub fn declaration_at_location(
         &self,
         location: SourceLocation,
-        allowed_kinds: &[ClangSymbolKind],
+        allowed_kinds: &[i32],
     ) -> Option<&SemanticDeclaration> {
         let allow_kind =
-            |kind: ClangSymbolKind| allowed_kinds.is_empty() || allowed_kinds.contains(&kind);
+            |kind: i32| allowed_kinds.is_empty() || allowed_kinds.contains(&kind);
         if let Some(exact) = self.declarations.iter().find(|declaration| {
             declaration.line == location.line
                 && declaration.column == location.column
@@ -295,6 +294,7 @@ impl SemanticFileContext {
             })
     }
 
+    #[cfg(test)]
     pub fn is_macro_region(&self, location: SourceLocation) -> bool {
         self.scopes.iter().any(|scope| {
             scope.kind == SemanticScopeKind::Preprocessor
@@ -329,7 +329,7 @@ impl SemanticFileContext {
         let mut usr_backed_declaration_count = 0usize;
         let mut stable_declaration_count = 0usize;
         for declaration in &self.declarations {
-            if declaration.kind == ClangSymbolKind::FunctionTemplate {
+            if declaration.kind == clang_sys::CXCursor_FunctionTemplate {
                 continue;
             }
             stable_declaration_count = stable_declaration_count.saturating_add(1);
@@ -774,7 +774,7 @@ impl SemanticFileContext {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
     use std::path::{Path, PathBuf};
 
     use tree_sitter::Parser;
@@ -782,7 +782,6 @@ mod tests {
     use crate::parser::clang_types::ClangDeclKey;
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
     use crate::parser::clang_symbol::ClangSymbol;
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::parser::file_context::{
         SemanticFileContext, SemanticIdProvenance, SemanticScopeKind, SourceLocation,
     };
@@ -797,11 +796,12 @@ mod tests {
             Vec::new(),
             vec![ClangSymbol {
                 name: "Foo".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 1,
                 column: 5,
                 usr: Some("c:@F@Foo#".to_string()),
                 scope_usr: None,
+                ..Default::default()
             }],
             ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -822,21 +822,22 @@ mod tests {
             .unwrap_or_else(|_| path.clone())
             .to_string_lossy()
             .to_string();
-        let key = ClangDeclKey::new(canonical_path, 1, 5, ClangSymbolKind::Variable);
-        let mut reference_map = HashMap::<ClangDeclKey, Vec<usize>>::new();
+        let key = ClangDeclKey::new(canonical_path, 1, 5, clang_sys::CXCursor_VarDecl);
+        let mut reference_map = FxHashMap::<ClangDeclKey, Vec<usize>>::default();
         reference_map.insert(key, vec![4, 13]);
         let parse = ClangParseResult::with_semantic_offsets(
             true,
             Vec::new(),
             vec![ClangSymbol {
                 name: "Foo".to_string(),
-                kind: ClangSymbolKind::Variable,
+                kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
                 column: 5,
                 usr: None,
                 scope_usr: None,
+                ..Default::default()
             }],
-            HashMap::new(),
+            FxHashMap::default(),
             reference_map,
             ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -858,14 +859,14 @@ mod tests {
             .unwrap_or_else(|_| path.clone())
             .to_string_lossy()
             .to_string();
-        let key = ClangDeclKey::new(canonical_path, 1, 5, ClangSymbolKind::Variable);
-        let mut reference_map = HashMap::<ClangDeclKey, Vec<usize>>::new();
+        let key = ClangDeclKey::new(canonical_path, 1, 5, clang_sys::CXCursor_VarDecl);
+        let mut reference_map = FxHashMap::<ClangDeclKey, Vec<usize>>::default();
         reference_map.insert(key, vec![4, 13]);
         let parse = ClangParseResult::with_semantic_offsets(
             true,
             Vec::new(),
             Vec::new(),
-            HashMap::new(),
+            FxHashMap::default(),
             reference_map,
             ClangDiagnosticSummary::default(),
             Vec::new(),
@@ -906,7 +907,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "foo".to_string(),
-                kind: ClangSymbolKind::Function,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 3,
                 column: 5,
                 usr: Some("c:@F@foo#".to_string()),
@@ -916,7 +917,7 @@ mod tests {
                 stable_id: "usr:c:@F@foo#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "query.cpp".to_string(),
-                decl_kind: ClangSymbolKind::Function,
+                decl_kind: clang_sys::CXCursor_FunctionDecl,
                 offset: 12,
                 line: 6,
                 column: 9,
@@ -932,7 +933,7 @@ mod tests {
             ..SemanticFileContext::default()
         };
         let declaration = context
-            .declaration_at_location(SourceLocation::new(3, 5), &[ClangSymbolKind::Function])
+            .declaration_at_location(SourceLocation::new(3, 5), &[clang_sys::CXCursor_FunctionDecl])
             .expect("declaration by location");
         assert_eq!(declaration.name, "foo");
         assert_eq!(context.refs_by_id("usr:c:@F@foo#").len(), 1);
@@ -1010,19 +1011,17 @@ mod tests {
         let path = PathBuf::from("column_resilience.cpp");
         let symbol_col5 = ClangSymbol {
             name: "value".to_string(),
-            kind: ClangSymbolKind::Variable,
+            kind: clang_sys::CXCursor_VarDecl,
             line: 10,
             column: 5,
-            usr: None,
-            scope_usr: None,
+            ..Default::default()
         };
         let symbol_col8 = ClangSymbol {
             name: "value".to_string(),
-            kind: ClangSymbolKind::Variable,
+            kind: clang_sys::CXCursor_VarDecl,
             line: 10,
             column: 8,
-            usr: None,
-            scope_usr: None,
+            ..Default::default()
         };
         let (id_a, _) = SemanticFileContext::stable_id_for_symbol(&path, &symbol_col5);
         let (id_b, _) = SemanticFileContext::stable_id_for_symbol(&path, &symbol_col8);
@@ -1034,19 +1033,17 @@ mod tests {
         let path = PathBuf::from("name_diff.cpp");
         let sym_a = ClangSymbol {
             name: "alpha".to_string(),
-            kind: ClangSymbolKind::Variable,
+            kind: clang_sys::CXCursor_VarDecl,
             line: 10,
             column: 5,
-            usr: None,
-            scope_usr: None,
+            ..Default::default()
         };
         let sym_b = ClangSymbol {
             name: "beta".to_string(),
-            kind: ClangSymbolKind::Variable,
+            kind: clang_sys::CXCursor_VarDecl,
             line: 10,
             column: 5,
-            usr: None,
-            scope_usr: None,
+            ..Default::default()
         };
         let (id_a, _) = SemanticFileContext::stable_id_for_symbol(&path, &sym_a);
         let (id_b, _) = SemanticFileContext::stable_id_for_symbol(&path, &sym_b);

@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use clang::diagnostic::Severity as ClangSeverity;
 use clang::source::Location;
-use clang::{Entity, EntityKind, EntityVisitResult, Index, Unsaved};
+use clang::{Entity, EntityVisitResult, Index, Unsaved};
 
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::clang_result::{
@@ -13,7 +15,6 @@ use crate::parser::clang_result::{
 };
 use crate::parser::clang_symbol::ClangSymbol;
 use crate::parser::clang_types::ClangSymbolKey;
-use crate::parser::clang_types::ClangSymbolKind;
 
 pub(crate) struct SemanticExtractor;
 
@@ -114,7 +115,7 @@ impl SemanticExtractor {
 
     fn collect_symbols<'tu>(
         entity: Entity<'tu>,
-        seen: &mut HashSet<(String, Option<String>, ClangSymbolKind, usize, usize)>,
+        seen: &mut HashSet<(String, Option<String>, i32, usize, usize)>,
         symbols: &mut Vec<ClangSymbol>,
         symbol_entities: &mut Vec<(ClangSymbol, Entity<'tu>)>,
     ) {
@@ -140,12 +141,12 @@ impl SemanticExtractor {
         translation_unit: &clang::TranslationUnit<'tu>,
         source_path: &str,
         symbol_entities: &[(ClangSymbol, Entity<'tu>)],
-    ) -> HashMap<ClangSymbolKey, Vec<usize>> {
+    ) -> FxHashMap<ClangSymbolKey, Vec<usize>> {
         let Some(file) = translation_unit.get_file(source_path) else {
-            return HashMap::new();
+            return FxHashMap::default();
         };
 
-        let mut rename_offsets_by_symbol = HashMap::new();
+        let mut rename_offsets_by_symbol = FxHashMap::default();
         for (symbol, entity) in symbol_entities {
             let mut offsets = HashSet::new();
 
@@ -182,8 +183,9 @@ impl SemanticExtractor {
         rename_offsets_by_symbol
     }
 
-    fn collect_reference_offsets(entity: Entity<'_>) -> HashMap<ClangDeclKey, Vec<usize>> {
-        let mut offsets_by_decl: HashMap<ClangDeclKey, Vec<usize>> = HashMap::new();
+    fn collect_reference_offsets(entity: Entity<'_>) -> FxHashMap<ClangDeclKey, Vec<usize>> {
+        let mut offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>> = FxHashMap::default();
+        let mut path_cache: FxHashMap<std::path::PathBuf, String> = FxHashMap::default();
 
         entity.visit_children(|child, _parent| {
             let Some(reference) = child.get_reference() else {
@@ -199,7 +201,7 @@ impl SemanticExtractor {
             if !Self::is_main_file_location(&reference_spelling) {
                 return EntityVisitResult::Recurse;
             }
-            let Some(decl_key) = Self::decl_key_from_entity(reference) else {
+            let Some(decl_key) = Self::decl_key_from_entity_cached(reference, &mut path_cache) else {
                 return EntityVisitResult::Recurse;
             };
 
@@ -222,18 +224,28 @@ impl SemanticExtractor {
         location.file.is_some() && location.line > 0 && location.column > 0
     }
 
-    fn decl_key_from_entity(entity: Entity<'_>) -> Option<ClangDeclKey> {
-        let kind = Self::map_symbol_kind(entity.get_kind())?;
+    fn decl_key_from_entity_cached(
+        entity: Entity<'_>,
+        path_cache: &mut FxHashMap<std::path::PathBuf, String>,
+    ) -> Option<ClangDeclKey> {
+        let kind = entity.get_kind();
+        if !Self::is_relevant_kind(kind as i32) {
+            return None;
+        }
         let location = entity.get_location()?.get_spelling_location();
         let file = location.file?;
-        let path = Self::normalize_path_for_key(file.get_path().as_path());
+        let raw_path = file.get_path();
+        let path = path_cache
+            .entry(raw_path.clone())
+            .or_insert_with(|| Self::normalize_path_for_key(&raw_path))
+            .clone();
         let line = location.line as usize;
         let column = location.column as usize;
         if line == 0 || column == 0 {
             return None;
         }
 
-        Some(ClangDeclKey::new(path, line, column, kind))
+        Some(ClangDeclKey::new(path, line, column, kind as i32))
     }
 
     fn normalize_path_for_key(path: &Path) -> String {
@@ -244,7 +256,10 @@ impl SemanticExtractor {
     }
 
     fn symbol_from_entity(entity: Entity<'_>) -> Option<ClangSymbol> {
-        let kind = Self::map_symbol_kind(entity.get_kind())?;
+        let kind = entity.get_kind();
+        if !Self::is_relevant_kind(kind as i32) {
+            return None;
+        }
         let name = entity
             .get_name()
             .or_else(|| entity.get_display_name())
@@ -264,9 +279,61 @@ impl SemanticExtractor {
             return None;
         }
 
+        let kind_i32 = kind as i32;
+        let needs_storage = matches!(
+            kind_i32,
+            clang_sys::CXCursor_VarDecl
+                | clang_sys::CXCursor_FunctionDecl
+                | clang_sys::CXCursor_CXXMethod
+                | clang_sys::CXCursor_FunctionTemplate
+        );
+        let storage_class = if needs_storage {
+            entity.get_storage_class().map(|sc| sc as i32)
+        } else {
+            None
+        };
+
+        let needs_type = matches!(
+            kind_i32,
+            clang_sys::CXCursor_VarDecl
+                | clang_sys::CXCursor_FieldDecl
+                | clang_sys::CXCursor_ParmDecl
+                | clang_sys::CXCursor_FunctionDecl
+                | clang_sys::CXCursor_CXXMethod
+                | clang_sys::CXCursor_FunctionTemplate
+                | clang_sys::CXCursor_Constructor
+                | clang_sys::CXCursor_Destructor
+        );
+        let (is_const, is_volatile, type_kind, type_display, canonical_type_kind, template_name) =
+            if needs_type {
+                if let Some(ty) = entity.get_type() {
+                    let tk = ty.get_kind() as i32;
+                    let display = if tk == clang_sys::CXType_Pointer {
+                        ty.get_display_name()
+                    } else {
+                        String::new()
+                    };
+                    let tmpl = ty.get_declaration()
+                        .and_then(|decl| decl.get_name())
+                        .filter(|n| !n.is_empty());
+                    (
+                        ty.is_const_qualified(),
+                        ty.is_volatile_qualified(),
+                        tk,
+                        display,
+                        ty.get_canonical_type().get_kind() as i32,
+                        tmpl,
+                    )
+                } else {
+                    (false, false, clang_sys::CXType_Unexposed, String::new(), clang_sys::CXType_Unexposed, None)
+                }
+            } else {
+                (false, false, clang_sys::CXType_Unexposed, String::new(), clang_sys::CXType_Unexposed, None)
+            };
+
         Some(ClangSymbol {
             name,
-            kind,
+            kind: kind_i32,
             line,
             column,
             usr: entity.get_usr().and_then(|value| {
@@ -282,35 +349,39 @@ impl SemanticExtractor {
                     let trimmed = raw.trim();
                     (!trimmed.is_empty()).then_some(trimmed.to_string())
                 }),
+            storage_class,
+            is_const,
+            is_volatile,
+            type_kind,
+            type_display,
+            canonical_type_kind,
+            template_name,
         })
     }
 
-    fn map_symbol_kind(kind: EntityKind) -> Option<ClangSymbolKind> {
-        match kind {
-            EntityKind::FunctionDecl => Some(ClangSymbolKind::Function),
-            EntityKind::FunctionTemplate => Some(ClangSymbolKind::FunctionTemplate),
-            EntityKind::Method => Some(ClangSymbolKind::Method),
-            EntityKind::Constructor => Some(ClangSymbolKind::Constructor),
-            EntityKind::Destructor => Some(ClangSymbolKind::Destructor),
-            EntityKind::VarDecl => Some(ClangSymbolKind::Variable),
-            EntityKind::FieldDecl => Some(ClangSymbolKind::Field),
-            EntityKind::ParmDecl => Some(ClangSymbolKind::Parameter),
-            EntityKind::StructDecl => Some(ClangSymbolKind::Struct),
-            EntityKind::ClassDecl => Some(ClangSymbolKind::Class),
-            EntityKind::UnionDecl => Some(ClangSymbolKind::Union),
-            EntityKind::EnumDecl => Some(ClangSymbolKind::Enum),
-            EntityKind::TypedefDecl => Some(ClangSymbolKind::Typedef),
-            EntityKind::TypeAliasDecl => Some(ClangSymbolKind::TypeAlias),
-            EntityKind::Namespace => Some(ClangSymbolKind::Namespace),
-            EntityKind::MacroDefinition => Some(ClangSymbolKind::Macro),
-            EntityKind::ConversionFunction => Some(ClangSymbolKind::ConversionFunction),
-            EntityKind::UsingDeclaration => Some(ClangSymbolKind::UsingDecl),
-            EntityKind::EnumConstantDecl => Some(ClangSymbolKind::EnumConstant),
-            EntityKind::FriendDecl => Some(ClangSymbolKind::FriendDecl),
-            other => {
-                tracing::debug!("unmapped EntityKind: {:?}", other);
-                Some(ClangSymbolKind::Other)
-            }
-        }
+    fn is_relevant_kind(kind: i32) -> bool {
+        matches!(
+            kind,
+            clang_sys::CXCursor_FunctionDecl
+                | clang_sys::CXCursor_FunctionTemplate
+                | clang_sys::CXCursor_CXXMethod
+                | clang_sys::CXCursor_Constructor
+                | clang_sys::CXCursor_Destructor
+                | clang_sys::CXCursor_VarDecl
+                | clang_sys::CXCursor_FieldDecl
+                | clang_sys::CXCursor_ParmDecl
+                | clang_sys::CXCursor_StructDecl
+                | clang_sys::CXCursor_ClassDecl
+                | clang_sys::CXCursor_UnionDecl
+                | clang_sys::CXCursor_EnumDecl
+                | clang_sys::CXCursor_TypedefDecl
+                | clang_sys::CXCursor_TypeAliasDecl
+                | clang_sys::CXCursor_Namespace
+                | clang_sys::CXCursor_MacroDefinition
+                | clang_sys::CXCursor_ConversionFunction
+                | clang_sys::CXCursor_UsingDeclaration
+                | clang_sys::CXCursor_EnumConstantDecl
+                | clang_sys::CXCursor_FriendDecl
+        )
     }
 }

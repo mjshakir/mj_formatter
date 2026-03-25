@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use rustc_hash::FxHashMap;
 
 use crate::parser::clang_types::ClangDeclKey;
@@ -8,8 +6,6 @@ use crate::parser::clang_result::{
 };
 use crate::parser::clang_symbol::ClangSymbol;
 use crate::parser::clang_types::ClangSymbolKey;
-use crate::parser::clang_types::ClangSymbolKind;
-
 pub(crate) struct ParserConsensusSelector;
 
 impl ParserConsensusSelector {
@@ -49,7 +45,7 @@ impl ParserConsensusSelector {
         let mut symbol_votes: FxHashMap<
             (
                 String,
-                ClangSymbolKind,
+                i32,
                 usize,
                 usize,
                 Option<String>,
@@ -59,7 +55,7 @@ impl ParserConsensusSelector {
         > = FxHashMap::default();
         let mut symbol_order = Vec::<(
             String,
-            ClangSymbolKind,
+            i32,
             usize,
             usize,
             Option<String>,
@@ -68,7 +64,7 @@ impl ParserConsensusSelector {
         let mut symbol_exemplar: FxHashMap<
             (
                 String,
-                ClangSymbolKind,
+                i32,
                 usize,
                 usize,
                 Option<String>,
@@ -134,7 +130,7 @@ impl ParserConsensusSelector {
                 .then(left.name.cmp(&right.name))
         });
 
-        let mut rename_offsets_by_symbol = HashMap::<ClangSymbolKey, Vec<usize>>::new();
+        let mut rename_offsets_by_symbol = FxHashMap::<ClangSymbolKey, Vec<usize>>::default();
         for ((key, offset), votes) in rename_votes {
             if votes < symbol_threshold {
                 continue;
@@ -149,7 +145,7 @@ impl ParserConsensusSelector {
             offsets.dedup();
         }
 
-        let mut reference_offsets_by_decl = HashMap::<ClangDeclKey, Vec<usize>>::new();
+        let mut reference_offsets_by_decl = FxHashMap::<ClangDeclKey, Vec<usize>>::default();
         for ((key, offset), votes) in ref_votes {
             if votes < symbol_threshold {
                 continue;

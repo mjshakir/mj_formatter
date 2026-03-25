@@ -42,7 +42,7 @@ use crate::engine::semantic_contract::SemanticContract;
 use crate::engine::semantic_contract::SemanticInvariantClause;
 use crate::model::edit::Edit;
 use crate::model::pass_result::{FormatPassMetrics, FormatPassResult};
-use crate::model::policy_context::{ParserTrust, PolicyContext};
+use crate::model::policy_context::PolicyContext;
 use crate::model::exec_trace::{
     PolicyCandidateOutcome, PolicyCandidateTrace, PolicyExecutionTrace,
 };
@@ -966,9 +966,6 @@ impl PolicyPipeline {
         policy_started: Instant,
     ) -> Result<ExecutedPolicyStage> {
         let policy_name = policy.name();
-        let parser_trust = ParserTrust {
-            semantic_rewrite: prepared.policy_certainty.trust_for_semantic_rewrite(),
-        };
         let tree_error_lines = state.parse.error_lines_cached().clone();
         let shared = PolicySharedData::new(&state.current, state.parse.semantic.as_ref());
         let mut context = PolicyContext::new(&state.current, state.path)
@@ -976,7 +973,6 @@ impl PolicyPipeline {
             .with_clang(state.parse.clang.as_deref())
             .with_semantic(state.parse.semantic.as_ref())
             .with_graph(state.options.project_graph_snapshot.as_deref())
-            .with_parser_trust(parser_trust)
             .with_policy_certainty(Some(prepared.policy_certainty))
             .with_query_cache(Some(&self.query_cache))
             .with_shared(Some(&shared));
@@ -1218,15 +1214,11 @@ impl PolicyPipeline {
         policy_name: &str,
         mut executed: ExecutedPolicyStage,
     ) -> CoordinatedPolicyStage {
-        let parser_trust = ParserTrust {
-            semantic_rewrite: executed.policy_certainty.trust_for_semantic_rewrite(),
-        };
         let context = PolicyContext::new(&state.current, state.path)
             .with_tree(state.parse.tree.as_ref())
             .with_clang(state.parse.clang.as_deref())
             .with_semantic(state.parse.semantic.as_ref())
             .with_graph(state.options.project_graph_snapshot.as_deref())
-            .with_parser_trust(parser_trust)
             .with_policy_certainty(Some(executed.policy_certainty))
             .with_query_cache(Some(&self.query_cache));
         let project_query = context.project_query();
@@ -2741,7 +2733,6 @@ mod tests {
     use crate::parser::clang_result::ClangDiagnosticEntry;
     use crate::parser::clang_result::ClangDiagnosticSeverity;
     use crate::parser::clang_result::ClangDiagnosticSummary;
-    use clang::EntityKind;
     use crate::parser::manager::SemanticCompdbContextKind;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
@@ -2818,7 +2809,7 @@ mod tests {
                 stable_id: "usr:c:@F@unsafe#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "unsafe".to_string(),
-                kind: EntityKind::FunctionDecl,
+                kind: clang_sys::CXCursor_FunctionDecl,
                 line: 4,
                 column: 1,
                 usr: Some("c:@F@unsafe#".to_string()),
@@ -3118,7 +3109,7 @@ mod tests {
                     stable_id: "usr:test".to_string(),
                     provenance: SemanticIdProvenance::Usr,
                     decl_path: "sample.cpp".to_string(),
-                    decl_kind: EntityKind::VarDecl,
+                    decl_kind: clang_sys::CXCursor_VarDecl,
                     offset,
                     line: 1,
                     column: 1,
@@ -3171,7 +3162,7 @@ mod tests {
                 stable_id: "usr:c:@F@value#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 name: "value".to_string(),
-                kind: EntityKind::VarDecl,
+                kind: clang_sys::CXCursor_VarDecl,
                 line: 10,
                 column: 5,
                 usr: Some("c:@F@value#".to_string()),
@@ -3181,7 +3172,7 @@ mod tests {
                 stable_id: "usr:c:@F@value#".to_string(),
                 provenance: SemanticIdProvenance::Usr,
                 decl_path: "sample.cpp".to_string(),
-                decl_kind: EntityKind::VarDecl,
+                decl_kind: clang_sys::CXCursor_VarDecl,
                 offset: 0,
                 line: 12,
                 column: 3,

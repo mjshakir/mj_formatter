@@ -395,7 +395,6 @@ mod tests {
     use crate::model::file_result::FileResult;
     use crate::model::rename_plan::SemanticRenamePlan;
     use crate::parser::clang_types::ClangDeclKey;
-    use crate::parser::clang_types::ClangSymbolKind;
     use crate::parser::manager::SemanticCompdbContextKind;
 
     #[test]
@@ -433,7 +432,7 @@ mod tests {
                 "/tmp/sample.cpp".to_string(),
                 7,
                 3,
-                ClangSymbolKind::Function,
+                clang_sys::CXCursor_FunctionDecl,
             ),
             old_name: "BadName".to_string(),
             new_name: "bad_name".to_string(),
