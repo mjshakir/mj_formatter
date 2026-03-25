@@ -30,7 +30,7 @@ impl PragmaOnceSpacingPolicy {
                 continue;
             }
             if let Some(argument) = child.child_by_field_name("argument") {
-                if argument.utf8_text(source).ok().map_or(false, |t| t.trim() == "once") {
+                if argument.utf8_text(source).ok().is_some_and(|t| t.trim() == "once") {
                     return Some(child.start_position().row);
                 }
             }

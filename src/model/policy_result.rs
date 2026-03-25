@@ -1,25 +1,13 @@
 use crate::model::edit::Edit;
 use crate::model::violation::Violation;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PolicyResult {
     pub text: String,
     pub changed: bool,
     pub violations: Vec<Violation>,
     pub edits: Vec<Edit>,
     pub warnings: Vec<String>,
-}
-
-impl Default for PolicyResult {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            changed: false,
-            violations: Vec::new(),
-            edits: Vec::new(),
-            warnings: Vec::new(),
-        }
-    }
 }
 
 impl PolicyResult {

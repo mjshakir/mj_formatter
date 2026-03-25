@@ -1257,14 +1257,14 @@ impl Policy for NamingConventionsPolicy {
                             column: Some(source_column),
                         });
 
-                        if semantic_enabled {
-                            if !Self::resolve_rename_plan(
+                        if semantic_enabled
+                            && !Self::resolve_rename_plan(
                                 &semantic_query, parse, short, snake_buf.clone(),
                                 line, source_column, symbol.kind, source_column, &allowed,
                                 &mut rename_plans,
-                            ) {
-                                continue;
-                            }
+                            )
+                        {
+                            continue;
                         }
                     }
                 }

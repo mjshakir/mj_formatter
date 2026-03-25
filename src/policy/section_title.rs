@@ -104,7 +104,6 @@ impl Policy for SectionTitleNormalizerPolicy {
             }],
             edits,
             warnings,
-            ..Default::default()
         }
     }
 }

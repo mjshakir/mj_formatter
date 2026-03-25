@@ -312,7 +312,7 @@ impl Policy for ClangFormatPolicy {
         let regions = Self::compute_line_regions(line_count, batch_size);
 
         let dd_lines = context.tree_sitter_tree
-            .map(|t| Self::delete_default_lines_from_tree(t));
+            .map(Self::delete_default_lines_from_tree);
         let dd_ref = dd_lines.as_ref();
 
         if regions.len() <= 1 {

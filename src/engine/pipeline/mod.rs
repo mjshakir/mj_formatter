@@ -1185,7 +1185,6 @@ impl PolicyPipeline {
                     &state.current,
                     executed.result.text.as_str(),
                 )
-                && solve_result.dropped_lines.len() <= usize::MAX
             {
                 executed.result.warnings.push(format!(
                     "global conflict solver: kept non-local '{}' batch ({} conflicting line(s)) to avoid unsafe partial rollback",

@@ -153,7 +153,6 @@ impl Policy for DashCommentNormalizerPolicy {
             }],
             edits,
             warnings,
-            ..Default::default()
         }
     }
 }
