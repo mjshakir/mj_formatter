@@ -456,14 +456,6 @@ impl App {
             ))?;
         }
         if record_dispatch_history {
-            let certainty_path = config
-                .cache_path
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("certainty_filter_state.bin");
-            if let Err(err) = engine.save_certainty_state(&certainty_path) {
-                warn!(error = %err, "failed to persist certainty filter state");
-            }
             if let Err(err) = engine.save_context_tracker(&config.tracker_path) {
                 warn!(error = %err, "failed to persist policy context tracker");
             }
