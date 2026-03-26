@@ -6,6 +6,9 @@ use crate::parser::clang_result::{
 };
 use crate::parser::clang_symbol::ClangSymbol;
 use crate::parser::clang_types::ClangSymbolKey;
+
+type SymbolVoteKey = (String, i32, usize, usize, Option<String>, Option<String>);
+
 pub(crate) struct ParserConsensusSelector;
 
 impl ParserConsensusSelector {
@@ -42,36 +45,9 @@ impl ParserConsensusSelector {
         let symbol_threshold = Self::strict_majority_threshold(semantic_vote_parse_count);
         let diagnostic_threshold = Self::strict_majority_threshold(parse_count);
 
-        let mut symbol_votes: FxHashMap<
-            (
-                String,
-                i32,
-                usize,
-                usize,
-                Option<String>,
-                Option<String>,
-            ),
-            usize,
-        > = FxHashMap::default();
-        let mut symbol_order = Vec::<(
-            String,
-            i32,
-            usize,
-            usize,
-            Option<String>,
-            Option<String>,
-        )>::new();
-        let mut symbol_exemplar: FxHashMap<
-            (
-                String,
-                i32,
-                usize,
-                usize,
-                Option<String>,
-                Option<String>,
-            ),
-            ClangSymbol,
-        > = FxHashMap::default();
+        let mut symbol_votes: FxHashMap<SymbolVoteKey, usize> = FxHashMap::default();
+        let mut symbol_order: Vec<SymbolVoteKey> = Vec::new();
+        let mut symbol_exemplar: FxHashMap<SymbolVoteKey, ClangSymbol> = FxHashMap::default();
         let mut rename_votes: FxHashMap<(ClangSymbolKey, usize), usize> = FxHashMap::default();
         let mut ref_votes: FxHashMap<(ClangDeclKey, usize), usize> = FxHashMap::default();
         let mut diag_votes: FxHashMap<(usize, usize, ClangDiagnosticSeverity), usize> = FxHashMap::default();

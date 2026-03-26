@@ -665,6 +665,7 @@ impl NamingConventionsPolicy {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_rename_plan(
         semantic_query: &SemanticContextQuery<'_>,
         clang_parse: &ClangParseResult,

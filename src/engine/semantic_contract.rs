@@ -329,6 +329,7 @@ impl SemanticContract {
         context::evaluate(snapshot)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate_transition(
         &self,
         before: &SemanticContractSnapshot,

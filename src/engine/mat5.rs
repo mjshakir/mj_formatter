@@ -133,7 +133,7 @@ pub fn dot5(a: &[f64; N], b: &[f64; N]) -> f64 {
 
 // ── Matrix constructors ────────────────────────────────────────────────────
 
-#[inline]
+#[cfg(test)]
 pub fn mat5_zeros() -> Mat5 {
     [[0.0; N]; N]
 }
@@ -401,7 +401,7 @@ pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
 
 // ── Quadratic form: v^T * M * v ────────────────────────────────────────────
 
-#[inline]
+#[cfg(test)]
 pub fn mat5_quadratic(m: &Mat5, v: &[f64; N]) -> f64 {
     let mv = mat5_matvec(m, v);
     dot5(&mv, v)
@@ -446,6 +446,7 @@ pub fn mat5_cholesky(a: &Mat5) -> Option<Mat5> {
 
 // ── Determinant via Cholesky: det(A) = prod(L[i][i])^2 ─────────────────────
 
+#[cfg(test)]
 pub fn mat5_determinant_spd(a: &Mat5) -> f64 {
     match mat5_cholesky(a) {
         Some(l) => {
