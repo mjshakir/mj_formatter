@@ -367,7 +367,7 @@ impl App {
             .unwrap_or_else(|| Path::new("var/cache"))
             .join("certainty_filter_state.bin");
         let loaded_state = CertaintyFilterState::load_from_path(&adaptive_state_path)
-            .unwrap_or_else(CertaintyFilterState::new);
+            .unwrap_or_default();
         if config.verbose && loaded_state.observation_count > 0 {
             info!(
                 observation_count = loaded_state.observation_count,
@@ -778,15 +778,25 @@ impl App {
             journal.finish_success(&summary);
         }
 
-        let final_state = adaptive_state.load();
-        if let Err(err) = final_state.save_to_path(&adaptive_state_path) {
-            warn!(error = %err, path = %adaptive_state_path.display(), "failed to persist adaptive state");
-        } else if config.verbose {
-            info!(
-                observation_count = final_state.observation_count,
-                path = %adaptive_state_path.display(),
-                "saved adaptive state to disk"
-            );
+        if let Some(final_state) = CertaintyFilterState::load_from_path(&adaptive_state_path) {
+            if config.verbose {
+                info!(
+                    observation_count = final_state.observation_count,
+                    path = %adaptive_state_path.display(),
+                    "adaptive state persisted"
+                );
+            }
+        } else {
+            let fallback = adaptive_state.load();
+            if let Err(err) = fallback.save_to_path(&adaptive_state_path) {
+                warn!(error = %err, path = %adaptive_state_path.display(), "failed to persist adaptive state");
+            } else if config.verbose {
+                info!(
+                    observation_count = fallback.observation_count,
+                    path = %adaptive_state_path.display(),
+                    "saved adaptive state to disk (no worker shards)"
+                );
+            }
         }
 
         Ok(())

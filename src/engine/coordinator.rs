@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -81,10 +80,6 @@ impl FormatterEngine {
         }
     }
 
-    pub fn adaptive_state(&self) -> &Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>> {
-        &self.adaptive_state
-    }
-
     pub fn set_observation_only(&self, value: bool) {
         self.observation_only.store(value, Ordering::Relaxed);
     }
@@ -105,11 +100,6 @@ impl FormatterEngine {
     fn apply_inner(&self, text: &str, path: &Path) -> Result<FormatPassResult> {
         let adaptive_snap = self.adaptive_state.load();
         let mut warnings = Vec::<String>::new();
-        let content_hash = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut h);
-            h.finish()
-        };
         let baseline_required = self.retry.post_edit_check_enabled
             || self.accuracy_gate.semantic_required
             || self.accuracy_gate.enabled;
@@ -186,7 +176,7 @@ impl FormatterEngine {
                 ClusterOutcome::Accepted,
             );
             self.record_success(0);
-            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0, content_hash);
+            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0);
             return Ok(pass_result);
         }
 
@@ -214,7 +204,7 @@ impl FormatterEngine {
                 ClusterOutcome::Accepted,
             );
             self.record_success(0);
-            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0, content_hash);
+            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0);
             return Ok(pass_result);
         }
 
@@ -305,7 +295,7 @@ impl FormatterEngine {
             );
             self.record_success(0);
             let obs_score = if check_1.accepted { 1.0 } else { 0.50 };
-            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score, content_hash);
+            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score);
             return Ok(pass_result);
         }
 
@@ -326,7 +316,7 @@ impl FormatterEngine {
                 .and_then(|b| b.before_semantic_snapshot()),
         );
         if culprit_policies.is_empty() {
-            self.observe_adaptive(post_edit_baseline.as_ref(), 0.25, content_hash);
+            self.observe_adaptive(post_edit_baseline.as_ref(), 0.25);
             return self.reverted_result(path, text, pass_result, warnings, 1);
         }
 
@@ -420,12 +410,12 @@ impl FormatterEngine {
             );
             self.record_success(1);
             let obs_score = if check_2.accepted { 0.85 } else { 0.40 };
-            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score, content_hash);
+            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score);
             return Ok(pass_2);
         }
 
         // Both passes failed → revert all edits
-        self.observe_adaptive(post_edit_baseline.as_ref(), 0.25, content_hash);
+        self.observe_adaptive(post_edit_baseline.as_ref(), 0.25);
         self.reverted_result(path, text, pass_2, warnings, 2)
     }
 
@@ -576,7 +566,6 @@ impl FormatterEngine {
         &self,
         baseline: Option<&CheckBaseline>,
         acceptance_score: f64,
-        content_hash: u64,
     ) {
         let structural_obs = baseline
             .and_then(|b| b.before_tree_error_ratio())
@@ -604,7 +593,7 @@ impl FormatterEngine {
 
         let measurement = [structural_obs, semantic_obs, coverage_obs, richness_obs, acceptance_score];
         let mut state: crate::engine::certainty_filter::CertaintyFilterState = (**self.adaptive_state.load()).clone();
-        state.observe(measurement, content_hash);
+        state.observe(measurement);
         self.adaptive_state.store(Arc::new(state));
     }
 
