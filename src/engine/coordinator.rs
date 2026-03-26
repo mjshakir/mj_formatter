@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -104,6 +105,11 @@ impl FormatterEngine {
     fn apply_inner(&self, text: &str, path: &Path) -> Result<FormatPassResult> {
         let adaptive_snap = self.adaptive_state.load();
         let mut warnings = Vec::<String>::new();
+        let content_hash = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            h.finish()
+        };
         let baseline_required = self.retry.post_edit_check_enabled
             || self.accuracy_gate.semantic_required
             || self.accuracy_gate.enabled;
@@ -180,6 +186,7 @@ impl FormatterEngine {
                 ClusterOutcome::Accepted,
             );
             self.record_success(0);
+            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0, content_hash);
             return Ok(pass_result);
         }
 
@@ -207,6 +214,7 @@ impl FormatterEngine {
                 ClusterOutcome::Accepted,
             );
             self.record_success(0);
+            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0, content_hash);
             return Ok(pass_result);
         }
 
@@ -296,6 +304,8 @@ impl FormatterEngine {
                 outcome,
             );
             self.record_success(0);
+            let obs_score = if check_1.accepted { 1.0 } else { 0.50 };
+            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score, content_hash);
             return Ok(pass_result);
         }
 
@@ -316,6 +326,7 @@ impl FormatterEngine {
                 .and_then(|b| b.before_semantic_snapshot()),
         );
         if culprit_policies.is_empty() {
+            self.observe_adaptive(post_edit_baseline.as_ref(), 0.25, content_hash);
             return self.reverted_result(path, text, pass_result, warnings, 1);
         }
 
@@ -408,10 +419,13 @@ impl FormatterEngine {
                 ClusterOutcome::Accepted,
             );
             self.record_success(1);
+            let obs_score = if check_2.accepted { 0.85 } else { 0.40 };
+            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score, content_hash);
             return Ok(pass_2);
         }
 
         // Both passes failed → revert all edits
+        self.observe_adaptive(post_edit_baseline.as_ref(), 0.25, content_hash);
         self.reverted_result(path, text, pass_2, warnings, 2)
     }
 
@@ -556,6 +570,42 @@ impl FormatterEngine {
 
     fn record_revert(&self) {
         // adaptive calibrator removed
+    }
+
+    fn observe_adaptive(
+        &self,
+        baseline: Option<&CheckBaseline>,
+        acceptance_score: f64,
+        content_hash: u64,
+    ) {
+        let structural_obs = baseline
+            .and_then(|b| b.before_tree_error_ratio())
+            .map(|r| 1.0 - r)
+            .unwrap_or(0.85);
+
+        let semantic_obs = baseline
+            .and_then(|b| b.before_clang_summary())
+            .map(|s| 1.0 - ((s.error as f64) * 0.1 + (s.warning as f64) * 0.02).min(1.0))
+            .unwrap_or(0.50);
+
+        let (coverage_obs, richness_obs) = baseline
+            .and_then(|b| b.before_semantic_snapshot())
+            .map(|snap| {
+                let cov = (snap.summary.reference_count as f64 / 50.0).min(1.0);
+                let rich = ((snap.scopes.counts.namespace
+                    + snap.scopes.counts.type_scope
+                    + snap.scopes.counts.function
+                    + snap.summary.declaration_count) as f64
+                    / 30.0)
+                    .min(1.0);
+                (cov, rich)
+            })
+            .unwrap_or((0.50, 0.50));
+
+        let measurement = [structural_obs, semantic_obs, coverage_obs, richness_obs, acceptance_score];
+        let mut state: crate::engine::certainty_filter::CertaintyFilterState = (**self.adaptive_state.load()).clone();
+        state.observe(measurement, content_hash);
+        self.adaptive_state.store(Arc::new(state));
     }
 
     #[cfg(test)]

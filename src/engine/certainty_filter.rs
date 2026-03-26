@@ -38,22 +38,6 @@ pub struct CertaintyFilterState {
     pub content_hash: u64,
 }
 
-pub struct CertaintyFilterResult {
-    pub estimates: [f64; NUM_DIMS],
-    pub covariance: Mat5,
-    pub observation_count: u32,
-}
-
-impl CertaintyFilterResult {
-    pub fn structural(&self) -> f64 { self.estimates[0] }
-    pub fn semantic(&self) -> f64 { self.estimates[1] }
-    pub fn coverage(&self) -> f64 { self.estimates[2] }
-    pub fn richness(&self) -> f64 { self.estimates[3] }
-    pub fn edit_success(&self) -> f64 { self.estimates[4] }
-    pub fn variance(&self, dim: usize) -> f64 { self.covariance[dim][dim] }
-    pub fn stddev(&self, dim: usize) -> f64 { self.covariance[dim][dim].sqrt() }
-}
-
 // Full 5x5 Kalman update with Joseph form for numerical stability
 fn kalman_update_full(
     prior_est: [f64; NUM_DIMS],
@@ -299,7 +283,7 @@ impl CertaintyFilterState {
         &mut self,
         measurement: [f64; NUM_DIMS],
         content_hash: u64,
-    ) -> CertaintyFilterResult {
+    ) {
         if content_hash != self.content_hash {
             if self.observation_count > 0 && self.content_hash != 0 {
                 *self = Self::new();
@@ -316,12 +300,7 @@ impl CertaintyFilterState {
                 self.estimates = measurement;
                 self.covariance = mat5_diagonal(&DEFAULT_R_DIAG);
                 self.observation_count = 1;
-
-                return CertaintyFilterResult {
-                    estimates: measurement,
-                    covariance: self.covariance,
-                    observation_count: self.observation_count,
-                };
+                return;
             }
         }
 
@@ -377,12 +356,6 @@ impl CertaintyFilterState {
         for e in self.estimates.iter_mut() {
             *e = e.clamp(0.0, 1.0);
         }
-
-        CertaintyFilterResult {
-            estimates: self.estimates,
-            covariance: self.covariance,
-            observation_count: self.observation_count,
-        }
     }
 }
 
@@ -396,30 +369,30 @@ impl Default for CertaintyFilterState {
 mod tests {
     use super::*;
 
-    fn obs(state: &mut CertaintyFilterState, s: f64, m: f64, c: f64, r: f64, hash: u64) -> CertaintyFilterResult {
-        state.observe([s, m, c, r, 0.5], hash)
+    fn obs(state: &mut CertaintyFilterState, s: f64, m: f64, c: f64, r: f64, hash: u64) {
+        state.observe([s, m, c, r, 0.5], hash);
     }
 
-    fn obs5(state: &mut CertaintyFilterState, s: f64, m: f64, c: f64, r: f64, e: f64, hash: u64) -> CertaintyFilterResult {
-        state.observe([s, m, c, r, e], hash)
+    fn obs5(state: &mut CertaintyFilterState, s: f64, m: f64, c: f64, r: f64, e: f64, hash: u64) {
+        state.observe([s, m, c, r, e], hash);
     }
 
     #[test]
     fn first_obs_trusts() {
         let mut state = CertaintyFilterState::new();
-        let result = obs(&mut state, 0.95, 0.82, 0.70, 0.50, 123);
-        assert!((result.structural() - 0.95).abs() < 1e-9);
-        assert!((result.semantic() - 0.82).abs() < 1e-9);
-        assert!((result.coverage() - 0.70).abs() < 1e-9);
-        assert!((result.richness() - 0.50).abs() < 1e-9);
+        obs(&mut state, 0.95, 0.82, 0.70, 0.50, 123);
+        assert!((state.structural() - 0.95).abs() < 1e-9);
+        assert!((state.semantic() - 0.82).abs() < 1e-9);
+        assert!((state.coverage() - 0.70).abs() < 1e-9);
+        assert!((state.richness() - 0.50).abs() < 1e-9);
     }
 
     #[test]
     fn subsequent_observations_smooth() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.95, 0.82, 0.70, 0.50, 100);
-        let result = obs(&mut state, 0.95, 0.72, 0.70, 0.50, 100);
-        assert!(result.semantic() > 0.72 && result.semantic() < 0.82);
+        obs(&mut state, 0.95, 0.72, 0.70, 0.50, 100);
+        assert!(state.semantic() > 0.72 && state.semantic() < 0.82);
     }
 
     #[test]
@@ -429,8 +402,8 @@ mod tests {
         obs(&mut state, 0.95, 0.82, 0.70, 0.50, 100);
         let pre_count = state.observation_count;
         assert!(pre_count >= 2);
-        let result = obs(&mut state, 0.90, 0.50, 0.60, 0.40, 999);
-        assert!(result.semantic() < 0.55);
+        obs(&mut state, 0.90, 0.50, 0.60, 0.40, 999);
+        assert!(state.semantic() < 0.55);
         assert!(state.observation_count >= 1);
         assert!(state.observation_count < pre_count);
     }
@@ -438,14 +411,14 @@ mod tests {
     #[test]
     fn converges_stable() {
         let mut state = CertaintyFilterState::new();
-        let mut result = obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
+        obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
         for _ in 0..20 {
-            result = obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
+            obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
         }
-        assert!((result.structural() - 0.95).abs() < 0.02);
-        assert!((result.semantic() - 0.80).abs() < 0.02);
-        assert!((result.coverage() - 0.70).abs() < 0.02);
-        assert!((result.richness() - 0.50).abs() < 0.02);
+        assert!((state.structural() - 0.95).abs() < 0.02);
+        assert!((state.semantic() - 0.80).abs() < 0.02);
+        assert!((state.coverage() - 0.70).abs() < 0.02);
+        assert!((state.richness() - 0.50).abs() < 0.02);
     }
 
     #[test]
@@ -454,24 +427,26 @@ mod tests {
         for _ in 0..10 {
             obs(&mut state, 0.95, 0.82, 0.70, 0.50, 42);
         }
-        let result = obs(&mut state, 0.95, 0.60, 0.70, 0.50, 42);
-        assert!(result.semantic() > 0.72, "semantic after outlier: {}", result.semantic());
+        obs(&mut state, 0.95, 0.60, 0.70, 0.50, 42);
+        assert!(state.semantic() > 0.72, "semantic after outlier: {}", state.semantic());
     }
 
     #[test]
     fn variance_narrows_with_observations() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
-        let early = obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
+        obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
+        let early_var = state.variance(1);
         for _ in 0..15 {
             obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
         }
-        let late = obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
+        obs(&mut state, 0.95, 0.80, 0.70, 0.50, 42);
+        let late_var = state.variance(1);
         assert!(
-            late.variance(1) < early.variance(1),
+            late_var < early_var,
             "semantic variance should narrow: early={}, late={}",
-            early.variance(1),
-            late.variance(1),
+            early_var,
+            late_var,
         );
     }
 
@@ -479,14 +454,14 @@ mod tests {
     fn interval_narrows_convergence() {
         let mut state = CertaintyFilterState::new();
         obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
-        let early = obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
+        obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
+        let z = 1.645;
+        let early_ci = (state.semantic() - z * state.variance(1).sqrt()).clamp(0.0, 1.0);
         for _ in 0..15 {
             obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
         }
-        let late = obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
-        let z = 1.645;
-        let early_ci = (early.semantic() - z * early.variance(1).sqrt()).clamp(0.0, 1.0);
-        let late_ci = (late.semantic() - z * late.variance(1).sqrt()).clamp(0.0, 1.0);
+        obs(&mut state, 0.95, 0.85, 0.70, 0.50, 42);
+        let late_ci = (state.semantic() - z * state.variance(1).sqrt()).clamp(0.0, 1.0);
         assert!(
             late_ci > early_ci,
             "CI should tighten: early_ci={}, late_ci={}",
@@ -499,29 +474,29 @@ mod tests {
     fn five_dims_independent() {
         let mut state = CertaintyFilterState::new();
         obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
-        let result = obs5(&mut state, 0.50, 0.80, 0.70, 0.50, 0.90, 42);
-        assert!(result.structural() < 0.85);
-        assert!(result.semantic() > 0.78);
-        assert!(result.coverage() > 0.68);
-        assert!(result.richness() > 0.48);
-        assert!(result.edit_success() > 0.85);
+        obs5(&mut state, 0.50, 0.80, 0.70, 0.50, 0.90, 42);
+        assert!(state.structural() < 0.85);
+        assert!(state.semantic() > 0.78);
+        assert!(state.coverage() > 0.68);
+        assert!(state.richness() > 0.48);
+        assert!(state.edit_success() > 0.85);
     }
 
     #[test]
     fn five_dim_trusts() {
         let mut state = CertaintyFilterState::new();
-        let result = obs5(&mut state, 0.95, 0.82, 0.70, 0.50, 0.90, 123);
-        assert!((result.edit_success() - 0.90).abs() < 1e-9);
+        obs5(&mut state, 0.95, 0.82, 0.70, 0.50, 0.90, 123);
+        assert!((state.edit_success() - 0.90).abs() < 1e-9);
     }
 
     #[test]
     fn edit_success_converges() {
         let mut state = CertaintyFilterState::new();
-        let mut result = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
+        obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
         for _ in 0..20 {
-            result = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
+            obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
         }
-        assert!((result.edit_success() - 0.95).abs() < 0.03);
+        assert!((state.edit_success() - 0.95).abs() < 0.03);
     }
 
     #[test]
@@ -530,24 +505,26 @@ mod tests {
         for _ in 0..10 {
             obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.95, 42);
         }
-        let result = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.10, 42);
-        assert!(result.edit_success() > 0.60, "edit_success should resist single failure: {}", result.edit_success());
+        obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.10, 42);
+        assert!(state.edit_success() > 0.60, "edit_success should resist single failure: {}", state.edit_success());
     }
 
     #[test]
     fn edit_variance_narrows() {
         let mut state = CertaintyFilterState::new();
         obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
-        let early = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
+        obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
+        let early_var = state.variance(4);
         for _ in 0..15 {
             obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
         }
-        let late = obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
+        obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90, 42);
+        let late_var = state.variance(4);
         assert!(
-            late.variance(4) < early.variance(4),
+            late_var < early_var,
             "edit_success variance should narrow: early={}, late={}",
-            early.variance(4),
-            late.variance(4)
+            early_var,
+            late_var
         );
     }
 
@@ -557,9 +534,9 @@ mod tests {
         for _ in 0..20 {
             obs5(&mut state, 0.90, 0.85, 0.70, 0.50, 0.90, 42);
         }
-        let result = obs5(&mut state, 0.90, 0.85, 0.70, 0.50, 0.90, 42);
-        assert!(result.covariance[0][0] > 0.0, "diagonal should be positive");
-        assert!(result.covariance[1][1] > 0.0, "diagonal should be positive");
+        obs5(&mut state, 0.90, 0.85, 0.70, 0.50, 0.90, 42);
+        assert!(state.covariance[0][0] > 0.0, "diagonal should be positive");
+        assert!(state.covariance[1][1] > 0.0, "diagonal should be positive");
     }
 
     #[test]
@@ -581,10 +558,10 @@ mod tests {
         let var = [0.01; NUM_DIMS];
         let mut state = CertaintyFilterState::new_with_prior(est, var, 5);
         assert_eq!(state.observation_count, 5, "prior obs count should be set");
-        let result = state.observe([0.92, 0.82, 0.72, 0.52, 0.70], 42);
-        assert_eq!(result.observation_count, 6, "obs count should increment after observe");
-        assert!(result.structural() > 0.88 && result.structural() < 0.95,
-            "structural should blend prior and measurement, got {}", result.structural());
+        state.observe([0.92, 0.82, 0.72, 0.52, 0.70], 42);
+        assert_eq!(state.observation_count, 6, "obs count should increment after observe");
+        assert!(state.structural() > 0.88 && state.structural() < 0.95,
+            "structural should blend prior and measurement, got {}", state.structural());
     }
 
     #[test]

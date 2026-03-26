@@ -418,6 +418,14 @@ impl CheckBaseline {
     pub fn before_semantic_snapshot(&self) -> Option<&SemanticContractSnapshot> {
         self.before_semantic_snapshot.as_ref()
     }
+
+    pub fn before_tree_error_ratio(&self) -> Option<f64> {
+        self.before_tree_error_ratio
+    }
+
+    pub fn before_clang_summary(&self) -> Option<ClangDiagnosticSummary> {
+        self.before_clang_summary
+    }
 }
 
 #[cfg(test)]
