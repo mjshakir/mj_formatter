@@ -1,5 +1,6 @@
 pub mod accuracy_gate;
 pub mod catalog;
+pub mod certainty_filter;
 pub mod conflict_detector;
 pub mod conflict_solver;
 pub mod context_tracker;
