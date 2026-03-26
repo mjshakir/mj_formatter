@@ -16,6 +16,7 @@ pub(super) fn validate(
     after_text: &str,
     baseline: &CheckBaseline,
     edited_lines: Option<&BTreeSet<usize>>,
+    adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
 ) -> PostEditCheckResult {
     let mut messages = baseline.warnings.clone();
     let mut failure_kinds = BTreeSet::<PostEditFailureKind>::new();
@@ -85,8 +86,8 @@ pub(super) fn validate(
                 let after_count = PostEditChecker::clang_error_count(&parse);
                 let after_summary = parse.diagnostic_summary();
                 if let Some(before_summary) = baseline.before_clang_summary {
-                    let before_weight = PostEditChecker::diagnostic_weighted_score_impl(before_summary);
-                    let after_weight = PostEditChecker::diagnostic_weighted_score_impl(after_summary);
+                    let before_weight = PostEditChecker::diagnostic_weighted_score_impl(before_summary, adaptive);
+                    let after_weight = PostEditChecker::diagnostic_weighted_score_impl(after_summary, adaptive);
                     let weighted_delta = after_weight.saturating_sub(before_weight);
                     let severe_delta = after_summary
                         .error_total()
@@ -214,7 +215,7 @@ pub(super) fn validate(
                     exact_compdb,
                     edited_lines,
                 );
-            let identity_shift_tol = 4usize;
+            let identity_shift_tol = adaptive.identity_shift_tolerance();
             let transition = checker.semantic_contract.evaluate_transition(
                 before_semantic,
                 &after_snapshot,
@@ -222,6 +223,7 @@ pub(super) fn validate(
                 scope_drift_tolerance,
                 identity_shift_tol,
                 edited_lines,
+                adaptive,
             );
             if transition.identity_integrity_regressed {
                 failure_kinds.insert(PostEditFailureKind::SemanticIdentityRegressed);

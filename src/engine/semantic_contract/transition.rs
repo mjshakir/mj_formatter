@@ -9,15 +9,17 @@ pub(super) fn evaluate(
     scope_drift_tol: usize,
     identity_shift_tol: usize,
     edited_lines: Option<&BTreeSet<usize>>,
+    adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
 ) -> SemanticTransitionAssessment {
     let mut assessment = SemanticTransitionAssessment::default();
 
-    evaluate_identity(before, after, identity_shift_tol, edited_lines, &mut assessment);
+    evaluate_identity(before, after, identity_shift_tol, edited_lines, &mut assessment, adaptive);
     evaluate_reference_integrity(
         before,
         after,
         ref_drop_tol,
         &mut assessment,
+        adaptive,
     );
     evaluate_scope_integrity(
         before,
@@ -25,6 +27,7 @@ pub(super) fn evaluate(
         scope_drift_tol,
         edited_lines,
         &mut assessment,
+        adaptive,
     );
     evaluate_macro_region_safety(before, after, edited_lines, &mut assessment);
 
@@ -37,6 +40,7 @@ fn evaluate_identity(
     line_shift_tolerance: usize,
     edited_lines: Option<&BTreeSet<usize>>,
     assessment: &mut SemanticTransitionAssessment,
+    adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
 ) {
     let mut missing_ids = Vec::<String>::new();
     let mut missing_lines = BTreeSet::<usize>::new();
@@ -93,7 +97,7 @@ fn evaluate_identity(
 
     if !missing_ids.is_empty() || identity_issue_delta > 0 {
         assessment.identity_integrity_regressed = true;
-        let identity_penalty = 90;
+        let identity_penalty = adaptive.identity_penalty();
         assessment.failure_score_delta = assessment
             .failure_score_delta
             .saturating_add(identity_penalty)
@@ -125,6 +129,7 @@ fn evaluate_reference_integrity(
     after: &SemanticContractSnapshot,
     ref_drop_tol: usize,
     assessment: &mut SemanticTransitionAssessment,
+    adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
 ) {
     let mut culprit_lines = BTreeSet::<usize>::new();
     let mut drop_events = 0usize;
@@ -180,7 +185,7 @@ fn evaluate_reference_integrity(
 
     if drop_events > 0 {
         assessment.reference_integrity_regressed = true;
-        let reference_penalty = 70;
+        let reference_penalty = adaptive.reference_penalty();
         assessment.failure_score_delta = assessment
             .failure_score_delta
             .saturating_add(reference_penalty)
@@ -198,7 +203,7 @@ fn evaluate_reference_integrity(
 
     if usage_mismatch_delta > 0 {
         assessment.reference_integrity_regressed = true;
-        let usage_penalty = 55;
+        let usage_penalty = adaptive.usage_penalty();
         assessment.failure_score_delta = assessment
             .failure_score_delta
             .saturating_add(usage_penalty)
@@ -216,7 +221,7 @@ fn evaluate_reference_integrity(
 
     if orphan_count > 0 {
         assessment.reference_integrity_regressed = true;
-        let orphan_penalty = 65;
+        let orphan_penalty = adaptive.orphan_penalty();
         assessment.failure_score_delta = assessment
             .failure_score_delta
             .saturating_add(orphan_penalty)
@@ -238,6 +243,7 @@ fn evaluate_scope_integrity(
     scope_drift_tol: usize,
     edited_lines: Option<&BTreeSet<usize>>,
     assessment: &mut SemanticTransitionAssessment,
+    adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
 ) {
     let count_drift = scope_count_drift(before, after);
     let (local_range_drift, remote_range_drift, range_culprit_lines) =
@@ -254,7 +260,7 @@ fn evaluate_scope_integrity(
     }
 
     assessment.scope_integrity_regressed = true;
-    let scope_penalty = 80;
+    let scope_penalty = adaptive.scope_penalty();
     assessment.failure_score_delta = assessment.failure_score_delta.saturating_add(scope_penalty);
     assessment
         .culprit_lines

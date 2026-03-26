@@ -102,6 +102,7 @@ impl FormatterEngine {
     }
 
     fn apply_inner(&self, text: &str, path: &Path) -> Result<FormatPassResult> {
+        let adaptive_snap = self.adaptive_state.load();
         let mut warnings = Vec::<String>::new();
         let baseline_required = self.retry.post_edit_check_enabled
             || self.accuracy_gate.semantic_required
@@ -234,6 +235,7 @@ impl FormatterEngine {
                     text,
                     pass_result.policy_result.text.as_str(),
                     Some(&edited_lines_1),
+                    &adaptive_snap,
                 )
             }
         } else if let Some(baseline) = post_edit_baseline.as_ref() {
@@ -242,6 +244,7 @@ impl FormatterEngine {
                 pass_result.policy_result.text.as_str(),
                 baseline,
                 Some(&edited_lines_1),
+                &adaptive_snap,
             )
         } else {
             self.post_edit_checker.validate_for_edits(
@@ -249,6 +252,7 @@ impl FormatterEngine {
                 text,
                 pass_result.policy_result.text.as_str(),
                 Some(&edited_lines_1),
+                &adaptive_snap,
             )
         };
 
@@ -353,6 +357,7 @@ impl FormatterEngine {
                     text,
                     pass_2.policy_result.text.as_str(),
                     Some(&edited_lines_2),
+                    &adaptive_snap,
                 )
             }
         } else if let Some(baseline) = post_edit_baseline.as_ref() {
@@ -361,6 +366,7 @@ impl FormatterEngine {
                 pass_2.policy_result.text.as_str(),
                 baseline,
                 Some(&edited_lines_2),
+                &adaptive_snap,
             )
         } else {
             self.post_edit_checker.validate_for_edits(
@@ -368,6 +374,7 @@ impl FormatterEngine {
                 text,
                 pass_2.policy_result.text.as_str(),
                 Some(&edited_lines_2),
+                &adaptive_snap,
             )
         };
 

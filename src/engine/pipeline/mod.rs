@@ -192,6 +192,7 @@ struct ConvergenceSignalInput<'a> {
     previous_contract_failures: &'a BTreeSet<SemanticInvariantClause>,
     capability: &'a PolicyCapabilities,
     cluster_radius_cap: Option<usize>,
+    adaptive: &'a crate::engine::certainty_filter::CertaintyFilterState,
 }
 
 struct CommitPolicyInput<'a> {
@@ -644,7 +645,7 @@ impl PolicyPipeline {
             PolicyCheckpointResult::Rollback { reason, after_error_count } => {
                 let mut retried = false;
                 if state.retry_batch_size.is_none() && after_error_count > 0 {
-                    let retry_batch = usize::MAX;
+                    let retry_batch = self.adaptive_state.load().retry_batch();
                     if retry_batch < state.current.lines().count() {
                         state.retry_batch_size = Some(retry_batch);
                         self.ensure_policy_parse_stage(state, policy, policy_name, policy_started)?;
@@ -973,8 +974,9 @@ impl PolicyPipeline {
         } else {
             project_query.context_cluster_key(&candidate_lines)
         };
+        let cluster_adaptive = self.adaptive_state.load();
         let cluster_controls =
-            PolicyClusterTelemetry::adaptive_controls(policy_name, context_cluster);
+            PolicyClusterTelemetry::adaptive_controls(policy_name, context_cluster, &cluster_adaptive);
 
         let mut confidence_sample = None;
         let mut confidence_outcome = None;
@@ -982,6 +984,7 @@ impl PolicyPipeline {
         let mut confidence_threshold = None;
         let mut dropped_line_count = 0usize;
         if let Some(settings) = self.policy_settings.get(policy_name) {
+            let guard_adaptive = self.adaptive_state.load();
             let guard_violations = EditGuard::validate(
                 policy_name,
                 &settings.touch_contract,
@@ -989,6 +992,7 @@ impl PolicyPipeline {
                 state.parse.tree.as_ref(),
                 Some(&self.query_cache),
                 prepared.capability.structural_safe,
+                &guard_adaptive,
             );
             if !guard_violations.is_empty() {
                 let mut violations = result.violations;
@@ -1065,6 +1069,7 @@ impl PolicyPipeline {
             previous_contract_failures: &state.options.previous_contract_failures,
             capability: &prepared.capability,
             cluster_radius_cap: cluster_controls.max_impact_radius_cap,
+            adaptive: &cluster_adaptive,
         });
 
         Ok(ExecutedPolicyStage {
@@ -1096,6 +1101,7 @@ impl PolicyPipeline {
         let edit_block_kind = Self::dominant_block_kind(state, &executed.result.edits);
         let context_mod = self.context_modifier_for_policy(state, policy_name, Some(edit_block_kind));
         let candidate_confidence = executed.confidence_score.unwrap_or(1.0) * context_mod;
+        let adaptive_snap = self.adaptive_state.load();
         let proposed_candidates = state.cand.proposer.propose(
             policy_name,
             &executed.result,
@@ -1104,6 +1110,7 @@ impl PolicyPipeline {
             &executed.convergence_signal,
             &executed.capability,
             candidate_confidence,
+            &adaptive_snap,
         );
         let guardian_assessment = ProposerController::assess(
             proposed_candidates.as_slice(), &executed.capability);
@@ -1151,6 +1158,7 @@ impl PolicyPipeline {
             candidates.as_slice(),
             state.cand.selected.as_slice(),
             state.options.retry_scope_stage,
+            &adaptive_snap,
         );
         let mut hard_blocked_lines = guardian_hard_blocked_lines;
         hard_blocked_lines.extend(solve_result.hard_blocked_lines.iter().copied());
@@ -1256,6 +1264,7 @@ impl PolicyPipeline {
             &hard_blocked_lines,
             &solve_result.dropped_lines,
             &kept_lines,
+            &adaptive_snap,
         );
         let conflict_violations = state.cand.conflict
             .observe(policy_name, executed.result.edits.as_slice());
@@ -1542,8 +1551,9 @@ impl PolicyPipeline {
             previous_contract_failures,
             capability,
             cluster_radius_cap,
+            adaptive,
         } = input;
-        let mut semantic_confidence_bp = 200u16;
+        let mut semantic_confidence_bp = adaptive.semantic_confidence_bp_base();
         let mut impact_radius = 0usize;
         if let Some(context) = semantic {
             if context.clang_success {
@@ -2393,6 +2403,7 @@ impl PolicyPipeline {
         hard_blocked_lines: &BTreeSet<usize>,
         dropped_lines: &BTreeSet<usize>,
         kept_lines: &BTreeSet<usize>,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<PolicyCandidateTrace> {
         let mut traces = all_candidates
             .iter()
@@ -2412,7 +2423,7 @@ impl PolicyPipeline {
                     line: candidate.line,
                     confidence: candidate.confidence,
                     style_gain: candidate.style_gain,
-                    utility: GlobalConflictSolver::utility_score(candidate, scope_stage),
+                    utility: GlobalConflictSolver::utility_score(candidate, scope_stage, adaptive),
                     risk_tier: candidate.risk_tier,
                     impact_radius: candidate.impact_radius,
                     symbol_footprint_count: candidate.symbol_footprint.len(),
@@ -2447,6 +2458,7 @@ mod tests {
     use toml::Table;
 
     use crate::config::policy_config::PolicyConfig;
+    use crate::engine::certainty_filter::CertaintyFilterState;
     use crate::engine::conflict_solver::GlobalConflictSolver;
     use crate::engine::catalog::{
         PolicyCapabilities, PolicyCapabilityMatrix,
@@ -2856,6 +2868,7 @@ mod tests {
             previous_contract_failures: &BTreeSet::new(),
             capability: &capability,
             cluster_radius_cap: None,
+            adaptive: &CertaintyFilterState::new(),
         });
         assert!(signal.semantic_confidence_bp >= 700);
         assert!(signal.impact_radius >= 2);
@@ -2924,6 +2937,7 @@ mod tests {
             previous_contract_failures: &BTreeSet::new(),
             capability: &capability,
             cluster_radius_cap: None,
+            adaptive: &CertaintyFilterState::new(),
         });
 
         let line10_ranges = signal
@@ -2981,6 +2995,7 @@ mod tests {
             previous_contract_failures: &BTreeSet::new(),
             capability: &capability,
             cluster_radius_cap: None,
+            adaptive: &CertaintyFilterState::new(),
         });
         let failures = BTreeSet::from([
             SemanticInvariantClause::EditSafety,
@@ -2993,6 +3008,7 @@ mod tests {
             previous_contract_failures: &failures,
             capability: &capability,
             cluster_radius_cap: None,
+            adaptive: &CertaintyFilterState::new(),
         });
         assert!(penalized.semantic_confidence_bp < base.semantic_confidence_bp);
         assert!(penalized.impact_radius >= base.impact_radius);
@@ -3138,10 +3154,12 @@ mod tests {
             after_fingerprint: 2,
             style_gain: 1.2,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[incoming],
             &[existing],
             RetryScopeStage::LineLocal,
+            &adaptive,
         );
         assert!(result.accepted.is_empty());
         assert!(result.dropped_lines.contains(&42));

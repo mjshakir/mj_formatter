@@ -39,6 +39,7 @@ impl ProposerController {
         convergence_signal: &ConvergencePolicySignal,
         capability: &PolicyCapabilities,
         confidence: f64,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<PolicyEditCandidate> {
         let mut candidates = Vec::<PolicyEditCandidate>::with_capacity(result.edits.len());
         for edit in &result.edits {
@@ -59,7 +60,7 @@ impl ProposerController {
             if !capability.allows_zone(zone) {
                 hard_constraints_touched |= SemanticInvariantClause::TouchContract.bit();
             }
-            let trust_deficit_penalty = 0.0;
+            let trust_deficit_penalty = adaptive.trust_deficit_penalty();
             let mut symbol_footprint: SmallVec<[u64; 8]> = convergence_signal
                 .symbol_ids
                 .get(&edit.line)
@@ -89,7 +90,7 @@ impl ProposerController {
                 .get(&edit.line)
                 .cloned()
                 .unwrap_or_else(|| smallvec::smallvec![(edit.line, edit.line)]);
-            let confidence_penalty = 0.0;
+            let confidence_penalty = adaptive.confidence_penalty();
             let resolved_confidence =
                 (confidence - confidence_penalty - trust_deficit_penalty).clamp(0.0, 1.0);
             let mut impact_radius = convergence_signal.impact_radius.max(1);
@@ -99,12 +100,10 @@ impl ProposerController {
                     project_query.signal(symbol.stable_id.as_str())
                 })
                 .or_else(|| project_query.signal((edit.line, 1)));
-            let richness_multiplier = 1.0_f64;
+            let richness_multiplier = adaptive.richness_multiplier();
             let richness_radius = richness_multiplier.round().clamp(1.0, 3.0) as usize;
             impact_radius = impact_radius.max(richness_radius);
-            if let Some(_signal) = project_signal {
-                // No fuzzy penalty applied
-            }
+            let _ = project_signal;
             candidates.push(PolicyEditCandidate {
                 policy: Arc::from(policy_name),
                 line: edit.line,
@@ -116,7 +115,7 @@ impl ProposerController {
                 hard_constraints_touched,
                 zone,
                 after_fingerprint: Self::text_fingerprint(edit.after.as_str()),
-                style_gain: Self::style_gain(edit.before.as_str(), edit.after.as_str()),
+                style_gain: Self::style_gain(edit.before.as_str(), edit.after.as_str(), adaptive),
             });
         }
         candidates
@@ -206,7 +205,7 @@ impl ProposerController {
         Self::text_fingerprint(format!("{line}:{column}").as_str())
     }
 
-    fn style_gain(before: &str, after: &str) -> f64 {
+    fn style_gain(before: &str, after: &str, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> f64 {
         if before == after {
             return 0.0;
         }
@@ -215,7 +214,7 @@ impl ProposerController {
         let whitespace_change = (before_trimmed == after_trimmed) as u8 as f64;
         let delta = before_trimmed.len().abs_diff(after_trimmed.len()) as f64;
         let normalized_delta = (delta / 32.0).min(1.0);
-        let (base, ws_bonus, delta_bonus) = (0.60, 0.40, 0.20);
+        let (base, ws_bonus, delta_bonus) = adaptive.style_gain_weights();
         base + (whitespace_change * ws_bonus) + ((1.0 - normalized_delta) * delta_bonus)
     }
 }
@@ -264,6 +263,7 @@ mod tests {
             changed: true,
         };
         let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
+        let adaptive = crate::engine::certainty_filter::CertaintyFilterState::new();
         let candidates = ProposerController::new().propose(
             "compact_declarations",
             &result,
@@ -272,6 +272,7 @@ mod tests {
             &ConvergencePolicySignal::default(),
             &capability,
             0.9,
+            &adaptive,
         );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].zone.as_str(), "preprocessor");

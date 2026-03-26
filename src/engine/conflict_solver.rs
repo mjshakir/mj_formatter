@@ -27,12 +27,13 @@ impl GlobalConflictSolver {
         incoming: &[PolicyEditCandidate],
         already_selected: &[PolicyEditCandidate],
         scope_stage: RetryScopeStage,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> ConflictResult {
         if incoming.is_empty() {
             return ConflictResult::default();
         }
 
-        let consolidated = Self::consolidate_by_line(incoming, scope_stage);
+        let consolidated = Self::consolidate_by_line(incoming, scope_stage, adaptive);
         let mut dropped_lines = BTreeSet::<usize>::new();
         let mut hard_blocked_lines = BTreeSet::<usize>::new();
         let mut admissible = Vec::<PolicyEditCandidate>::new();
@@ -45,7 +46,7 @@ impl GlobalConflictSolver {
             }
             if already_selected
                 .iter()
-                .any(|existing| Self::conflicts(&candidate, existing))
+                .any(|existing| Self::conflicts(&candidate, existing, adaptive))
             {
                 dropped_lines.insert(candidate.line);
                 continue;
@@ -53,11 +54,11 @@ impl GlobalConflictSolver {
             admissible.push(candidate);
         }
 
-        let accepted = Self::select_conflict_optimal(admissible.as_slice(), scope_stage);
+        let accepted = Self::select_conflict_optimal(admissible.as_slice(), scope_stage, adaptive);
         for candidate in &admissible {
             let conflicts = accepted
                 .iter()
-                .filter(|winner| Self::conflicts(candidate, winner))
+                .filter(|winner| Self::conflicts(candidate, winner, adaptive))
                 .collect::<Vec<_>>();
             if conflicts.is_empty() {
                 if accepted.iter().any(|winner| {
@@ -87,13 +88,14 @@ impl GlobalConflictSolver {
     fn consolidate_by_line(
         incoming: &[PolicyEditCandidate],
         scope_stage: RetryScopeStage,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<PolicyEditCandidate> {
         let mut best_by_line = std::collections::HashMap::<usize, PolicyEditCandidate>::new();
         for candidate in incoming {
             match best_by_line.entry(candidate.line) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
-                    let candidate_utility = Self::utility_score(candidate, scope_stage);
-                    let existing_utility = Self::utility_score(e.get(), scope_stage);
+                    let candidate_utility = Self::utility_score(candidate, scope_stage, adaptive);
+                    let existing_utility = Self::utility_score(e.get(), scope_stage, adaptive);
                     let choose_new = candidate_utility > existing_utility + 0.000_001
                         || (candidate_utility - existing_utility).abs() <= 0.000_001
                             && candidate.confidence > e.get().confidence + 0.001
@@ -122,32 +124,22 @@ impl GlobalConflictSolver {
     pub fn utility_score(
         candidate: &PolicyEditCandidate,
         scope_stage: RetryScopeStage,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> f64 {
         let risk_tier_index = match candidate.risk_tier {
             CandidateRiskTier::Low => 0,
             CandidateRiskTier::Medium => 1,
             CandidateRiskTier::High => 2,
         };
-        let stabilizer_bonus = match risk_tier_index {
-            0 => 0.10,
-            1 => 0.05,
-            _ => 0.0,
-        };
+        let stabilizer_bonus = adaptive.stabilizer_bonus(risk_tier_index);
         let scope_narrowness = match scope_stage {
             RetryScopeStage::Full => 0.0,
             RetryScopeStage::CulpritRegion => 0.5,
             RetryScopeStage::NodeLocal | RetryScopeStage::LineLocal => 1.0,
         };
-        let scope_bonus = match risk_tier_index {
-            0 => scope_narrowness * 0.08,
-            _ => scope_narrowness * 0.04,
-        };
-        let risk_penalty = match risk_tier_index {
-            2 => 0.15,
-            1 => 0.05,
-            _ => 0.0,
-        };
-        let (range_weight, symbol_weight) = (0.02, 0.01);
+        let scope_bonus = scope_narrowness * adaptive.scope_bonus(risk_tier_index);
+        let risk_penalty = adaptive.risk_penalty(risk_tier_index);
+        let (range_weight, symbol_weight) = adaptive.footprint_weights();
         let footprint_penalty = ((candidate.range_footprint.len() as f64 * range_weight)
             + (candidate.symbol_footprint.len() as f64 * symbol_weight))
             .min(0.30);
@@ -171,7 +163,7 @@ impl GlobalConflictSolver {
             })
     }
 
-    fn conflicts(left: &PolicyEditCandidate, right: &PolicyEditCandidate) -> bool {
+    fn conflicts(left: &PolicyEditCandidate, right: &PolicyEditCandidate, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> bool {
         if left.policy == right.policy {
             return left.line == right.line;
         }
@@ -201,7 +193,11 @@ impl GlobalConflictSolver {
                 || Self::is_semantic_rewrite_policy(right.policy.as_ref())
                 || left.risk_tier == CandidateRiskTier::High
                 || right.risk_tier == CandidateRiskTier::High;
-            let fuzzy_min = if semantic_sensitive { 3 } else { 1 };
+            let fuzzy_min = if semantic_sensitive {
+                adaptive.fuzzy_min_semantic()
+            } else {
+                adaptive.fuzzy_min_other()
+            };
             let neighborhood = left.impact_radius.max(right.impact_radius).max(fuzzy_min);
             if line_gap <= neighborhood {
                 return true;
@@ -245,15 +241,16 @@ impl GlobalConflictSolver {
     fn select_conflict_optimal(
         admissible: &[PolicyEditCandidate],
         scope_stage: RetryScopeStage,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<PolicyEditCandidate> {
         if admissible.is_empty() {
             return Vec::new();
         }
-        let adjacency = Self::build_conflict_adjacency(admissible);
+        let adjacency = Self::build_conflict_adjacency(admissible, adaptive);
         let components = Self::connected_components(&adjacency);
         let mut accepted_indexes = Vec::<usize>::new();
         for component in components {
-            let component_threshold = 16_usize;
+            let component_threshold = adaptive.component_threshold();
             let solve_input = ComponentSolveInput {
                 admissible,
                 adjacency: &adjacency,
@@ -261,9 +258,9 @@ impl GlobalConflictSolver {
                 scope_stage,
             };
             let selected = if component.len() <= component_threshold {
-                Self::solve_component_exact(&solve_input)
+                Self::solve_component_exact(&solve_input, adaptive)
             } else {
-                Self::solve_component_greedy(&solve_input)
+                Self::solve_component_greedy(&solve_input, adaptive)
             };
             accepted_indexes.extend(selected);
         }
@@ -274,11 +271,11 @@ impl GlobalConflictSolver {
             .collect()
     }
 
-    fn build_conflict_adjacency(admissible: &[PolicyEditCandidate]) -> Vec<Vec<usize>> {
+    fn build_conflict_adjacency(admissible: &[PolicyEditCandidate], adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> Vec<Vec<usize>> {
         let mut adjacency = vec![Vec::<usize>::new(); admissible.len()];
         for left in 0..admissible.len() {
             for right in (left + 1)..admissible.len() {
-                if Self::conflicts(&admissible[left], &admissible[right]) {
+                if Self::conflicts(&admissible[left], &admissible[right], adaptive) {
                     adjacency[left].push(right);
                     adjacency[right].push(left);
                 }
@@ -317,7 +314,7 @@ impl GlobalConflictSolver {
         components
     }
 
-    fn solve_component_exact(input: &ComponentSolveInput<'_>) -> Vec<usize> {
+    fn solve_component_exact(input: &ComponentSolveInput<'_>, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> Vec<usize> {
         let admissible = input.admissible;
         let adjacency = input.adjacency;
         let component = input.component;
@@ -326,8 +323,8 @@ impl GlobalConflictSolver {
         ordered.sort_by(|left, right| {
             let left_candidate = &admissible[*left];
             let right_candidate = &admissible[*right];
-            let left_utility = Self::utility_score(left_candidate, scope_stage);
-            let right_utility = Self::utility_score(right_candidate, scope_stage);
+            let left_utility = Self::utility_score(left_candidate, scope_stage, adaptive);
+            let right_utility = Self::utility_score(right_candidate, scope_stage, adaptive);
             right_utility
                 .total_cmp(&left_utility)
                 .then_with(|| {
@@ -346,7 +343,7 @@ impl GlobalConflictSolver {
         });
         let weights = ordered
             .iter()
-            .map(|index| Self::utility_score(&admissible[*index], scope_stage).max(0.0))
+            .map(|index| Self::utility_score(&admissible[*index], scope_stage, adaptive).max(0.0))
             .collect::<Vec<_>>();
         let mut suffix_upper_bound = vec![0.0f64; weights.len() + 1];
         for idx in (0..weights.len()).rev() {
@@ -462,7 +459,7 @@ impl GlobalConflictSolver {
             .collect()
     }
 
-    fn solve_component_greedy(input: &ComponentSolveInput<'_>) -> Vec<usize> {
+    fn solve_component_greedy(input: &ComponentSolveInput<'_>, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> Vec<usize> {
         let admissible = input.admissible;
         let adjacency = input.adjacency;
         let component = input.component;
@@ -471,8 +468,8 @@ impl GlobalConflictSolver {
         ordered.sort_by(|left, right| {
             let left_candidate = &admissible[*left];
             let right_candidate = &admissible[*right];
-            let left_utility = Self::utility_score(left_candidate, scope_stage);
-            let right_utility = Self::utility_score(right_candidate, scope_stage);
+            let left_utility = Self::utility_score(left_candidate, scope_stage, adaptive);
+            let right_utility = Self::utility_score(right_candidate, scope_stage, adaptive);
             right_utility
                 .total_cmp(&left_utility)
                 .then_with(|| {
@@ -509,6 +506,7 @@ impl GlobalConflictSolver {
 mod tests {
     use std::collections::BTreeSet;
 
+    use crate::engine::certainty_filter::CertaintyFilterState;
     use crate::engine::conflict_solver::GlobalConflictSolver;
     use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
     use crate::engine::run_options::RetryScopeStage;
@@ -530,10 +528,12 @@ mod tests {
             after_fingerprint: 1,
             style_gain: 1.0,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[candidate],
             &[],
             RetryScopeStage::Full,
+            &adaptive,
         );
         assert!(result.accepted.is_empty());
         assert!(result.hard_blocked_lines.contains(&7));
@@ -567,10 +567,12 @@ mod tests {
             after_fingerprint: 3,
             style_gain: 1.0,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[low.clone(), high],
             &[],
             RetryScopeStage::LineLocal,
+            &adaptive,
         );
         assert_eq!(result.accepted.len(), 1);
         assert_eq!(result.accepted[0].policy, low.policy);
@@ -617,10 +619,12 @@ mod tests {
             after_fingerprint: 13,
             style_gain: 1.5,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[high_single, left_pair.clone(), right_pair.clone()],
             &[],
             RetryScopeStage::Full,
+            &adaptive,
         );
         let accepted_policies = result
             .accepted
@@ -660,10 +664,12 @@ mod tests {
             after_fingerprint: 202,
             style_gain: 1.0,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[left, right],
             &[],
             RetryScopeStage::Full,
+            &adaptive,
         );
         assert_eq!(result.accepted.len(), 2);
     }
@@ -696,10 +702,12 @@ mod tests {
             after_fingerprint: 303,
             style_gain: 1.0,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[left, right],
             &[],
             RetryScopeStage::Full,
+            &adaptive,
         );
         assert_eq!(result.accepted.len(), 2);
         assert!(result.dropped_lines.is_empty());
@@ -733,10 +741,12 @@ mod tests {
             after_fingerprint: 2,
             style_gain: 1.0,
         };
+        let adaptive = CertaintyFilterState::new();
         let result = GlobalConflictSolver::solve(
             &[left, right],
             &[],
             RetryScopeStage::Full,
+            &adaptive,
         );
         assert_eq!(result.accepted.len(), 1);
     }

@@ -80,6 +80,7 @@ impl PostEditChecker {
         before_text: &str,
         after_text: &str,
         edited_lines: Option<&BTreeSet<usize>>,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> PostEditCheckResult {
         if before_text == after_text {
             return PostEditCheckResult {
@@ -91,7 +92,7 @@ impl PostEditChecker {
         }
 
         let baseline = self.build_baseline(path, before_text);
-        self.validate_with_baseline_for_edits(path, after_text, &baseline, edited_lines)
+        self.validate_with_baseline_for_edits(path, after_text, &baseline, edited_lines, adaptive)
     }
 
     pub fn build_baseline(&self, path: &Path, before_text: &str) -> CheckBaseline {
@@ -104,8 +105,9 @@ impl PostEditChecker {
         after_text: &str,
         baseline: &CheckBaseline,
         edited_lines: Option<&BTreeSet<usize>>,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> PostEditCheckResult {
-        delta::validate(self, path, after_text, baseline, edited_lines)
+        delta::validate(self, path, after_text, baseline, edited_lines, adaptive)
     }
 
     pub fn validate_structural_only(
@@ -136,15 +138,12 @@ impl PostEditChecker {
     }
 
     #[cfg(test)]
-    fn diagnostic_weighted_score(summary: ClangDiagnosticSummary) -> u32 {
-        Self::diagnostic_weighted_score_impl(summary)
+    fn diagnostic_weighted_score(summary: ClangDiagnosticSummary, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> u32 {
+        Self::diagnostic_weighted_score_impl(summary, adaptive)
     }
 
-    fn diagnostic_weighted_score_impl(summary: ClangDiagnosticSummary) -> u32 {
-        let note_w: u32 = 1;
-        let warn_w: u32 = 3;
-        let err_w: u32 = 8;
-        let fatal_w: u32 = 12;
+    fn diagnostic_weighted_score_impl(summary: ClangDiagnosticSummary, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> u32 {
+        let (note_w, warn_w, err_w, fatal_w) = adaptive.diagnostic_weights();
         (summary.note as u32).saturating_mul(note_w)
             .saturating_add((summary.warning as u32).saturating_mul(warn_w))
             .saturating_add((summary.error as u32).saturating_mul(err_w))
@@ -434,6 +433,7 @@ mod tests {
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticSummary;
 
+    use crate::engine::certainty_filter::CertaintyFilterState;
     use super::{CheckBaseline, PostEditChecker, PostEditFailureKind};
 
     #[test]
@@ -449,7 +449,8 @@ mod tests {
         let after = "int main( { return 0; }\n";
 
         let baseline = checker.build_baseline(&path, before);
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
+        let adaptive = CertaintyFilterState::new();
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, &adaptive);
 
         assert!(!result.accepted);
         assert!(result
@@ -472,7 +473,8 @@ mod tests {
         let after = "int main() { return 1; }\n";
 
         let baseline = checker.build_baseline(&path, before);
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
+        let adaptive = CertaintyFilterState::new();
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, &adaptive);
 
         assert!(result.accepted);
         assert!(result.culprit_lines.is_empty());
@@ -524,7 +526,8 @@ mod tests {
             warnings: Vec::new(),
         };
         let after = "int main() { return 0; }\n";
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
+        let adaptive = CertaintyFilterState::new();
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, &adaptive);
 
         assert!(!result.accepted);
         assert!(result
@@ -545,7 +548,8 @@ mod tests {
         let after = "int value = 0;\n";
 
         let baseline = checker.build_baseline(&path, before);
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
+        let adaptive = CertaintyFilterState::new();
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, &adaptive);
 
         assert!(!result.accepted);
         assert!(result
@@ -591,11 +595,13 @@ mod tests {
             ..CheckBaseline::default()
         };
 
+        let adaptive = CertaintyFilterState::new();
         let result = checker.validate_with_baseline_for_edits(
             &path,
             "int main() { return 0; }\n",
             &baseline,
             None,
+            &adaptive,
         );
         assert!(!result
             .failure_kinds
@@ -620,7 +626,8 @@ mod tests {
 
         let baseline = checker.build_baseline(&path, before);
         assert!(baseline.semantic_ready());
-        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None);
+        let adaptive = CertaintyFilterState::new();
+        let result = checker.validate_with_baseline_for_edits(&path, after, &baseline, None, &adaptive);
 
         // Binary readiness: parsers available = ready. Adding an include
         // does not make parsers unavailable, so no readiness regression.
@@ -631,26 +638,31 @@ mod tests {
 
     #[test]
     fn weighting_prioritizes_severity() {
+        let adaptive = CertaintyFilterState::new();
         let empty = PostEditChecker::diagnostic_weighted_score(
             crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            &adaptive,
         );
         let warning = PostEditChecker::diagnostic_weighted_score(
             crate::parser::clang_result::ClangDiagnosticSummary {
                 warning: 1,
                 ..crate::parser::clang_result::ClangDiagnosticSummary::default()
             },
+            &adaptive,
         );
         let error = PostEditChecker::diagnostic_weighted_score(
             crate::parser::clang_result::ClangDiagnosticSummary {
                 error: 1,
                 ..crate::parser::clang_result::ClangDiagnosticSummary::default()
             },
+            &adaptive,
         );
         let fatal = PostEditChecker::diagnostic_weighted_score(
             crate::parser::clang_result::ClangDiagnosticSummary {
                 fatal: 1,
                 ..crate::parser::clang_result::ClangDiagnosticSummary::default()
             },
+            &adaptive,
         );
         assert!(warning > empty);
         assert!(error > warning);

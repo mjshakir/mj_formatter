@@ -337,6 +337,7 @@ impl SemanticContract {
         scope_drift_tol: usize,
         identity_shift_tol: usize,
         edited_lines: Option<&BTreeSet<usize>>,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> SemanticTransitionAssessment {
         transition::evaluate(
             before,
@@ -345,6 +346,7 @@ impl SemanticContract {
             scope_drift_tol,
             identity_shift_tol,
             edited_lines,
+            adaptive,
         )
     }
 
@@ -441,6 +443,7 @@ mod tests {
 
     use crate::parser::node_kind;
 
+    use crate::engine::certainty_filter::CertaintyFilterState;
     use super::{PolicyGuidanceMode, SemanticContract, SemanticReadinessInput};
 
     fn policy_config() -> PolicyConfig {
@@ -572,7 +575,7 @@ mod tests {
         let before_snapshot = contract.snapshot(&before);
         let after_snapshot = contract.snapshot(&after);
         let assessment =
-            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 0, None);
+            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 0, None, &CertaintyFilterState::new());
         assert!(assessment.reference_integrity_regressed);
         assert!(assessment
             .failure_messages
@@ -605,6 +608,7 @@ mod tests {
             16,
             0,
             Some(&edited_lines),
+            &CertaintyFilterState::new(),
         );
         assert_eq!(assessment.failure_messages.len(), 0);
         assert!(assessment
@@ -654,7 +658,7 @@ mod tests {
         let before_snapshot = contract.snapshot(&before);
         let after_snapshot = contract.snapshot(&after);
         let assessment =
-            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 0, None);
+            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 0, None, &CertaintyFilterState::new());
         assert!(assessment.reference_integrity_regressed);
         assert!(assessment
             .failure_messages
@@ -697,6 +701,7 @@ mod tests {
             0,
             0,
             Some(&edited_lines),
+            &CertaintyFilterState::new(),
         );
         assert!(assessment.scope_integrity_regressed);
         assert!(assessment
@@ -773,13 +778,13 @@ mod tests {
         let before_snapshot = contract.snapshot(&before);
         let after_snapshot = contract.snapshot(&after);
         let assessment_tolerant =
-            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 4, None);
+            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 4, None, &CertaintyFilterState::new());
         assert!(
             !assessment_tolerant.identity_integrity_regressed,
             "shift of 3 lines should be tolerated with tolerance=4"
         );
         let assessment_exact =
-            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 0, None);
+            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 0, None, &CertaintyFilterState::new());
         assert!(
             assessment_exact.identity_integrity_regressed,
             "shift of 3 lines should regress with tolerance=0 (exact match)"
@@ -854,7 +859,7 @@ mod tests {
         let before_snapshot = contract.snapshot(&before);
         let after_snapshot = contract.snapshot(&after);
         let assessment =
-            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 4, None);
+            contract.evaluate_transition(&before_snapshot, &after_snapshot, 0, 16, 4, None, &CertaintyFilterState::new());
         assert!(
             assessment.identity_integrity_regressed,
             "shift of 10 lines should regress even with tolerance=4"

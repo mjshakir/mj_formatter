@@ -153,7 +153,7 @@ impl PolicyClusterTelemetry {
         }
     }
 
-    pub fn adaptive_controls(policy: &str, cluster: u64) -> ClusterAdaptiveControls {
+    pub fn adaptive_controls(policy: &str, cluster: u64, kalman: &crate::engine::certainty_filter::CertaintyFilterState) -> ClusterAdaptiveControls {
         let s = Self::global();
         let key = (policy.to_string(), cluster);
         let model = s.read_model.load();
@@ -161,12 +161,12 @@ impl PolicyClusterTelemetry {
             let Some(combined) = model.get(&key) else {
                 return ClusterAdaptiveControls::default();
             };
-            return Self::controls_for(&combined.stats, &combined.adaptive);
+            return Self::controls_for(&combined.stats, &combined.adaptive, kalman);
         }
         let Some(combined) = s.entries.get(&key) else {
             return ClusterAdaptiveControls::default();
         };
-        Self::controls_for(&combined.stats, &combined.adaptive)
+        Self::controls_for(&combined.stats, &combined.adaptive, kalman)
     }
 
     pub fn snapshot_entries() -> Vec<PolicyClusterSnapshotEntry> {
@@ -385,6 +385,7 @@ impl PolicyClusterTelemetry {
     fn controls_for(
         stats: &PolicyClusterLearningStats,
         adaptive: &ClusterAdaptiveState,
+        kalman: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> ClusterAdaptiveControls {
         let decision_total = stats.decision_total();
         let outcome_total = stats.outcome_total();
@@ -416,16 +417,16 @@ impl PolicyClusterTelemetry {
         let stability_score = ((combined_ema * 0.55) + (reliability_lower * 0.45)).clamp(0.0, 1.0);
 
         ClusterAdaptiveControls {
-            enforcement_bias: if stability_score >= 0.80 && uncertainty < 0.18 {
+            enforcement_bias: if stability_score >= kalman.cluster_relax_stability() && uncertainty < kalman.cluster_relax_uncertainty() {
                 ClusterEnforcementBias::Relax
-            } else if stability_score <= 0.55 || uncertainty > 0.44 || revert_rate >= 0.22 {
+            } else if stability_score <= kalman.cluster_harden_stability() || uncertainty > kalman.cluster_harden_uncertainty() || revert_rate >= kalman.cluster_harden_revert_rate() {
                 ClusterEnforcementBias::Harden
             } else {
                 ClusterEnforcementBias::Neutral
             },
-            max_impact_radius_cap: if stability_score < 0.40 || reliability_lower < 0.30 {
+            max_impact_radius_cap: if stability_score < kalman.cluster_cap1_stability() || reliability_lower < kalman.cluster_cap1_reliability() {
                 Some(1)
-            } else if stability_score < 0.60 || uncertainty > 0.35 {
+            } else if stability_score < kalman.cluster_cap3_stability() || uncertainty > kalman.cluster_cap3_uncertainty() {
                 Some(3)
             } else {
                 None
@@ -482,6 +483,7 @@ impl PolicyClusterTelemetry {
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
+    use crate::engine::certainty_filter::CertaintyFilterState;
     use crate::engine::edit_candidate::PolicyDecisionOutcome;
     use crate::model::exec_trace::PolicyExecutionTrace;
     use crate::runtime::cluster_telemetry::{
@@ -543,7 +545,7 @@ mod tests {
             );
         }
         let stable_controls =
-            PolicyClusterTelemetry::adaptive_controls(stable_policy.as_str(), stable_cluster);
+            PolicyClusterTelemetry::adaptive_controls(stable_policy.as_str(), stable_cluster, &CertaintyFilterState::new());
         assert!(stable_controls.enforcement_bias != ClusterEnforcementBias::Harden);
 
         let unstable_policy = format!("unstable_policy_{:?}", std::thread::current().id());
@@ -576,7 +578,7 @@ mod tests {
             );
         }
         let unstable_controls =
-            PolicyClusterTelemetry::adaptive_controls(unstable_policy.as_str(), unstable_cluster);
+            PolicyClusterTelemetry::adaptive_controls(unstable_policy.as_str(), unstable_cluster, &CertaintyFilterState::new());
         assert_eq!(
             unstable_controls.enforcement_bias,
             ClusterEnforcementBias::Harden
@@ -622,11 +624,11 @@ mod tests {
             );
         }
 
-        let before = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster);
+        let before = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster, &CertaintyFilterState::new());
         let snapshot = PolicyClusterTelemetry::snapshot_entries();
         PolicyClusterTelemetry::reset();
         PolicyClusterTelemetry::load_entries(snapshot.as_slice());
-        let after = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster);
+        let after = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster, &CertaintyFilterState::new());
 
         assert_eq!(before.enforcement_bias, after.enforcement_bias);
         assert_eq!(before.max_impact_radius_cap, after.max_impact_radius_cap);
@@ -654,7 +656,7 @@ mod tests {
                 ClusterOutcome::Accepted,
             );
         }
-        let baseline = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster);
+        let baseline = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster, &CertaintyFilterState::new());
         let guard = PolicyClusterTelemetry::begin_read_model();
 
         for _ in 0..16 {
@@ -672,12 +674,12 @@ mod tests {
                 ClusterOutcome::Reverted,
             );
         }
-        let frozen = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster);
+        let frozen = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster, &CertaintyFilterState::new());
         assert_eq!(baseline.enforcement_bias, frozen.enforcement_bias);
         assert_eq!(baseline.max_impact_radius_cap, frozen.max_impact_radius_cap);
 
         drop(guard);
-        let updated = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster);
+        let updated = PolicyClusterTelemetry::adaptive_controls(policy.as_str(), cluster, &CertaintyFilterState::new());
         assert_ne!(updated.enforcement_bias, baseline.enforcement_bias);
     }
 }

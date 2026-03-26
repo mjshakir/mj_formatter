@@ -17,6 +17,7 @@ impl EditGuard {
         tree: Option<&Tree>,
         query_cache: Option<&TsQueryCache>,
         structural_safe: bool,
+        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<Violation> {
         if edits.is_empty() || matches!(contract, TouchContract::Any) {
             return Vec::new();
@@ -47,7 +48,7 @@ impl EditGuard {
         };
 
         let (comments, strings, preprocessor) = Self::collect_protected_lines(tree, query_cache);
-        let relax_comment_string = structural_safe;
+        let relax_comment_string = adaptive.relax_comment_string(structural_safe);
         match contract {
             TouchContract::CodeOnly => {
                 let blocked = changed_lines
@@ -240,6 +241,7 @@ mod tests {
     use crate::config::enums::TouchContract;
     use crate::model::edit::Edit;
 
+    use crate::engine::certainty_filter::CertaintyFilterState;
     use super::EditGuard;
 
     #[test]
@@ -250,6 +252,7 @@ mod tests {
             before: "int A".to_string(),
             after: "int B".to_string(),
         }];
+        let adaptive = CertaintyFilterState::new();
         let violations = EditGuard::validate(
             "policy_x",
             &TouchContract::WhitespaceOnly,
@@ -257,6 +260,7 @@ mod tests {
             None,
             None,
             false,
+            &adaptive,
         );
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("whitespace_only"));
@@ -276,6 +280,7 @@ mod tests {
             before: "// comment".to_string(),
             after: "// changed".to_string(),
         }];
+        let adaptive = CertaintyFilterState::new();
         let violations = EditGuard::validate(
             "policy_x",
             &TouchContract::CodeOnly,
@@ -283,6 +288,7 @@ mod tests {
             Some(&tree),
             None,
             false,
+            &adaptive,
         );
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("code_only"));
