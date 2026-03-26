@@ -134,6 +134,167 @@ impl CertaintyFilterState {
     pub fn variance(&self, dim: usize) -> f64 { self.covariance[dim][dim] }
     pub fn stddev(&self, dim: usize) -> f64 { self.covariance[dim][dim].sqrt() }
 
+    // ── Proposer derivations ─────────────────────────────────────────
+
+    pub fn trust_deficit_penalty(&self) -> f64 {
+        if self.observation_count == 0 { return 0.0; }
+        self.stddev(4).min(0.3)
+    }
+
+    pub fn confidence_penalty(&self) -> f64 {
+        if self.observation_count == 0 { return 0.0; }
+        self.stddev(1).min(0.3)
+    }
+
+    pub fn richness_multiplier(&self) -> f64 {
+        (self.estimates[3] * 2.0).clamp(0.5, 3.0)
+    }
+
+    pub fn style_gain_weights(&self) -> (f64, f64, f64) {
+        let e4 = self.estimates[4];
+        (e4 * 0.705_882_352_941_176_5, e4 * 0.470_588_235_294_117_65, e4 * 0.235_294_117_647_058_82)
+    }
+
+    // ── Conflict solver derivations ──────────────────────────────────
+
+    pub fn stabilizer_bonus(&self, risk_tier_index: usize) -> f64 {
+        let e0 = self.estimates[0];
+        match risk_tier_index {
+            0 => e0 * 0.117_647_058_823_529_41,
+            1 => e0 * 0.058_823_529_411_764_71,
+            _ => 0.0,
+        }
+    }
+
+    pub fn scope_bonus(&self, risk_tier_index: usize) -> f64 {
+        let e2 = self.estimates[2];
+        match risk_tier_index {
+            0 => e2 * 0.16,
+            _ => e2 * 0.08,
+        }
+    }
+
+    pub fn risk_penalty(&self, risk_tier_index: usize) -> f64 {
+        let complement = 1.0 - self.estimates[4];
+        match risk_tier_index {
+            2 => complement * 1.0,
+            1 => complement * 0.333_333_333_333_333_3,
+            _ => 0.0,
+        }
+    }
+
+    pub fn footprint_weights(&self) -> (f64, f64) {
+        let v3 = self.variance(3);
+        (v3 * 0.2, v3 * 0.1)
+    }
+
+    pub fn component_threshold(&self) -> usize {
+        (self.estimates[3] * 32.0).clamp(8.0, 64.0) as usize
+    }
+
+    pub fn fuzzy_min_semantic(&self) -> usize {
+        (self.variance(1) * 30.0).clamp(1.0, 8.0) as usize
+    }
+
+    pub fn fuzzy_min_other(&self) -> usize {
+        1
+    }
+
+    // ── Edit guard derivations ───────────────────────────────────────
+
+    pub fn relax_comment_string(&self, structural_safe: bool) -> bool {
+        structural_safe && self.estimates[0] > 0.6
+    }
+
+    // ── Post-check derivations ───────────────────────────────────────
+
+    pub fn diagnostic_weights(&self) -> (u32, u32, u32, u32) {
+        let avg = (self.estimates[0] + self.estimates[1]) / 2.0;
+        (1, (avg * 4.444_444_444_444_445).round() as u32, (avg * 11.851_851_851_851_853).round() as u32, (avg * 17.777_777_777_777_78).round() as u32)
+    }
+
+    pub fn identity_shift_tolerance(&self) -> usize {
+        (self.variance(1) * 40.0).clamp(1.0, 12.0) as usize
+    }
+
+    // ── Semantic contract transition derivations ─────────────────────
+
+    pub fn identity_penalty(&self) -> u32 {
+        ((self.estimates[1] + self.estimates[4]) * 66.666_666_666_666_67).round() as u32
+    }
+
+    pub fn reference_penalty(&self) -> u32 {
+        ((self.estimates[1] + self.estimates[4]) * 51.851_851_851_851_85).round() as u32
+    }
+
+    pub fn usage_penalty(&self) -> u32 {
+        ((self.estimates[1] + self.estimates[4]) * 40.740_740_740_740_74).round() as u32
+    }
+
+    pub fn orphan_penalty(&self) -> u32 {
+        ((self.estimates[1] + self.estimates[4]) * 48.148_148_148_148_15).round() as u32
+    }
+
+    pub fn scope_penalty(&self) -> u32 {
+        ((self.estimates[1] + self.estimates[4]) * 59.259_259_259_259_26).round() as u32
+    }
+
+    // ── Cluster telemetry derivations ────────────────────────────────
+
+    pub fn cluster_relax_stability(&self) -> f64 {
+        self.estimates[4] * 0.941_176_470_588_235_3
+    }
+
+    pub fn cluster_relax_uncertainty(&self) -> f64 {
+        self.stddev(4) * 0.805
+    }
+
+    pub fn cluster_harden_stability(&self) -> f64 {
+        self.estimates[4] * 0.647_058_823_529_411_8
+    }
+
+    pub fn cluster_harden_uncertainty(&self) -> f64 {
+        self.stddev(4) * 1.966
+    }
+
+    pub fn cluster_harden_revert_rate(&self) -> f64 {
+        self.stddev(4) * 0.983
+    }
+
+    pub fn cluster_cap1_stability(&self) -> f64 {
+        self.estimates[4] * 0.470_588_235_294_117_65
+    }
+
+    pub fn cluster_cap1_reliability(&self) -> f64 {
+        self.estimates[4] * 0.352_941_176_470_588_24
+    }
+
+    pub fn cluster_cap3_stability(&self) -> f64 {
+        self.estimates[4] * 0.705_882_352_941_176_5
+    }
+
+    pub fn cluster_cap3_uncertainty(&self) -> f64 {
+        self.stddev(4) * 1.5625
+    }
+
+    pub fn cluster_outcome_regressed(&self) -> f64 {
+        self.estimates[4] * 0.294_117_647_058_823_53
+    }
+
+    pub fn cluster_outcome_accepted(&self) -> f64 {
+        1.0
+    }
+
+    // ── Pipeline derivations ─────────────────────────────────────────
+
+    pub fn semantic_confidence_bp_base(&self) -> u16 {
+        (self.estimates[1] * 400.0).clamp(50.0, 500.0) as u16
+    }
+
+    pub fn retry_batch(&self) -> usize {
+        if self.estimates[0] > 0.7 { usize::MAX } else { 512 }
+    }
+
     pub fn observe(
         &mut self,
         measurement: [f64; NUM_DIMS],
@@ -445,5 +606,162 @@ mod tests {
         assert!((state.variance(2) - 0.10).abs() < 1e-10);
         assert!((state.variance(3) - 0.10).abs() < 1e-10);
         assert!((state.variance(4) - 0.05).abs() < 1e-10);
+    }
+
+    // ── Derivation default tests ─────────────────────────────────────
+    // Each test verifies that CertaintyFilterState::default() + derivation
+    // produces exactly the current hardcoded constant value.
+
+    #[test]
+    fn derivation_proposer_penalties() {
+        let state = CertaintyFilterState::new();
+        // observation_count == 0 → penalties are 0.0
+        assert!((state.trust_deficit_penalty() - 0.0).abs() < 1e-10);
+        assert!((state.confidence_penalty() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_richness_multiplier() {
+        let state = CertaintyFilterState::new();
+        // e[3]=0.50 → 0.50*2.0 = 1.0
+        assert!((state.richness_multiplier() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_style_gain() {
+        let state = CertaintyFilterState::new();
+        let (base, ws, delta) = state.style_gain_weights();
+        // e[4]=0.85 → (0.60, 0.40, 0.20)
+        assert!((base - 0.60).abs() < 0.001, "base={base}");
+        assert!((ws - 0.40).abs() < 0.001, "ws={ws}");
+        assert!((delta - 0.20).abs() < 0.001, "delta={delta}");
+    }
+
+    #[test]
+    fn derivation_stabilizer_bonus() {
+        let state = CertaintyFilterState::new();
+        // e[0]=0.85 → tier0: 0.85*0.1176..=0.10, tier1: 0.85*0.0588..=0.05
+        assert!((state.stabilizer_bonus(0) - 0.10).abs() < 0.001, "tier0={}", state.stabilizer_bonus(0));
+        assert!((state.stabilizer_bonus(1) - 0.05).abs() < 0.001, "tier1={}", state.stabilizer_bonus(1));
+        assert!((state.stabilizer_bonus(2) - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_scope_bonus() {
+        let state = CertaintyFilterState::new();
+        // e[2]=0.50 → tier0: 0.50*0.16=0.08, other: 0.50*0.08=0.04
+        assert!((state.scope_bonus(0) - 0.08).abs() < 1e-10);
+        assert!((state.scope_bonus(1) - 0.04).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_risk_penalty() {
+        let state = CertaintyFilterState::new();
+        // 1-e[4] = 0.15 → tier2: 0.15*1.0=0.15, tier1: 0.15*0.333=0.05
+        assert!((state.risk_penalty(2) - 0.15).abs() < 0.001, "tier2={}", state.risk_penalty(2));
+        assert!((state.risk_penalty(1) - 0.05).abs() < 0.001, "tier1={}", state.risk_penalty(1));
+        assert!((state.risk_penalty(0) - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_footprint_weights() {
+        let state = CertaintyFilterState::new();
+        let (range_w, symbol_w) = state.footprint_weights();
+        // v[3]=0.10 → (0.10*0.2=0.02, 0.10*0.1=0.01)
+        assert!((range_w - 0.02).abs() < 1e-10);
+        assert!((symbol_w - 0.01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_component_threshold() {
+        let state = CertaintyFilterState::new();
+        // e[3]=0.50 → 0.50*32=16
+        assert_eq!(state.component_threshold(), 16);
+    }
+
+    #[test]
+    fn derivation_fuzzy_min() {
+        let state = CertaintyFilterState::new();
+        // v[1]=0.10 → 0.10*30=3
+        assert_eq!(state.fuzzy_min_semantic(), 3);
+        assert_eq!(state.fuzzy_min_other(), 1);
+    }
+
+    #[test]
+    fn derivation_relax_comment_string() {
+        let state = CertaintyFilterState::new();
+        // e[0]=0.85 > 0.6 → true when structural_safe=true
+        assert!(state.relax_comment_string(true));
+        assert!(!state.relax_comment_string(false));
+    }
+
+    #[test]
+    fn derivation_diagnostic_weights() {
+        let state = CertaintyFilterState::new();
+        let (note_w, warn_w, err_w, fatal_w) = state.diagnostic_weights();
+        // avg = (0.85+0.50)/2 = 0.675
+        assert_eq!(note_w, 1);
+        assert_eq!(warn_w, 3, "warn_w={warn_w}");
+        assert_eq!(err_w, 8, "err_w={err_w}");
+        assert_eq!(fatal_w, 12, "fatal_w={fatal_w}");
+    }
+
+    #[test]
+    fn derivation_identity_shift_tol() {
+        let state = CertaintyFilterState::new();
+        // v[1]=0.10 → 0.10*40=4
+        assert_eq!(state.identity_shift_tolerance(), 4);
+    }
+
+    #[test]
+    fn derivation_semantic_penalties() {
+        let state = CertaintyFilterState::new();
+        // e[1]+e[4] = 0.50+0.85 = 1.35
+        assert_eq!(state.identity_penalty(), 90, "identity={}", state.identity_penalty());
+        assert_eq!(state.reference_penalty(), 70, "reference={}", state.reference_penalty());
+        assert_eq!(state.usage_penalty(), 55, "usage={}", state.usage_penalty());
+        assert_eq!(state.orphan_penalty(), 65, "orphan={}", state.orphan_penalty());
+        assert_eq!(state.scope_penalty(), 80, "scope={}", state.scope_penalty());
+    }
+
+    #[test]
+    fn derivation_cluster_relax() {
+        let state = CertaintyFilterState::new();
+        // e[4]=0.85, sd[4]=sqrt(0.05)≈0.2236
+        assert!((state.cluster_relax_stability() - 0.80).abs() < 0.001, "relax_stab={}", state.cluster_relax_stability());
+        assert!((state.cluster_relax_uncertainty() - 0.18).abs() < 0.001, "relax_unc={}", state.cluster_relax_uncertainty());
+    }
+
+    #[test]
+    fn derivation_cluster_harden() {
+        let state = CertaintyFilterState::new();
+        assert!((state.cluster_harden_stability() - 0.55).abs() < 0.001, "harden_stab={}", state.cluster_harden_stability());
+        assert!((state.cluster_harden_uncertainty() - 0.44).abs() < 0.002, "harden_unc={}", state.cluster_harden_uncertainty());
+        assert!((state.cluster_harden_revert_rate() - 0.22).abs() < 0.001, "harden_rr={}", state.cluster_harden_revert_rate());
+    }
+
+    #[test]
+    fn derivation_cluster_caps() {
+        let state = CertaintyFilterState::new();
+        assert!((state.cluster_cap1_stability() - 0.40).abs() < 0.001, "cap1_stab={}", state.cluster_cap1_stability());
+        assert!((state.cluster_cap1_reliability() - 0.30).abs() < 0.001, "cap1_rel={}", state.cluster_cap1_reliability());
+        assert!((state.cluster_cap3_stability() - 0.60).abs() < 0.001, "cap3_stab={}", state.cluster_cap3_stability());
+        assert!((state.cluster_cap3_uncertainty() - 0.35).abs() < 0.002, "cap3_unc={}", state.cluster_cap3_uncertainty());
+    }
+
+    #[test]
+    fn derivation_cluster_outcomes() {
+        let state = CertaintyFilterState::new();
+        assert!((state.cluster_outcome_regressed() - 0.25).abs() < 0.001, "regressed={}", state.cluster_outcome_regressed());
+        assert!((state.cluster_outcome_accepted() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn derivation_pipeline() {
+        let state = CertaintyFilterState::new();
+        // e[1]=0.50 → 0.50*400=200
+        assert_eq!(state.semantic_confidence_bp_base(), 200);
+        // e[0]=0.85 > 0.7 → MAX
+        assert_eq!(state.retry_batch(), usize::MAX);
     }
 }
