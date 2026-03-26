@@ -14,30 +14,7 @@ pub struct ReportRecord {
     pub elapsed_engine_ms: f64,
     pub elapsed_total_ms: f64,
     pub boot_parse_ms: f64,
-    pub certainty: Option<FileCertaintyReport>,
     pub policies: Vec<PolicyReport>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FileCertaintyReport {
-    pub structural: f64,
-    pub semantic: f64,
-    pub coverage: f64,
-    pub richness: f64,
-    pub edit_success: f64,
-    pub structural_variance: f64,
-    pub semantic_variance: f64,
-    pub coverage_variance: f64,
-    pub richness_variance: f64,
-    pub edit_success_variance: f64,
-    pub model_prob_stable: f64,
-    pub model_prob_transitional: f64,
-    pub model_prob_noisy: f64,
-    pub trust_semantic_rewrite: f64,
-    pub trust_structural: f64,
-    pub trust_general: f64,
-    pub observation_count: u32,
-    pub raw_observation: Option<[f64; 5]>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,8 +63,6 @@ pub struct BlockedLineReport {
 impl From<&FileResult> for ReportRecord {
     fn from(result: &FileResult) -> Self {
         use crate::model::exec_trace::PolicyCandidateOutcome;
-
-        let certainty: Option<FileCertaintyReport> = None;
 
         let mut policies = Vec::with_capacity(result.traces.len());
         for trace in &result.traces {
@@ -157,7 +132,6 @@ impl From<&FileResult> for ReportRecord {
             elapsed_engine_ms: result.meta.engine_ms,
             elapsed_total_ms: result.meta.total_ms,
             boot_parse_ms: result.meta.boot_parse_ms,
-            certainty,
             policies,
         }
     }

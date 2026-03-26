@@ -13,28 +13,7 @@ struct ReportRecord {
     warnings: Vec<String>,
     elapsed_engine_ms: f64,
     elapsed_total_ms: f64,
-    certainty: Option<FileCertaintyReport>,
     policies: Vec<PolicyReport>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileCertaintyReport {
-    structural: f64,
-    semantic: f64,
-    coverage: f64,
-    richness: f64,
-    edit_success: f64,
-    structural_variance: f64,
-    semantic_variance: f64,
-    coverage_variance: f64,
-    richness_variance: f64,
-    edit_success_variance: f64,
-    model_prob_stable: f64,
-    model_prob_transitional: f64,
-    model_prob_noisy: f64,
-    trust_semantic_rewrite: f64,
-    trust_structural: f64,
-    trust_general: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,9 +182,6 @@ fn print_report(records: &[ReportRecord], detail: bool) {
         }
 
         if detail {
-            if let Some(cert) = &record.certainty {
-                print_certainty(cert);
-            }
             for policy in &record.policies {
                 print_policy_detail(policy);
             }
@@ -213,31 +189,6 @@ fn print_report(records: &[ReportRecord], detail: bool) {
     }
 
     print_summary(records);
-}
-
-fn print_certainty(cert: &FileCertaintyReport) {
-    println!("  ┌─ Kalman State ─────────────────────────────────────┐");
-    println!(
-        "  │ structural: {:.3} (σ²={:.4})  semantic: {:.3} (σ²={:.4})",
-        cert.structural, cert.structural_variance, cert.semantic, cert.semantic_variance,
-    );
-    println!(
-        "  │ coverage:   {:.3} (σ²={:.4})  richness: {:.3} (σ²={:.4})",
-        cert.coverage, cert.coverage_variance, cert.richness, cert.richness_variance,
-    );
-    println!(
-        "  │ edit_success: {:.3} (σ²={:.4})",
-        cert.edit_success, cert.edit_success_variance,
-    );
-    println!(
-        "  │ IMM: stable={:.3}  transitional={:.3}  noisy={:.3}",
-        cert.model_prob_stable, cert.model_prob_transitional, cert.model_prob_noisy,
-    );
-    println!(
-        "  │ Trust: semantic_rewrite={:.3}  structural={:.3}  general={:.3}",
-        cert.trust_semantic_rewrite, cert.trust_structural, cert.trust_general,
-    );
-    println!("  └──────────────────────────────────────────────────────┘");
 }
 
 fn print_policy_detail(policy: &PolicyReport) {
@@ -283,11 +234,6 @@ fn print_trace(records: &[ReportRecord], detail: bool) {
                     policy.dropped_count,
                     policy.semantic_impact_radius,
                 );
-            }
-        }
-        if detail {
-            if let Some(cert) = &record.certainty {
-                print_certainty(cert);
             }
         }
     }

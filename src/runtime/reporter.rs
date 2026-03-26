@@ -185,7 +185,6 @@ pub fn run_reporter_entry(report_path: &Path) -> Result<()> {
             "path": record.path,
             "decision_trace": {
                 "policies": record.policies,
-                "certainty": record.certainty,
             },
         }))
         .unwrap_or_default();
@@ -233,19 +232,6 @@ struct ReportSummary {
     max_boot_parse_ms: f64,
     policy_counts: BTreeMap<String, usize>,
     policy_timing: BTreeMap<String, PolicyTimingAgg>,
-    certainty_structural_sum: f64,
-    certainty_semantic_sum: f64,
-    certainty_coverage_sum: f64,
-    certainty_richness_sum: f64,
-    certainty_edit_success_sum: f64,
-    certainty_count: usize,
-    variance_structural_sum: f64,
-    variance_semantic_sum: f64,
-    variance_coverage_sum: f64,
-    variance_richness_sum: f64,
-    variance_edit_success_sum: f64,
-    files_stable: usize,
-    files_noisy: usize,
 }
 
 #[derive(Default)]
@@ -277,25 +263,6 @@ impl ReportSummary {
         self.total_boot_parse_ms += record.boot_parse_ms;
         if record.boot_parse_ms > self.max_boot_parse_ms {
             self.max_boot_parse_ms = record.boot_parse_ms;
-        }
-
-        if let Some(cert) = &record.certainty {
-            self.certainty_structural_sum += cert.structural;
-            self.certainty_semantic_sum += cert.semantic;
-            self.certainty_coverage_sum += cert.coverage;
-            self.certainty_richness_sum += cert.richness;
-            self.certainty_edit_success_sum += cert.edit_success;
-            self.certainty_count += 1;
-            self.variance_structural_sum += cert.structural_variance;
-            self.variance_semantic_sum += cert.semantic_variance;
-            self.variance_coverage_sum += cert.coverage_variance;
-            self.variance_richness_sum += cert.richness_variance;
-            self.variance_edit_success_sum += cert.edit_success_variance;
-            if cert.model_prob_stable > 0.5 {
-                self.files_stable += 1;
-            } else if cert.model_prob_noisy > cert.model_prob_transitional {
-                self.files_noisy += 1;
-            }
         }
 
         for policy in &record.policies {
@@ -354,7 +321,6 @@ impl ReportSummary {
             })
             .collect();
 
-        let cert_count = self.certainty_count.max(1) as f64;
         json!({
             "files": self.files,
             "changed": self.changed,
@@ -373,20 +339,6 @@ impl ReportSummary {
                 "avg_boot_parse_ms": format!("{:.1}", if self.files > 0 { self.total_boot_parse_ms / self.files as f64 } else { 0.0 }),
                 "max_boot_parse_ms": format!("{:.1}", self.max_boot_parse_ms),
                 "per_policy": per_policy,
-            },
-            "certainty": {
-                "avg_structural": format!("{:.4}", self.certainty_structural_sum / cert_count),
-                "avg_semantic": format!("{:.4}", self.certainty_semantic_sum / cert_count),
-                "avg_coverage": format!("{:.4}", self.certainty_coverage_sum / cert_count),
-                "avg_richness": format!("{:.4}", self.certainty_richness_sum / cert_count),
-                "avg_edit_success": format!("{:.4}", self.certainty_edit_success_sum / cert_count),
-                "avg_variance_structural": format!("{:.6}", self.variance_structural_sum / cert_count),
-                "avg_variance_semantic": format!("{:.6}", self.variance_semantic_sum / cert_count),
-                "avg_variance_coverage": format!("{:.6}", self.variance_coverage_sum / cert_count),
-                "avg_variance_richness": format!("{:.6}", self.variance_richness_sum / cert_count),
-                "avg_variance_edit_success": format!("{:.6}", self.variance_edit_success_sum / cert_count),
-                "files_stable_model": self.files_stable,
-                "files_noisy_model": self.files_noisy,
             },
             "dropped_records": DROP_COUNT.load(Ordering::Relaxed),
         })
@@ -456,21 +408,6 @@ fn write_human_readable_summary(writer: &mut impl Write, summary: &ReportSummary
             summary.total_engine_ms / summary.files as f64,
             summary.slowest_file,
             summary.max_engine_ms,
-        );
-    }
-    if summary.certainty_count > 0 {
-        let n = summary.certainty_count as f64;
-        let _ = writeln!(writer, "\nKalman Population Stats ({} files):", summary.certainty_count);
-        let _ = writeln!(writer, "  Dimension      | Mean   | Avg Variance");
-        let _ = writeln!(writer, "  structural     | {:.4} | {:.6}", summary.certainty_structural_sum / n, summary.variance_structural_sum / n);
-        let _ = writeln!(writer, "  semantic       | {:.4} | {:.6}", summary.certainty_semantic_sum / n, summary.variance_semantic_sum / n);
-        let _ = writeln!(writer, "  coverage       | {:.4} | {:.6}", summary.certainty_coverage_sum / n, summary.variance_coverage_sum / n);
-        let _ = writeln!(writer, "  richness       | {:.4} | {:.6}", summary.certainty_richness_sum / n, summary.variance_richness_sum / n);
-        let _ = writeln!(writer, "  edit_success   | {:.4} | {:.6}", summary.certainty_edit_success_sum / n, summary.variance_edit_success_sum / n);
-        let _ = writeln!(writer, "  Model: {} stable, {} noisy, {} transitional",
-            summary.files_stable,
-            summary.files_noisy,
-            summary.certainty_count - summary.files_stable - summary.files_noisy,
         );
     }
 }
