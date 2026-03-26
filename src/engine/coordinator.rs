@@ -46,6 +46,7 @@ pub struct FormatterEngine {
     accuracy_gate: AccuracyGateConfig,
     project_graph: Option<Arc<ProjectGraphRuntime>>,
     observation_only: AtomicBool,
+    adaptive_state: Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
 }
 
 impl FormatterEngine {
@@ -56,6 +57,7 @@ impl FormatterEngine {
         accuracy_gate: AccuracyGateConfig,
         project_graph: Option<Arc<ProjectGraphRuntime>>,
     ) -> Self {
+        let adaptive_state = pipeline.adaptive_state().clone();
         let semantic_contract = SemanticContract::new();
         debug_assert!(
             !SemanticContract::invariant_specs().is_empty(),
@@ -74,7 +76,12 @@ impl FormatterEngine {
             accuracy_gate,
             project_graph,
             observation_only: AtomicBool::new(false),
+            adaptive_state,
         }
+    }
+
+    pub fn adaptive_state(&self) -> &Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>> {
+        &self.adaptive_state
     }
 
     pub fn set_observation_only(&self, value: bool) {

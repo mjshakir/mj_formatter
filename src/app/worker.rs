@@ -124,9 +124,9 @@ impl App {
         let config = config.as_ref();
         let project_graph_runtime = Self::open_project_graph_runtime(config)?;
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
-        let population_context = std::env::var_os("FMT_POPULATION_PATH")
-            .map(PathBuf::from)
-            .and_then(|p| crate::engine::population_context::PopulationContext::load_for_ipc(&p));
+        let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            crate::engine::certainty_filter::CertaintyFilterState::new(),
+        )));
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut reader = stdin.lock();
@@ -156,7 +156,7 @@ impl App {
                         project_graph_runtime.clone(),
                         false,
                         false,
-                        population_context.clone(),
+                        adaptive_state.clone(),
                     ) {
                         Ok(pass_result) => {
                             let worker_results = pass_result
@@ -231,9 +231,9 @@ impl App {
 
         let project_graph_runtime = Self::open_project_graph_runtime(config)?;
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
-        let population_context = std::env::var_os("FMT_POPULATION_PATH")
-            .map(PathBuf::from)
-            .and_then(|p| crate::engine::population_context::PopulationContext::load_for_ipc(&p));
+        let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            crate::engine::certainty_filter::CertaintyFilterState::new(),
+        )));
         let cluster_baseline = PolicyClusterTelemetry::snapshot_entries();
         let retry_baseline = RetryLearningTelemetry::snapshot();
         let pass_result = Self::run_pass(
@@ -242,7 +242,7 @@ impl App {
             project_graph_runtime.clone(),
             false,
             false,
-            population_context,
+            adaptive_state.clone(),
         )?;
         let worker_results = pass_result
             .results
@@ -287,7 +287,7 @@ impl App {
         project_graph_runtime: Option<Arc<ProjectGraphRuntime>>,
         allow_check_result_cache: bool,
         record_dispatch_history: bool,
-        population_context: Option<crate::engine::population_context::PopulationContext>,
+        adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
     ) -> Result<Vec<FileResult>> {
         let pass_result = Self::run_pass(
             config,
@@ -295,7 +295,7 @@ impl App {
             project_graph_runtime,
             allow_check_result_cache,
             record_dispatch_history,
-            population_context,
+            adaptive_state.clone(),
         )?;
         Ok(pass_result.results)
     }
@@ -306,7 +306,7 @@ impl App {
         project_graph_runtime: Option<Arc<ProjectGraphRuntime>>,
         allow_check_result_cache: bool,
         record_dispatch_history: bool,
-        population_context: Option<crate::engine::population_context::PopulationContext>,
+        adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
     ) -> Result<ProcessingPassResult> {
         let effective_jobs = Self::resolve_effective_jobs(config.jobs);
         ClangParseService::configure(effective_jobs);
@@ -333,7 +333,7 @@ impl App {
             config.confidence.clone(),
             config.conflict_enabled,
             config.conflict_touch_threshold,
-            population_context,
+            adaptive_state.clone(),
         );
         let engine = FormatterEngine::new(
             pipeline,
@@ -481,7 +481,7 @@ impl App {
         files: Vec<PathBuf>,
         requested_processes: usize,
         allow_check_result_cache: bool,
-        population_context: Option<crate::engine::population_context::PopulationContext>,
+        adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
     ) -> Result<Vec<FileResult>> {
         let total_jobs = Self::resolve_effective_jobs(config.jobs);
         let worker_count =
@@ -493,7 +493,7 @@ impl App {
                 Self::open_project_graph_runtime(config)?,
                 allow_check_result_cache,
                 true,
-                population_context,
+                adaptive_state.clone(),
             );
         }
 
@@ -531,7 +531,7 @@ impl App {
                 Self::open_project_graph_runtime(config)?,
                 allow_check_result_cache,
                 true,
-                population_context,
+                adaptive_state.clone(),
             );
         }
         let worker_job_plan = Self::distribute_worker_jobs(total_jobs, worker_count);
@@ -567,17 +567,7 @@ impl App {
             costs.sort_unstable();
             costs.get(costs.len() / 2).copied().unwrap_or(1).max(1) as u128
         };
-        let pop_ctx_path: Option<PathBuf> = population_context.as_ref().and_then(|ctx| {
-            if ctx.file_count == 0 {
-                return None;
-            }
-            let path = temp_root.join("population_context.bin");
-            if let Err(err) = ctx.save_for_ipc(&path) {
-                warn!(error = %err, "failed writing population context for workers");
-                return None;
-            }
-            Some(path)
-        });
+        let pop_ctx_path: Option<PathBuf> = None;
         let next_batch = AtomicUsize::new(0);
         let thread_results = thread::scope(|scope| -> Result<Vec<WorkerControllerOutput>> {
             let mut handles = Vec::with_capacity(worker_job_plan.len());

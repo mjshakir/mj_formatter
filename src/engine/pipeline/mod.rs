@@ -84,6 +84,7 @@ pub struct PolicyPipeline {
     conflict_touch_threshold: usize,
     context_tracker: ArcSwap<PolicyContextTracker>,
     query_cache: TsQueryCache,
+    adaptive_state: Arc<ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
 }
 
 
@@ -257,7 +258,7 @@ impl PolicyPipeline {
         confidence_config: ConfidenceConfig,
         conflict_detection_enabled: bool,
         conflict_touch_threshold: usize,
-        _population_context: Option<crate::engine::population_context::PopulationContext>,
+        adaptive_state: Arc<ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
     ) -> Self {
         let convergence_profiles = Arc::new(Self::build_convergence_profiles(&policy_settings));
         let query_cache = TsQueryCache::new(tree_sitter_cpp::LANGUAGE.into());
@@ -272,7 +273,12 @@ impl PolicyPipeline {
             conflict_touch_threshold,
             context_tracker: ArcSwap::new(Arc::new(PolicyContextTracker::new())),
             query_cache,
+            adaptive_state,
         }
+    }
+
+    pub fn adaptive_state(&self) -> &Arc<ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>> {
+        &self.adaptive_state
     }
 
     pub fn set_context_tracker(&self, tracker: PolicyContextTracker) {

@@ -88,7 +88,9 @@ impl App {
             None,
             false,
             false,
-            None,
+            std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+                crate::engine::certainty_filter::CertaintyFilterState::new(),
+            ))),
         )?;
         let mut by_path: FxHashMap<PathBuf, FileResult> = FxHashMap::default();
         for result in benchmark_results {

@@ -27,7 +27,7 @@ use crate::model::rename_plan::SemanticRenamePlan;
 use crate::model::violation::Violation;
 use crate::parser::clang_service::ClangParseService;
 use crate::parser::manager::ParserManager;
-use crate::engine::population_context::PopulationContext;
+use crate::engine::certainty_filter::CertaintyFilterState;
 use crate::engine::catalog::PolicyCapabilityMatrix;
 use crate::policy::registry::PolicyRegistry;
 use crate::runtime::rollout_state::AccuracyRolloutState;
@@ -360,7 +360,10 @@ impl App {
         }
 
         let observation_started = Instant::now();
-        let population_context = {
+        let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            CertaintyFilterState::new(),
+        )));
+        {
             if config.verbose {
                 info!("dry-run: building observations (cold start)");
             }
@@ -368,14 +371,14 @@ impl App {
             obs_config.check = true;
             obs_config.observation_only = true;
 
-            let obs_results = if multi_process_enabled {
+            let _obs_results = if multi_process_enabled {
                 Self::run_multiprocess_pass(
                     &args,
                     &obs_config,
                     files.clone(),
                     effective_processes,
                     false,
-                    None,
+                    adaptive_state.clone(),
                 )?
             } else {
                 Self::run_processing_pass(
@@ -384,44 +387,28 @@ impl App {
                     project_graph_runtime.clone(),
                     false,
                     true,
-                    None,
+                    adaptive_state.clone(),
                 )?
             };
-            if obs_results.len() >= 3 {
-                let measurements: Vec<[f64; 5]> = obs_results
-                    .iter()
-                    .map(|_| [0.85, 0.50, 0.50, 0.50, 0.85])
-                    .collect();
-                let ctx = PopulationContext::compute_from_measurements(&measurements);
-                if ctx.file_count > 0 { Some(ctx) } else { None }
-            } else {
-                None
-            }
-        };
+        }
+        let adaptive_snapshot = adaptive_state.load();
         if config.verbose {
             info!(
                 files = files.len(),
-                population_file_count = population_context.as_ref().map(|c| c.file_count).unwrap_or(0),
+                observation_count = adaptive_snapshot.observation_count,
                 elapsed_ms = observation_started.elapsed().as_millis() as u64,
                 "observation phase complete"
             );
         }
 
-        let population_edit_success = population_context
-            .as_ref()
-            .filter(|ctx| ctx.file_count >= 3)
-            .map(|ctx| ctx.prior_estimates[4].clamp(0.0, 1.0))
-            .unwrap_or(0.5);
-        let population_observation_count = population_context
-            .as_ref()
-            .map(|ctx| ctx.prior_observation_count)
-            .unwrap_or(0);
+        let population_edit_success = adaptive_snapshot.edit_success();
+        let population_observation_count = adaptive_snapshot.observation_count;
         let observation_ms = observation_started.elapsed().as_secs_f64() * 1000.0;
         let engine_wall_started = Instant::now();
         let mut results = if multi_process_enabled {
-            Self::run_multiprocess_pass(&args, &config, files, effective_processes, false, population_context)?
+            Self::run_multiprocess_pass(&args, &config, files, effective_processes, false, adaptive_state.clone())?
         } else {
-            Self::run_processing_pass(&config, files, project_graph_runtime.clone(), true, true, population_context)?
+            Self::run_processing_pass(&config, files, project_graph_runtime.clone(), true, true, adaptive_state.clone())?
         };
 
         results.sort_by(|left, right| left.meta.path.cmp(&right.meta.path));
