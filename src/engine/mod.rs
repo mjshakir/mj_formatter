@@ -11,7 +11,6 @@ pub mod edit_guard;
 pub mod gate_decision;
 pub mod mat5;
 pub mod pipeline;
-pub mod population_context;
 pub mod post_check;
 pub mod proposer;
 pub mod retry_optimizer;
