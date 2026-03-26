@@ -360,8 +360,23 @@ impl App {
         }
 
         let observation_started = Instant::now();
+        let adaptive_state_path = config
+            .retry_strategy_optimizer
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("var/cache"))
+            .join("certainty_filter_state.bin");
+        let loaded_state = CertaintyFilterState::load_from_path(&adaptive_state_path)
+            .unwrap_or_else(CertaintyFilterState::new);
+        if config.verbose && loaded_state.observation_count > 0 {
+            info!(
+                observation_count = loaded_state.observation_count,
+                path = %adaptive_state_path.display(),
+                "loaded adaptive state from disk"
+            );
+        }
         let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
-            CertaintyFilterState::new(),
+            loaded_state,
         )));
         {
             if config.verbose {
@@ -763,6 +778,17 @@ impl App {
             journal.finish_success(&summary);
         }
 
+        let final_state = adaptive_state.load();
+        if let Err(err) = final_state.save_to_path(&adaptive_state_path) {
+            warn!(error = %err, path = %adaptive_state_path.display(), "failed to persist adaptive state");
+        } else if config.verbose {
+            info!(
+                observation_count = final_state.observation_count,
+                path = %adaptive_state_path.display(),
+                "saved adaptive state to disk"
+            );
+        }
+
         Ok(())
     }
 
@@ -1083,7 +1109,22 @@ impl App {
         adaptive_state_shards: &[PathBuf],
         retry_optimizer_state_shards: &[PathBuf],
     ) -> Result<()> {
-        let _ = adaptive_state_shards;
+        let loaded_shards: Vec<CertaintyFilterState> = adaptive_state_shards
+            .iter()
+            .filter_map(|p| CertaintyFilterState::load_from_path(p))
+            .collect();
+        if !loaded_shards.is_empty() {
+            let merged = CertaintyFilterState::merge_shards(&loaded_shards);
+            let dest = config
+                .retry_strategy_optimizer
+                .path
+                .parent()
+                .unwrap_or_else(|| Path::new("var/cache"))
+                .join("certainty_filter_state.bin");
+            if let Err(err) = merged.save_to_path(&dest) {
+                warn!(error = %err, "failed to persist merged adaptive state shards");
+            }
+        }
         if config.retry_strategy_optimizer.enabled {
             RetryStrategyOptimizer::merge_state_files(
                 config.retry_strategy_optimizer.path.as_path(),

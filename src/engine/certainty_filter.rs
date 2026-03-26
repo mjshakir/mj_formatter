@@ -110,6 +110,46 @@ impl CertaintyFilterState {
         }
     }
 
+    pub fn load_from_path(path: &std::path::Path) -> Option<Self> {
+        crate::files::codec::StateCodec::read_decode_binary::<Self>(path).ok()
+    }
+
+    pub fn save_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let bytes = crate::files::codec::StateCodec::encode_binary(self)?;
+        crate::files::atomic_writer::AtomicWriter::write_bytes(path, bytes.as_slice())?;
+        Ok(())
+    }
+
+    pub fn merge_shards(shards: &[Self]) -> Self {
+        if shards.is_empty() {
+            return Self::new();
+        }
+        let total_obs: u64 = shards.iter().map(|s| s.observation_count as u64).sum();
+        if total_obs == 0 {
+            return Self::new();
+        }
+        let mut merged_est = [0.0f64; NUM_DIMS];
+        let mut merged_cov = [[0.0f64; NUM_DIMS]; NUM_DIMS];
+        for shard in shards {
+            let w = shard.observation_count as f64 / total_obs as f64;
+            for d in 0..NUM_DIMS {
+                merged_est[d] += w * shard.estimates[d];
+                for d2 in 0..NUM_DIMS {
+                    merged_cov[d][d2] += w * shard.covariance[d][d2];
+                }
+            }
+        }
+        Self {
+            estimates: merged_est,
+            covariance: merged_cov,
+            adaptive_q: mat5_diagonal(&DEFAULT_Q_DIAG),
+            adaptive_r: mat5_diagonal(&DEFAULT_R_DIAG),
+            adaptation_count: 0,
+            observation_count: total_obs.min(u32::MAX as u64) as u32,
+            content_hash: 0,
+        }
+    }
+
     pub fn structural(&self) -> f64 { self.estimates[0] }
     pub fn semantic(&self) -> f64 { self.estimates[1] }
     pub fn coverage(&self) -> f64 { self.estimates[2] }

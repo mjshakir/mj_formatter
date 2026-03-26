@@ -124,8 +124,9 @@ impl App {
         let config = config.as_ref();
         let project_graph_runtime = Self::open_project_graph_runtime(config)?;
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
+        let initial_state = Self::load_adaptive_state_from_ipc();
         let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
-            crate::engine::certainty_filter::CertaintyFilterState::new(),
+            initial_state,
         )));
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -211,6 +212,7 @@ impl App {
                 PersistentWorkerRequest::Shutdown => break,
             }
         }
+        Self::save_adaptive_state_to_ipc(&adaptive_state);
         Ok(())
     }
 
@@ -231,8 +233,9 @@ impl App {
 
         let project_graph_runtime = Self::open_project_graph_runtime(config)?;
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
+        let initial_state = Self::load_adaptive_state_from_ipc();
         let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
-            crate::engine::certainty_filter::CertaintyFilterState::new(),
+            initial_state,
         )));
         let cluster_baseline = PolicyClusterTelemetry::snapshot_entries();
         let retry_baseline = RetryLearningTelemetry::snapshot();
@@ -274,6 +277,7 @@ impl App {
             policy_cluster_telemetry: cluster_delta,
             retry_learning: retry_delta,
         };
+        Self::save_adaptive_state_to_ipc(&adaptive_state);
         let output_bytes = Self::encode_worker_payload(&output)
             .context("failed serializing worker result payload")?;
         fs::write(result_path, output_bytes)
@@ -1004,6 +1008,28 @@ impl App {
     ) {
         let _ =
             Self::shutdown_worker(worker, Duration::from_millis(1), kill_grace);
+    }
+
+    fn load_adaptive_state_from_ipc() -> crate::engine::certainty_filter::CertaintyFilterState {
+        if let Ok(path) = std::env::var(ADAPTIVE_CONFIDENCE_STATE_PATH_ENV) {
+            let p = std::path::PathBuf::from(&path);
+            if let Some(state) = crate::engine::certainty_filter::CertaintyFilterState::load_from_path(&p) {
+                return state;
+            }
+        }
+        crate::engine::certainty_filter::CertaintyFilterState::new()
+    }
+
+    fn save_adaptive_state_to_ipc(
+        adaptive_state: &std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
+    ) {
+        if let Ok(path) = std::env::var(ADAPTIVE_CONFIDENCE_STATE_PATH_ENV) {
+            let p = std::path::PathBuf::from(&path);
+            let state = adaptive_state.load();
+            if let Err(err) = state.save_to_path(&p) {
+                warn!(error = %err, "worker: failed to save adaptive state shard");
+            }
+        }
     }
 
     fn diff_adaptive_snapshot(
