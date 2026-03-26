@@ -63,12 +63,7 @@ impl Policy for PragmaOnceSpacingPolicy {
 
         let pragma_index = context
             .tree_sitter_tree
-            .and_then(|tree| Self::find_pragma_once_line_ts(tree, text.as_bytes()))
-            .or_else(|| {
-                lines
-                    .iter()
-                    .position(|line| line.trim().eq_ignore_ascii_case("#pragma once"))
-            });
+            .and_then(|tree| Self::find_pragma_once_line_ts(tree, text.as_bytes()));
         let Some(pragma_index) = pragma_index else {
             return PolicyResult::unchanged();
         };

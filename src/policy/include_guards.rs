@@ -74,18 +74,11 @@ impl IncludeGuardsPolicy {
         false
     }
 
-    fn has_pragma_once_fallback(lines: &[Cow<'_, str>]) -> bool {
-        lines
-            .iter()
-            .take(32)
-            .any(|line| line.trim().eq_ignore_ascii_case("#pragma once"))
-    }
-
-    fn has_pragma_once(tree: Option<&Tree>, source: &[u8], lines: &[Cow<'_, str>]) -> bool {
+    fn has_pragma_once(tree: Option<&Tree>, source: &[u8]) -> bool {
         if let Some(tree) = tree {
             Self::has_pragma_once_ts(tree, source)
         } else {
-            Self::has_pragma_once_fallback(lines)
+            false
         }
     }
 
@@ -177,41 +170,11 @@ impl IncludeGuardsPolicy {
         false
     }
 
-    fn has_include_guard_fallback(lines: &[Cow<'_, str>]) -> bool {
-        if lines.len() < 3 {
-            return false;
-        }
-        let mut ifndef = None::<String>;
-        let mut define = None::<String>;
-        for line in lines.iter().take(40) {
-            let trimmed = line.trim();
-            if ifndef.is_none() && trimmed.starts_with("#ifndef ") {
-                ifndef = Some(trimmed[8..].trim().to_string());
-                continue;
-            }
-            if define.is_none() && trimmed.starts_with("#define ") {
-                define = Some(trimmed[8..].trim().to_string());
-            }
-            if ifndef.is_some() && define.is_some() {
-                break;
-            }
-        }
-
-        match (ifndef, define) {
-            (Some(a), Some(b)) if a == b && !a.is_empty() => lines
-                .iter()
-                .rev()
-                .take(10)
-                .any(|line| line.trim_start().starts_with("#endif")),
-            _ => false,
-        }
-    }
-
-    fn has_include_guard(tree: Option<&Tree>, source: &[u8], lines: &[Cow<'_, str>]) -> bool {
+    fn has_include_guard(tree: Option<&Tree>, source: &[u8]) -> bool {
         if let Some(tree) = tree {
             Self::has_include_guard_ts(tree, source)
         } else {
-            Self::has_include_guard_fallback(lines)
+            false
         }
     }
 }
@@ -243,8 +206,8 @@ impl Policy for IncludeGuardsPolicy {
 
         let tree = context.tree_sitter_tree;
         let source = context.text.as_bytes();
-        let has_pragma = Self::has_pragma_once(tree, source, &lines);
-        let has_guard = Self::has_include_guard(tree, source, &lines);
+        let has_pragma = Self::has_pragma_once(tree, source);
+        let has_guard = Self::has_include_guard(tree, source);
 
         if matches!(
             self.mode,
