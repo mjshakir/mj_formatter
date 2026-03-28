@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,8 +73,8 @@ impl ProjectGraphSnapshot {
         let per_file_symbol_cap = max_files.saturating_mul(4).clamp(24usize, 768usize);
         let per_symbol_file_cap = max_files.saturating_mul(3).clamp(32usize, 1_024usize);
 
-        let mut changed_file_ids = HashSet::<SymbolId>::new();
-        let mut changed_path_keys = HashSet::<String>::new();
+        let mut changed_file_ids: FxHashSet<SymbolId> = FxHashSet::default();
+        let mut changed_path_keys: FxHashSet<String> = FxHashSet::default();
         for path in changed_files {
             changed_file_ids.insert(file_symbol_id(path.as_path()));
             changed_path_keys.insert(Self::path_key(path.as_path()));
@@ -94,8 +96,8 @@ impl ProjectGraphSnapshot {
             return Vec::new();
         }
 
-        let mut file_to_symbols = HashMap::<SymbolId, Vec<(SymbolId, u32)>>::new();
-        let mut symbol_to_files = HashMap::<SymbolId, Vec<(SymbolId, u32)>>::new();
+        let mut file_to_symbols: FxHashMap<SymbolId, Vec<(SymbolId, u32)>> = FxHashMap::default();
+        let mut symbol_to_files: FxHashMap<SymbolId, Vec<(SymbolId, u32)>> = FxHashMap::default();
         for edge in &self.state.edges {
             if edge.kind != GraphEdgeKind::Contains && edge.kind != GraphEdgeKind::Reference {
                 continue;
@@ -126,8 +128,8 @@ impl ProjectGraphSnapshot {
         let mut visited = changed_file_ids.clone();
         let mut frontier = changed_file_ids.into_iter().collect::<Vec<_>>();
         frontier.sort();
-        let mut file_scores = HashMap::<SymbolId, f64>::new();
-        let mut file_hops = HashMap::<SymbolId, usize>::new();
+        let mut file_scores: FxHashMap<SymbolId, f64> = FxHashMap::default();
+        let mut file_hops: FxHashMap<SymbolId, usize> = FxHashMap::default();
         for file_id in &frontier {
             file_scores.insert(file_id.clone(), 1.0);
             file_hops.insert(file_id.clone(), 0);
@@ -137,7 +139,7 @@ impl ProjectGraphSnapshot {
             if frontier.is_empty() {
                 break;
             }
-            let mut next_scores = HashMap::<SymbolId, f64>::new();
+            let mut next_scores: FxHashMap<SymbolId, f64> = FxHashMap::default();
             for file_id in &frontier {
                 let base_score = file_scores.get(file_id).copied().unwrap_or(1.0);
                 let Some(symbol_links) = file_to_symbols.get(file_id) else {

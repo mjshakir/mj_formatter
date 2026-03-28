@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use rayon::slice::ParallelSliceMut;
 use walkdir::WalkDir;
 
 use crate::config::app_config::AppConfig;
@@ -34,6 +35,18 @@ impl FileFinder {
         for entry in WalkDir::new(&self.root)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|e| {
+                if e.file_type().is_dir() {
+                    if let Ok(rel) = e.path().strip_prefix(&self.root) {
+                        let norm = Self::normalize(rel);
+                        if !norm.is_empty() && self.exclude.is_match(&norm) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                true
+            })
             .filter_map(|item| item.ok())
         {
             if !entry.file_type().is_file() {
@@ -53,7 +66,7 @@ impl FileFinder {
             result.push(entry.path().to_path_buf());
         }
 
-        result.sort();
+        result.par_sort_unstable();
         Ok(result)
     }
 

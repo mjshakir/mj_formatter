@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use anyhow::{anyhow, Result};
 use toml::Table;
@@ -122,8 +122,8 @@ impl PolicyConfig {
         self.raw.get(key).and_then(|value| value.as_table())
     }
 
-    pub fn table_string_map(&self, key: &str) -> HashMap<String, String> {
-        let mut result = HashMap::new();
+    pub fn table_string_map(&self, key: &str) -> FxHashMap<String, String> {
+        let mut result = FxHashMap::default();
         let Some(table) = self.table_value(key) else {
             return result;
         };

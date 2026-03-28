@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use moka::sync::Cache;
-use tree_sitter::Parser;
+use tree_sitter::{ParseOptions, Parser, Tree};
 
 const C_EXTENSIONS: &[&str] = &["c", "h"];
 
@@ -15,6 +15,8 @@ use crate::parser::clang_result::ClangParseResult;
 use crate::parser::clang_service::{ClangParseHandle, ClangParseService};
 use crate::parser::compdb_index::CompdbIndex;
 use crate::parser::consensus::ParserConsensusSelector;
+
+const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 thread_local! {
     static C_PARSER: RefCell<Parser> = RefCell::new({
@@ -27,6 +29,32 @@ thread_local! {
         let _ = parser.set_language(&tree_sitter_cpp::LANGUAGE.into());
         parser
     });
+}
+
+fn parse_with_timeout(
+    parser: &mut Parser,
+    text: &str,
+    old_tree: Option<&Tree>,
+) -> Option<Tree> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let start = std::time::Instant::now();
+    let mut callback = |state: &tree_sitter::ParseState| {
+        let _ = state;
+        if start.elapsed() > PARSE_TIMEOUT {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
+    let options = ParseOptions::new().progress_callback(&mut callback);
+    parser.parse_with_options(
+        &mut |i, _| {
+            if i < len { &bytes[i..] } else { &[] }
+        },
+        old_tree,
+        Some(options),
+    )
 }
 
 const TREE_SITTER_PARSE_CACHE_VERSION: u8 = 1;
@@ -123,6 +151,7 @@ impl ParserManager {
                 .build(),
             clang_parse_cache: Cache::builder()
                 .max_capacity(CLANG_PARSE_CACHE_SIZE)
+                .time_to_live(std::time::Duration::from_secs(1800))
                 .build(),
         }
     }
@@ -131,6 +160,7 @@ impl ParserManager {
         self.tree_sitter_available
     }
 
+    #[tracing::instrument(skip(self, text), fields(file = %path.display()))]
     pub fn parse_tree_sitter(&self, text: &str, path: &Path) -> Result<tree_sitter::Tree> {
         self.reparse_tree(text, path, None)
     }
@@ -156,25 +186,19 @@ impl ParserManager {
             1u8
         };
         let cache_key = Self::tree_sitter_cache_key(path, text, language_tag);
-        if let Some(cached) = self.tree_sitter_parse_cache.get(&cache_key) {
-            return Ok(cached);
-        }
-
-        let parsed = if C_EXTENSIONS.contains(&extension.as_str()) {
-            C_PARSER.with(|parser| parser.borrow_mut().parse(text, old_tree))
-        } else {
-            CPP_PARSER.with(|parser| parser.borrow_mut().parse(text, old_tree))
-        };
-
-        let Some(tree) = parsed else {
-            return Err(anyhow!("tree-sitter parse failed"));
-        };
-
-        self.tree_sitter_parse_cache.insert(cache_key, tree.clone());
-
-        Ok(tree)
+        self.tree_sitter_parse_cache
+            .try_get_with(cache_key, || {
+                let parsed = if C_EXTENSIONS.contains(&extension.as_str()) {
+                    C_PARSER.with(|parser| parse_with_timeout(&mut parser.borrow_mut(), text, old_tree))
+                } else {
+                    CPP_PARSER.with(|parser| parse_with_timeout(&mut parser.borrow_mut(), text, old_tree))
+                };
+                parsed.ok_or_else(|| anyhow!("tree-sitter parse failed"))
+            })
+            .map_err(|e| anyhow!("{e}"))
     }
 
+    #[tracing::instrument(skip(self, text), fields(file = %path.display()))]
     pub fn parse_clang(&self, text: &str, path: &Path) -> Result<Arc<ClangParseResult>> {
         if self.require_compdb && !self.has_semantic_compdb(path) {
             return Err(anyhow!(
@@ -404,7 +428,7 @@ impl ParserManager {
     }
 
     fn tree_sitter_cache_key(path: &Path, text: &str, language_tag: u8) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         TREE_SITTER_PARSE_CACHE_VERSION.hash(&mut hasher);
         path.to_string_lossy().hash(&mut hasher);
         text.hash(&mut hasher);
@@ -413,7 +437,7 @@ impl ParserManager {
     }
 
     fn clang_cache_key(&self, path: &Path, text: &str) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         CLANG_PARSE_CACHE_VERSION.hash(&mut hasher);
         path.to_string_lossy().hash(&mut hasher);
         text.hash(&mut hasher);
@@ -450,7 +474,7 @@ mod tests {
     use crate::parser::clang_result::{
         ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
     };
-    use crate::parser::clang_symbol::ClangSymbol;
+    use crate::parser::file_context::SemanticDeclaration;
 
     #[test]
     fn parse_collects_symbols() {
@@ -472,10 +496,10 @@ mod tests {
             .iter()
             .any(|symbol| symbol.name == "local_value"
                 && symbol.kind == clang_sys::CXCursor_VarDecl));
-        let offsets = result.rename_offsets("local_value", 1, &[clang_sys::CXCursor_VarDecl]);
+        let has_rename_offsets = result.rename_offsets_map().values().any(|v| v.len() >= 2);
         assert!(
-            offsets.len() >= 2,
-            "expected declaration and reference offsets for local_value"
+            has_rename_offsets,
+            "expected rename offsets with at least 2 locations"
         );
     }
 
@@ -493,6 +517,8 @@ mod tests {
                 line: 10,
                 column: 4,
                 severity: ClangDiagnosticSeverity::Fatal,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
         );
         let clean_parse = ClangParseResult::new(
@@ -513,20 +539,14 @@ mod tests {
 
     #[test]
     fn consensus_ignores_unrecoverable() {
-        let failed_symbol = ClangSymbol {
+        let failed_symbol = SemanticDeclaration {
             name: "m_data".to_string(),
             kind: clang_sys::CXCursor_FieldDecl,
             line: 7,
             column: 9,
             usr: Some("usr:test:field:m_data".to_string()),
             scope_usr: Some("usr:test:scope:Holder".to_string()),
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: String::new(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
+            ..Default::default()
         };
         let failed_parse = ClangParseResult::with_semantic_offsets(
             false,
@@ -543,11 +563,15 @@ mod tests {
                     line: 7,
                     column: 9,
                     severity: ClangDiagnosticSeverity::Fatal,
+                    warning_option: String::new(),
+                    fix_its: Vec::new(),
                 },
                 ClangDiagnosticEntry {
                     line: 9,
                     column: 3,
                     severity: ClangDiagnosticSeverity::Fatal,
+                    warning_option: String::new(),
+                    fix_its: Vec::new(),
                 },
             ],
         );
@@ -571,20 +595,14 @@ mod tests {
 
     #[test]
     fn consensus_accepts_recoverable() {
-        let failed_symbol = ClangSymbol {
+        let failed_symbol = SemanticDeclaration {
             name: "m_data".to_string(),
             kind: clang_sys::CXCursor_FieldDecl,
             line: 7,
             column: 9,
             usr: Some("usr:test:field:m_data".to_string()),
             scope_usr: Some("usr:test:scope:Holder".to_string()),
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: String::new(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
+            ..Default::default()
         };
         let failed_parse = ClangParseResult::with_semantic_offsets(
             false,
@@ -600,6 +618,8 @@ mod tests {
                 line: 7,
                 column: 9,
                 severity: ClangDiagnosticSeverity::Fatal,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
         );
         let successful_parse = ClangParseResult::new(

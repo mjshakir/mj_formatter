@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use rustc_hash::FxHashMap;
+
 use crate::engine::catalog::policy_catalog;
 use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
 use crate::engine::run_options::RetryScopeStage;
@@ -90,7 +92,7 @@ impl GlobalConflictSolver {
         scope_stage: RetryScopeStage,
         adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<PolicyEditCandidate> {
-        let mut best_by_line = std::collections::HashMap::<usize, PolicyEditCandidate>::new();
+        let mut best_by_line: FxHashMap<usize, PolicyEditCandidate> = FxHashMap::default();
         for candidate in incoming {
             match best_by_line.entry(candidate.line) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {

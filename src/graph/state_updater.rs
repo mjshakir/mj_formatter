@@ -246,7 +246,7 @@ impl GraphUpdater {
         let mut node = GraphNode::new(
             symbol_id.clone(),
             format!("{:?}@{}:{}", decl_key.kind, decl_key.line, decl_key.column),
-            Self::graph_node_kind_for_decl_kind(decl_key.kind),
+            crate::parser::clang_types::graph_node_kind(decl_key.kind),
             decl_key.path.clone(),
             decl_key.line,
             decl_key.column,
@@ -254,32 +254,6 @@ impl GraphUpdater {
         node.last_seen_unix_ms = now;
         node.parser_consensus = symbol_consensus;
         state.upsert_node(node);
-    }
-
-    fn graph_node_kind_for_decl_kind(kind: i32) -> GraphNodeKind {
-        match kind {
-            clang_sys::CXCursor_FunctionDecl
-            | clang_sys::CXCursor_FunctionTemplate
-            | clang_sys::CXCursor_Constructor
-            | clang_sys::CXCursor_Destructor => GraphNodeKind::Function,
-            clang_sys::CXCursor_CXXMethod => GraphNodeKind::Method,
-            clang_sys::CXCursor_VarDecl => GraphNodeKind::Variable,
-            clang_sys::CXCursor_FieldDecl => GraphNodeKind::Field,
-            clang_sys::CXCursor_ParmDecl => GraphNodeKind::Parameter,
-            clang_sys::CXCursor_TypedefDecl
-            | clang_sys::CXCursor_StructDecl
-            | clang_sys::CXCursor_ClassDecl
-            | clang_sys::CXCursor_UnionDecl
-            | clang_sys::CXCursor_EnumDecl
-            | clang_sys::CXCursor_TypeAliasDecl => GraphNodeKind::Type,
-            clang_sys::CXCursor_Namespace => GraphNodeKind::Namespace,
-            clang_sys::CXCursor_MacroDefinition => GraphNodeKind::Macro,
-            clang_sys::CXCursor_ConversionFunction => GraphNodeKind::Function,
-            clang_sys::CXCursor_UsingDeclaration
-            | clang_sys::CXCursor_EnumConstantDecl
-            | clang_sys::CXCursor_FriendDecl => GraphNodeKind::Variable,
-            _ => GraphNodeKind::Variable,
-        }
     }
 
     fn apply_aliases(
@@ -384,7 +358,7 @@ mod tests {
     use rustc_hash::FxHashMap;
     use crate::parser::clang_types::ClangDeclKey;
     use crate::parser::clang_result::ClangParseResult;
-    use crate::parser::clang_symbol::ClangSymbol;
+    use crate::parser::file_context::SemanticDeclaration;
     use crate::graph::types::GraphEdgeKind;
     use crate::graph::state::ProjectGraphState;
     use crate::graph::state_updater::GraphUpdater;
@@ -397,7 +371,7 @@ mod tests {
         let parse = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "DemoFn".to_string(),
                 kind: clang_sys::CXCursor_FunctionDecl,
                 line: 12,
@@ -409,7 +383,7 @@ mod tests {
         );
         let mut state = ProjectGraphState::new();
         GraphUpdater::apply_clang_parse(&mut state, &path, &parse);
-        let symbol = SymbolId::new("bucket|function|DemoFn");
+        let symbol = SymbolId::new("bucket|FunctionDecl|DemoFn");
         assert!(state.node(&symbol).is_some());
         assert!(state.symbol_reference_count(&symbol) > 0);
     }
@@ -421,14 +395,14 @@ mod tests {
             true,
             Vec::new(),
             vec![
-                ClangSymbol {
+                SemanticDeclaration {
                     name: "DemoFn".to_string(),
                     kind: clang_sys::CXCursor_FunctionDecl,
                     line: 12,
                     column: 4,
                     ..Default::default()
                 },
-                ClangSymbol {
+                SemanticDeclaration {
                     name: "OldFn".to_string(),
                     kind: clang_sys::CXCursor_FunctionDecl,
                     line: 24,
@@ -442,7 +416,7 @@ mod tests {
         let second = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "DemoFn".to_string(),
                 kind: clang_sys::CXCursor_FunctionDecl,
                 line: 12,
@@ -458,8 +432,8 @@ mod tests {
         GraphUpdater::apply_clang_parse(&mut state, &path, &second);
 
         let file_id = SymbolId::new("file|src/demo.cpp");
-        let demo = SymbolId::new("bucket|function|DemoFn");
-        let old = SymbolId::new("bucket|function|OldFn");
+        let demo = SymbolId::new("bucket|FunctionDecl|DemoFn");
+        let old = SymbolId::new("bucket|FunctionDecl|OldFn");
         let contains_from_file = state
             .edges
             .iter()
@@ -469,7 +443,7 @@ mod tests {
         assert_eq!(contains_from_file.len(), 1);
         assert_eq!(contains_from_file[0].to, demo);
         assert_eq!(
-            state.symbol_file_count(&SymbolId::new("bucket|function|DemoFn")),
+            state.symbol_file_count(&SymbolId::new("bucket|FunctionDecl|DemoFn")),
             1
         );
         assert_eq!(state.symbol_file_count(&old), 0);
@@ -500,7 +474,7 @@ mod tests {
         let decl_parse = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "TargetFn".to_string(),
                 kind: clang_sys::CXCursor_FunctionDecl,
                 line: 10,
@@ -520,7 +494,7 @@ mod tests {
 
         GraphUpdater::apply_clang_parse(&mut state, &decl_path, &decl_parse);
 
-        let canonical_symbol = SymbolId::new("bucket|function|TargetFn");
+        let canonical_symbol = SymbolId::new("bucket|FunctionDecl|TargetFn");
         assert!(state.node(&canonical_symbol).is_some());
         assert_eq!(state.symbol_reference_count(&canonical_symbol), 2);
         assert!(state

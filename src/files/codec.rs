@@ -141,7 +141,7 @@ impl StateCodec {
             .context("failed postcard state encoding")?;
         let layout = EccLayout::for_payload_len(payload.len())?;
         let payload_len = u32::try_from(payload.len()).context("payload size exceeds u32")?;
-        let payload_checksum = crc32fast::hash(payload.as_slice());
+        let payload_checksum = crate::files::crc::hash(payload.as_slice());
 
         let total_shards = layout.total_shards();
         let mut shards = Vec::<Vec<u8>>::with_capacity(total_shards);
@@ -162,7 +162,7 @@ impl StateCodec {
 
         let shard_checksums = shards
             .iter()
-            .map(|shard| crc32fast::hash(shard.as_slice()))
+            .map(|shard| crate::files::crc::hash(shard.as_slice()))
             .collect::<Vec<_>>();
 
         let encoded_len = layout.encoded_len()?;
@@ -254,7 +254,7 @@ impl StateCodec {
             let start = shard_bytes_start + (idx * layout.shard_size);
             let end = start + layout.shard_size;
             let shard = bytes[start..end].to_vec();
-            let checksum = crc32fast::hash(shard.as_slice());
+            let checksum = crate::files::crc::hash(shard.as_slice());
             if checksum == *expected_checksum {
                 shards.push(Some(shard));
             } else {
@@ -282,7 +282,7 @@ impl StateCodec {
                 .get(idx)
                 .and_then(Option::as_ref)
                 .context("missing shard after reconstruction")?;
-            let checksum = crc32fast::hash(shard.as_slice());
+            let checksum = crate::files::crc::hash(shard.as_slice());
             if checksum != *expected_checksum {
                 anyhow::bail!(
                     "reconstructed shard checksum mismatch at index {}: expected {:08x}, got {:08x}",
@@ -297,7 +297,7 @@ impl StateCodec {
         }
         payload.truncate(payload_len);
 
-        let decoded_payload_checksum = crc32fast::hash(payload.as_slice());
+        let decoded_payload_checksum = crate::files::crc::hash(payload.as_slice());
         if decoded_payload_checksum != payload_checksum {
             anyhow::bail!(
                 "payload checksum mismatch after reconstruction: expected {:08x}, got {:08x}",

@@ -277,7 +277,7 @@ impl PolicyTelemetry {
     }
 
     #[cfg(test)]
-    pub fn snapshot_map() -> std::collections::HashMap<String, PolicyTelemetryEntry> {
+    pub fn snapshot_map() -> rustc_hash::FxHashMap<String, PolicyTelemetryEntry> {
         state()
             .iter()
             .map(|entry| (entry.key().to_string(), entry.value().clone()))
@@ -373,7 +373,7 @@ mod tests {
         let policy_a = format!("policy_a_records_and_sorts_{suffix}");
         let policy_b = format!("policy_b_records_and_sorts_{suffix}");
         PolicyTelemetry::reset();
-        PolicyTelemetry::record_batch(&vec![
+        PolicyTelemetry::record_batch(&[
             PolicyExecutionSample::success(policy_a.as_str(), Duration::from_millis(8), 3, 1),
             PolicyExecutionSample::success(policy_a.as_str(), Duration::from_millis(2), 1, 0)
                 .with_confidence(PolicyConfidenceSample::from_reason_codes(

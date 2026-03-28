@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use rustc_hash::FxHashMap;
 use rayon::prelude::*;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::{info, warn};
@@ -1120,7 +1121,7 @@ impl App {
         let previous_by_policy = previous
             .iter()
             .map(|item| (item.policy.clone(), item.entry.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
         let mut delta = Vec::new();
         for item in current {
             let baseline = previous_by_policy.get(&item.policy);

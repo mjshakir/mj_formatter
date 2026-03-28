@@ -1,9 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
-use serde::{Deserialize, Serialize};
-
 pub const N: usize = 5;
-pub type Mat5 = [[f64; N]; N];
 
 // ── SSE2 horizontal sum helper ───────────────────────────────────────────────
 
@@ -134,12 +131,12 @@ pub fn dot5(a: &[f64; N], b: &[f64; N]) -> f64 {
 // ── Matrix constructors ────────────────────────────────────────────────────
 
 #[cfg(test)]
-pub fn mat5_zeros() -> Mat5 {
+pub fn mat5_zeros() -> [[f64; N]; N] {
     [[0.0; N]; N]
 }
 
 #[inline]
-pub fn mat5_identity() -> Mat5 {
+pub fn mat5_identity() -> [[f64; N]; N] {
     let mut m = [[0.0; N]; N];
     for i in 0..N {
         m[i][i] = 1.0;
@@ -148,7 +145,7 @@ pub fn mat5_identity() -> Mat5 {
 }
 
 #[inline]
-pub fn mat5_diagonal(diag: &[f64; N]) -> Mat5 {
+pub fn mat5_diagonal(diag: &[f64; N]) -> [[f64; N]; N] {
     let mut m = [[0.0; N]; N];
     for i in 0..N {
         m[i][i] = diag[i];
@@ -159,7 +156,7 @@ pub fn mat5_diagonal(diag: &[f64; N]) -> Mat5 {
 // ── Element-wise arithmetic ────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
-pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
         let mut r = [[0.0f64; N]; N];
@@ -173,7 +170,7 @@ pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
         let mut r = [[0.0f64; N]; N];
@@ -187,7 +184,7 @@ pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
         for j in 0..N { r[i][j] = a[i][j] + b[i][j]; }
@@ -196,7 +193,7 @@ pub fn mat5_add(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(target_arch = "aarch64")]
-pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
         let mut r = [[0.0f64; N]; N];
@@ -210,7 +207,7 @@ pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
         let mut r = [[0.0f64; N]; N];
@@ -224,7 +221,7 @@ pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
         for j in 0..N { r[i][j] = a[i][j] - b[i][j]; }
@@ -233,7 +230,7 @@ pub fn mat5_sub(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(target_arch = "aarch64")]
-pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
+pub fn mat5_scale(a: &[[f64; N]; N], s: f64) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
         let vs = vdupq_n_f64(s);
@@ -248,7 +245,7 @@ pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
+pub fn mat5_scale(a: &[[f64; N]; N], s: f64) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
         let vs = _mm_set1_pd(s);
@@ -263,7 +260,7 @@ pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
+pub fn mat5_scale(a: &[[f64; N]; N], s: f64) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
         for j in 0..N { r[i][j] = a[i][j] * s; }
@@ -274,7 +271,7 @@ pub fn mat5_scale(a: &Mat5, s: f64) -> Mat5 {
 // ── Matrix multiplication ──────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
-pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_mul(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
         let mut r = [[0.0f64; N]; N];
@@ -296,7 +293,7 @@ pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_mul(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
         let mut r = [[0.0f64; N]; N];
@@ -318,7 +315,7 @@ pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
+pub fn mat5_mul(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let bt = mat5_transpose(b);
     let mut r = [[0.0; N]; N];
     for i in 0..N {
@@ -329,7 +326,7 @@ pub fn mat5_mul(a: &Mat5, b: &Mat5) -> Mat5 {
     r
 }
 
-pub fn mat5_transpose(a: &Mat5) -> Mat5 {
+pub fn mat5_transpose(a: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
         for j in 0..N {
@@ -342,7 +339,7 @@ pub fn mat5_transpose(a: &Mat5) -> Mat5 {
 // ── Matrix-vector product ──────────────────────────────────────────────────
 
 #[inline]
-pub fn mat5_matvec(a: &Mat5, v: &[f64; N]) -> [f64; N] {
+pub fn mat5_matvec(a: &[[f64; N]; N], v: &[f64; N]) -> [f64; N] {
     [
         dot5(&a[0], v),
         dot5(&a[1], v),
@@ -355,7 +352,7 @@ pub fn mat5_matvec(a: &Mat5, v: &[f64; N]) -> [f64; N] {
 // ── Outer product ──────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
-pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
+pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
         let mut r = [[0.0f64; N]; N];
@@ -372,7 +369,7 @@ pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
+pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
         let mut r = [[0.0f64; N]; N];
@@ -389,7 +386,7 @@ pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
+pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
         for j in 0..N {
@@ -402,7 +399,7 @@ pub fn mat5_outer(v: &[f64; N]) -> Mat5 {
 // ── Quadratic form: v^T * M * v ────────────────────────────────────────────
 
 #[cfg(test)]
-pub fn mat5_quadratic(m: &Mat5, v: &[f64; N]) -> f64 {
+pub fn mat5_quadratic(m: &[[f64; N]; N], v: &[f64; N]) -> f64 {
     let mv = mat5_matvec(m, v);
     dot5(&mv, v)
 }
@@ -410,13 +407,13 @@ pub fn mat5_quadratic(m: &Mat5, v: &[f64; N]) -> f64 {
 // ── Diagonal extraction ────────────────────────────────────────────────────
 
 #[inline]
-pub fn mat5_diag(m: &Mat5) -> [f64; N] {
+pub fn mat5_diag(m: &[[f64; N]; N]) -> [f64; N] {
     [m[0][0], m[1][1], m[2][2], m[3][3], m[4][4]]
 }
 
 // ── Cholesky decomposition (lower-triangular L where A = L*L^T) ────────────
 
-pub fn mat5_cholesky(a: &Mat5) -> Option<Mat5> {
+pub fn mat5_cholesky(a: &[[f64; N]; N]) -> Option<[[f64; N]; N]> {
     let mut l = [[0.0; N]; N];
     for i in 0..N {
         for j in 0..=i {
@@ -447,7 +444,7 @@ pub fn mat5_cholesky(a: &Mat5) -> Option<Mat5> {
 // ── Determinant via Cholesky: det(A) = prod(L[i][i])^2 ─────────────────────
 
 #[cfg(test)]
-pub fn mat5_determinant_spd(a: &Mat5) -> f64 {
+pub fn mat5_determinant_spd(a: &[[f64; N]; N]) -> f64 {
     match mat5_cholesky(a) {
         Some(l) => {
             let mut prod = 1.0;
@@ -462,7 +459,7 @@ pub fn mat5_determinant_spd(a: &Mat5) -> f64 {
 
 // ── Inverse via Cholesky: solve L*L^T * X = I ──────────────────────────────
 
-pub fn mat5_inverse_spd(a: &Mat5) -> Option<Mat5> {
+pub fn mat5_inverse_spd(a: &[[f64; N]; N]) -> Option<[[f64; N]; N]> {
     let l = mat5_cholesky(a)?;
 
     // Forward solve: L * Y = I → Y = L^{-1}
@@ -485,7 +482,7 @@ pub fn mat5_inverse_spd(a: &Mat5) -> Option<Mat5> {
 
 // ── Symmetrize (average upper and lower triangles) ─────────────────────────
 
-pub fn mat5_symmetrize(a: &Mat5) -> Mat5 {
+pub fn mat5_symmetrize(a: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = *a;
     for i in 0..N {
         for j in (i + 1)..N {
@@ -499,7 +496,7 @@ pub fn mat5_symmetrize(a: &Mat5) -> Mat5 {
 
 // ── Enforce SPD: if Cholesky fails, fall back to diagonal + regularization ─
 
-pub fn enforce_spd(m: &mut Mat5) {
+pub fn enforce_spd(m: &mut [[f64; N]; N]) {
     *m = mat5_symmetrize(m);
     if mat5_cholesky(m).is_some() {
         return;
@@ -524,23 +521,6 @@ pub fn enforce_spd(m: &mut Mat5) {
     ]);
 }
 
-// ── Serde wrapper for Mat5 (needed because [[f64;5];5] doesn't impl Serialize) ─
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SerializableMat5(pub [[f64; N]; N]);
-
-impl From<Mat5> for SerializableMat5 {
-    fn from(m: Mat5) -> Self {
-        Self(m)
-    }
-}
-
-impl From<SerializableMat5> for Mat5 {
-    fn from(s: SerializableMat5) -> Self {
-        s.0
-    }
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -553,7 +533,7 @@ mod tests {
         (a - b).abs() < EPS
     }
 
-    fn mat_approx_eq(a: &Mat5, b: &Mat5) -> bool {
+    fn mat_approx_eq(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> bool {
         for i in 0..N {
             for j in 0..N {
                 if !approx_eq(a[i][j], b[i][j]) {

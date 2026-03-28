@@ -442,8 +442,6 @@ mod tests {
         SemanticScope, SemanticScopeKind,
     };
 
-    use crate::parser::node_kind;
-
     use crate::engine::certainty_filter::CertaintyFilterState;
     use super::{PolicyGuidanceMode, SemanticContract, SemanticReadinessInput};
 
@@ -515,6 +513,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@bad#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             ..SemanticFileContext::default()
         };
@@ -540,6 +540,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -565,7 +567,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 20,
                 start_line: 1,
@@ -591,7 +593,7 @@ mod tests {
         let after = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
-                node_kind: node_kind::PREPROC_IF,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 12,
                 start_line: 3,
@@ -632,6 +634,8 @@ mod tests {
                 column: 3,
                 usr: None,
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: stable_id.clone(),
@@ -673,7 +677,7 @@ mod tests {
         let before = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 40,
                 start_line: 2,
@@ -684,7 +688,7 @@ mod tests {
         let after = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 100,
                 end_offset: 200,
                 start_line: 30,
@@ -725,6 +729,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: stable_id.clone(),
@@ -737,7 +743,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
                 start_line: 1,
@@ -756,6 +762,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@bar#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: shifted_id.clone(),
@@ -768,7 +776,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
                 start_line: 1,
@@ -806,6 +814,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: stable_id.clone(),
@@ -818,7 +828,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
                 start_line: 1,
@@ -837,6 +847,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@bar#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: shifted_id.clone(),
@@ -849,7 +861,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
                 start_line: 1,

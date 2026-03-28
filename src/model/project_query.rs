@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use crate::model::context_query::SemanticContextQuery;
 use crate::parser::clang_types;
@@ -9,29 +9,6 @@ use crate::parser::semantic_region::SemanticRegion;
 use crate::graph::snapshot::ProjectGraphSnapshot;
 use crate::graph::types::ProjectSignal;
 use crate::graph::symbol_id::SymbolId;
-
-const ALL_SYMBOL_KINDS: [i32; 20] = [
-    clang_sys::CXCursor_FunctionDecl,
-    clang_sys::CXCursor_FunctionTemplate,
-    clang_sys::CXCursor_CXXMethod,
-    clang_sys::CXCursor_Constructor,
-    clang_sys::CXCursor_Destructor,
-    clang_sys::CXCursor_VarDecl,
-    clang_sys::CXCursor_FieldDecl,
-    clang_sys::CXCursor_ParmDecl,
-    clang_sys::CXCursor_Namespace,
-    clang_sys::CXCursor_MacroDefinition,
-    clang_sys::CXCursor_StructDecl,
-    clang_sys::CXCursor_ClassDecl,
-    clang_sys::CXCursor_UnionDecl,
-    clang_sys::CXCursor_EnumDecl,
-    clang_sys::CXCursor_TypedefDecl,
-    clang_sys::CXCursor_TypeAliasDecl,
-    clang_sys::CXCursor_ConversionFunction,
-    clang_sys::CXCursor_UsingDeclaration,
-    clang_sys::CXCursor_EnumConstantDecl,
-    clang_sys::CXCursor_FriendDecl,
-];
 
 pub trait SignalKey {
     fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId>;
@@ -51,7 +28,7 @@ impl SignalKey for &SemanticDeclaration {
 
 impl SignalKey for SourceLocation {
     fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
-        match query.symbol_at(self.line, self.column, &ALL_SYMBOL_KINDS) {
+        match query.symbol_at(self.line, self.column, &[]) {
             Some(decl) => ProjectContextQuery::symbol_ids_for_declaration(decl),
             None => Vec::new(),
         }
@@ -180,21 +157,21 @@ impl<'a> ProjectContextQuery<'a> {
         {
             ids.push(SymbolId::new(format!(
                 "scoped|{}|{}|{}",
-                clang_types::entity_kind_label(declaration.kind, true),
+                clang_types::cursor_kind_spelling(declaration.kind),
                 Self::sanitize_component(scope_usr),
                 Self::sanitize_component(declaration.name.as_str())
             )));
         }
         ids.push(SymbolId::new(format!(
             "bucket|{}|{}",
-            clang_types::entity_kind_label(declaration.kind, true),
+            clang_types::cursor_kind_spelling(declaration.kind),
             Self::sanitize_component(declaration.name.as_str())
         )));
         ids.extend(Self::symbol_ids_for_stable_id(
             declaration.stable_id.as_str(),
         ));
         let mut deduped = Vec::<SymbolId>::new();
-        let mut seen = HashSet::<String>::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         for symbol_id in ids {
             let key = symbol_id.to_string();
             if seen.insert(key) {
@@ -235,6 +212,8 @@ mod tests {
                 column: 5,
                 usr: Some("c:@S@Demo@FI@m_value".to_string()),
                 scope_usr: Some("c:@S@Demo".to_string()),
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             ..SemanticFileContext::default()
         };

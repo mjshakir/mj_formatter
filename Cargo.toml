@@ -11,7 +11,6 @@ anyhow = "1.0"
 smallvec = { version = "1.15", features = ["serde"] }
 arc-swap = "1.9"
 postcard = { version = "1.1", features = ["alloc"] }
-clang = { version = "2.0", features = ["runtime", "clang_10_0"] }
 clang-sys = { version = "1.8", features = ["runtime", "clang_10_0"] }
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5"
@@ -27,11 +26,12 @@ reed-solomon-erasure = "6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 shell-words = "1.1"
-toml = "1.0"
+toml = "1.1"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
 walkdir = "2.5"
 tree-sitter = "0.26"
 tree-sitter-c = "0.24"

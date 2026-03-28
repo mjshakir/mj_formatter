@@ -196,7 +196,7 @@ impl ProposerController {
     }
 
     fn text_fingerprint(value: &str) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         value.hash(&mut hasher);
         hasher.finish()
     }
@@ -233,14 +233,12 @@ mod tests {
     use crate::parser::file_context::{
         SemanticFileContext, SemanticScope, SemanticScopeKind,
     };
-    use crate::parser::node_kind;
-
     #[test]
     fn marks_protected_zone() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
-                node_kind: node_kind::PREPROC_IF,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 40,
                 start_line: 2,

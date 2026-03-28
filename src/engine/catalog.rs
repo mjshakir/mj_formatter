@@ -396,6 +396,14 @@ pub fn policy_catalog() -> &'static PolicyCatalog {
     POLICY_CATALOG.get_or_init(PolicyCatalog::build)
 }
 
+pub struct PolicyCapabilityMatrix;
+
+impl PolicyCapabilityMatrix {
+    pub fn for_policy(policy_name: &str) -> PolicyCapabilities {
+        policy_catalog().capabilities(policy_name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::catalog::{
@@ -501,14 +509,4 @@ mod tests {
         assert_eq!(unknown.risk_tier, CatalogConvergenceRiskTier::Balanced);
     }
 
-}
-
-// ── Capability matrix (thin dispatch helper) ──────────────────────────────────
-
-pub struct PolicyCapabilityMatrix;
-
-impl PolicyCapabilityMatrix {
-    pub fn for_policy(policy_name: &str) -> PolicyCapabilities {
-        policy_catalog().capabilities(policy_name)
-    }
 }

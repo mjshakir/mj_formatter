@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::OnceLock;
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
@@ -45,13 +45,11 @@ impl Default for ClusterAdaptiveControls {
     }
 }
 
-pub type PolicyClusterTelemetryEntry = PolicyClusterLearningStats;
-
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PolicyClusterSnapshotEntry {
     pub policy: PolicyName,
     pub cluster: u64,
-    pub stats: PolicyClusterTelemetryEntry,
+    pub stats: PolicyClusterLearningStats,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,15 +73,13 @@ impl Default for ClusterAdaptiveState {
 
 #[derive(Clone, Default)]
 struct ClusterCombinedEntry {
-    stats: PolicyClusterTelemetryEntry,
+    stats: PolicyClusterLearningStats,
     adaptive: ClusterAdaptiveState,
 }
 
-type ClusterKey = (String, u64);
-
 struct PolicyClusterTelemetryState {
-    entries: DashMap<ClusterKey, ClusterCombinedEntry>,
-    read_model: ArcSwap<Option<HashMap<ClusterKey, ClusterCombinedEntry>>>,
+    entries: DashMap<(String, u64), ClusterCombinedEntry>,
+    read_model: ArcSwapOption<FxHashMap<(String, u64), ClusterCombinedEntry>>,
 }
 
 pub struct PolicyClusterTelemetry;
@@ -99,18 +95,18 @@ impl PolicyClusterTelemetry {
     pub fn reset() {
         let s = Self::global();
         s.entries.clear();
-        s.read_model.store(std::sync::Arc::new(None));
+        s.read_model.store(None);
     }
 
     pub fn begin_read_model() -> ClusterGuard {
         let s = Self::global();
         let model = Self::build_read_model_snapshot(&s.entries);
-        s.read_model.store(std::sync::Arc::new(Some(model)));
+        s.read_model.store(Some(std::sync::Arc::new(model)));
         ClusterGuard
     }
 
     pub fn clear_read_model() {
-        Self::global().read_model.store(std::sync::Arc::new(None));
+        Self::global().read_model.store(None);
     }
 
     pub fn record_decision(policy: &str, cluster: u64, outcome: PolicyDecisionOutcome) {
@@ -136,7 +132,7 @@ impl PolicyClusterTelemetry {
             return;
         }
         let s = Self::global();
-        let mut seen = HashSet::<ClusterKey>::new();
+        let mut seen: FxHashSet<(String, u64)> = FxHashSet::default();
         for trace in traces {
             let key = (trace.policy.to_string(), trace.context_cluster);
             if !seen.insert(key.clone()) {
@@ -157,7 +153,7 @@ impl PolicyClusterTelemetry {
         let s = Self::global();
         let key = (policy.to_string(), cluster);
         let model = s.read_model.load();
-        if let Some(model) = model.as_ref() {
+        if let Some(model) = model.as_deref() {
             let Some(combined) = model.get(&key) else {
                 return ClusterAdaptiveControls::default();
             };
@@ -223,7 +219,7 @@ impl PolicyClusterTelemetry {
     }
 
     #[cfg(test)]
-    pub fn snapshot_entry(policy: &str, cluster: u64) -> Option<PolicyClusterTelemetryEntry> {
+    pub fn snapshot_entry(policy: &str, cluster: u64) -> Option<PolicyClusterLearningStats> {
         let s = Self::global();
         let key = (policy.to_string(), cluster);
         s.entries.get(&key).map(|combined| {
@@ -237,13 +233,13 @@ impl PolicyClusterTelemetry {
         static STATE: OnceLock<PolicyClusterTelemetryState> = OnceLock::new();
         STATE.get_or_init(|| PolicyClusterTelemetryState {
             entries: DashMap::new(),
-            read_model: ArcSwap::new(std::sync::Arc::new(None)),
+            read_model: ArcSwapOption::empty(),
         })
     }
 
     fn build_read_model_snapshot(
-        entries: &DashMap<ClusterKey, ClusterCombinedEntry>,
-    ) -> HashMap<ClusterKey, ClusterCombinedEntry> {
+        entries: &DashMap<(String, u64), ClusterCombinedEntry>,
+    ) -> FxHashMap<(String, u64), ClusterCombinedEntry> {
         entries
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))

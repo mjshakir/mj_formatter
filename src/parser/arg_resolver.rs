@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -111,7 +111,7 @@ impl ClangArgumentResolver {
     pub(crate) fn parse_system_include_dirs(stderr: &str) -> Vec<String> {
         let mut in_search_list = false;
         let mut args = Vec::<String>::new();
-        let mut seen = HashSet::<String>::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
 
         for line in stderr.lines() {
             let trimmed = line.trim();
@@ -178,18 +178,15 @@ impl ClangArgumentResolver {
             .parent()
             .map(|value| value.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        if let Some(cached) = self.inferred_include_cache.get(&key) {
-            return cached.as_ref().clone();
-        }
-        let computed = Self::inferred_include_args(path);
-        self.inferred_include_cache
-            .insert(key, Arc::new(computed.clone()));
-        computed
+        let cached = self.inferred_include_cache.get_with(key, || {
+            Arc::new(Self::inferred_include_args(path))
+        });
+        cached.as_ref().clone()
     }
 
     fn inferred_include_args(path: &Path) -> Vec<String> {
         let mut args = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         let mut push = |candidate: &Path| {
             if !candidate.is_dir() {
                 return;
@@ -229,12 +226,13 @@ impl ClangArgumentResolver {
         F: FnOnce(&str) -> ClangProbeOutputs,
     {
         let cache = probe_cache();
-        if let Some(cached) = cache.get(clang_binary) {
-            return cached.clone();
+        match cache.entry(clang_binary.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(e) => e.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                let computed = probe(clang_binary);
+                e.insert(computed).clone()
+            }
         }
-        let computed = probe(clang_binary);
-        cache.insert(clang_binary.to_string(), computed.clone());
-        computed
     }
 
     fn detect_clang_resource_dir(clang_binary: &str) -> Option<String> {

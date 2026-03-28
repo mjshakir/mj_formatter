@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -989,8 +991,8 @@ impl App {
         ))
     }
 
-    fn path_counts<T: HasPath>(items: &[T]) -> HashMap<String, usize> {
-        let mut counts = HashMap::<String, usize>::new();
+    fn path_counts<T: HasPath>(items: &[T]) -> FxHashMap<String, usize> {
+        let mut counts = FxHashMap::default();
         for item in items {
             let key = Self::path_identity(item.as_path());
             *counts.entry(key).or_insert(0) += 1;
@@ -1003,14 +1005,14 @@ impl App {
         Self::fingerprint_from_counts(&counts)
     }
 
-    fn fingerprint_from_counts(counts: &HashMap<String, usize>) -> String {
+    fn fingerprint_from_counts(counts: &FxHashMap<String, usize>) -> String {
         let mut entries = counts
             .iter()
             .map(|(path, count)| format!("{path}:{count}"))
             .collect::<Vec<_>>();
         entries.sort();
         let payload = entries.join("|");
-        let checksum = crc32fast::hash(payload.as_bytes());
+        let checksum = crate::files::crc::hash(payload.as_bytes());
         format!("{checksum:08x}-{:x}", payload.len())
     }
 
@@ -1018,7 +1020,7 @@ impl App {
         results: Vec<FileResult>,
         expected_paths: &[PathBuf],
     ) -> Result<Vec<FileResult>> {
-        let mut expected_counts = HashMap::<String, usize>::new();
+        let mut expected_counts = FxHashMap::default();
         for path in expected_paths {
             let key = Self::path_identity(path.as_path());
             *expected_counts.entry(key).or_insert(0) += 1;
@@ -1029,7 +1031,7 @@ impl App {
             keyed.push((key, result));
         }
 
-        let mut actual_counts = HashMap::<String, usize>::new();
+        let mut actual_counts = FxHashMap::default();
         for (key, _) in &keyed {
             *actual_counts.entry(key.clone()).or_insert(0) += 1;
         }
@@ -1340,7 +1342,7 @@ impl App {
             }
         }
         let payload = lines.join("\n");
-        let checksum = crc32fast::hash(payload.as_bytes());
+        let checksum = crate::files::crc::hash(payload.as_bytes());
         format!("{checksum:08x}-{:x}", payload.len())
     }
 

@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
 use crate::engine::semantic_contract::{
@@ -161,7 +163,7 @@ impl PostEditChecker {
         before: &[ClangDiagnosticEntry],
         after: &[ClangDiagnosticEntry],
     ) -> BTreeSet<usize> {
-        let mut before_counts = std::collections::HashMap::<(usize, usize, u8), usize>::new();
+        let mut before_counts = FxHashMap::default();
         for entry in before {
             let key = (
                 entry.line,
@@ -170,7 +172,7 @@ impl PostEditChecker {
             );
             *before_counts.entry(key).or_insert(0) += 1;
         }
-        let mut after_counts = std::collections::HashMap::<(usize, usize, u8), usize>::new();
+        let mut after_counts = FxHashMap::default();
         for entry in after {
             let key = (
                 entry.line,
@@ -683,17 +685,23 @@ mod tests {
             line: 4,
             column: 1,
             severity: ClangDiagnosticSeverity::Warning,
+            warning_option: String::new(),
+            fix_its: Vec::new(),
         }];
         let after = vec![
             ClangDiagnosticEntry {
                 line: 4,
                 column: 1,
                 severity: ClangDiagnosticSeverity::Warning,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             },
             ClangDiagnosticEntry {
                 line: 8,
                 column: 1,
                 severity: ClangDiagnosticSeverity::Error,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             },
         ];
         let delta = PostEditChecker::diagnostic_delta_lines(before.as_slice(), after.as_slice());

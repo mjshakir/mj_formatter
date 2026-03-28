@@ -33,6 +33,7 @@ impl FileProcessor {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(file = %path.display()))]
     pub fn process(&self, path: PathBuf) -> ProcessedFileOutcome {
         let total_started = Instant::now();
         let original = match self.file_io.read_text(&path) {

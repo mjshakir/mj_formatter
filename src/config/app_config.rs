@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
 use crate::config::enums::BackupMode;
@@ -31,7 +31,7 @@ pub struct AppConfig {
     pub cache_l1_size: usize,
     pub tracker_path: PathBuf,
     pub style_name: String,
-    pub policy_settings: HashMap<String, PolicyConfig>,
+    pub policy_settings: FxHashMap<String, PolicyConfig>,
     pub policy_order: Vec<String>,
     pub cpp_standard: String,
     pub clang_binary: String,

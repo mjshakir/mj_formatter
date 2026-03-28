@@ -27,16 +27,19 @@ impl TsQueryCache {
 
     pub fn get_or_compile(&self, pattern: &str) -> Result<Arc<Query>, QueryError> {
         let key = Self::hash_pattern(pattern);
-        if let Some(query) = self.cache.get(&key) {
-            return Ok(Arc::clone(query.value()));
+        let entry = self.cache.entry(key);
+        match entry {
+            dashmap::mapref::entry::Entry::Occupied(e) => Ok(Arc::clone(e.get())),
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                let query = Arc::new(Query::new(&self.language, pattern)?);
+                let inserted = e.insert(query);
+                Ok(Arc::clone(inserted.value()))
+            }
         }
-        let query = Arc::new(Query::new(&self.language, pattern)?);
-        self.cache.insert(key, Arc::clone(&query));
-        Ok(query)
     }
 
     fn hash_pattern(pattern: &str) -> u64 {
-        let mut hasher = std::hash::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         pattern.hash(&mut hasher);
         hasher.finish()
     }

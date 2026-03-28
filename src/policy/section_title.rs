@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -11,11 +11,11 @@ use crate::policy::text_utils::join_lines_cow;
 use crate::parser::text_scan;
 
 pub struct SectionTitleNormalizerPolicy {
-    mapping: HashMap<String, String>,
+    mapping: FxHashMap<String, String>,
 }
 
 impl SectionTitleNormalizerPolicy {
-    pub fn new(mapping: HashMap<String, String>) -> Self {
+    pub fn new(mapping: FxHashMap<String, String>) -> Self {
         Self { mapping }
     }
 }

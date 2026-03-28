@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -216,10 +218,10 @@ impl App {
         baseline: &[PolicyClusterSnapshotEntry],
         current: &[PolicyClusterSnapshotEntry],
     ) -> Vec<PolicyClusterSnapshotEntry> {
-        let mut baseline_map = HashMap::<
+        let mut baseline_map: FxHashMap<
             (PolicyName, u64),
             crate::graph::state::PolicyClusterLearningStats,
-        >::new();
+        > = FxHashMap::default();
         for entry in baseline {
             baseline_map.insert((entry.policy.clone(), entry.cluster), entry.stats.clone());
         }
@@ -283,10 +285,10 @@ impl App {
         baseline: &RetryLearningSnapshot,
         current: &RetryLearningSnapshot,
     ) -> RetryLearningSnapshot {
-        let mut baseline_strategy = HashMap::<
+        let mut baseline_strategy: FxHashMap<
             (crate::model::retry_strategy::RetryStrategyName, String),
             crate::graph::state::RetryStats,
-        >::new();
+        > = FxHashMap::default();
         for entry in &baseline.strategy_outcomes {
             baseline_strategy.insert(
                 (entry.strategy.clone(), entry.failure_context.clone()),
@@ -322,7 +324,7 @@ impl App {
                 .then(left.failure_context.cmp(&right.failure_context))
         });
 
-        let mut baseline_pairs = HashMap::<(PolicyName, PolicyName), u64>::new();
+        let mut baseline_pairs: FxHashMap<(PolicyName, PolicyName), u64> = FxHashMap::default();
         for entry in &baseline.culprit_pairs {
             baseline_pairs.insert(
                 (entry.culprit_policy.clone(), entry.peer_policy.clone()),
@@ -458,7 +460,7 @@ impl App {
             let mut seen = targets
                 .iter()
                 .map(|t| Self::path_identity(t.path.as_path()))
-                .collect::<HashSet<_>>();
+                .collect::<FxHashSet<_>>();
             let mut added = 0usize;
             for neighbor in neighbors {
                 if !neighbor.exists() {
@@ -723,7 +725,7 @@ mod tests {
     fn cap_scales_sublinearly() {
         // Cold start (obs=0): sqrt(31)≈6 * 1.5 = 9
         let cap = eager_parse_cap(31, 0);
-        assert!(cap >= 4 && cap <= 12, "cold cap for 31: {cap}");
+        assert!((4..=12).contains(&cap), "cold cap for 31: {cap}");
         // Warm start (obs=20): sqrt(31)≈6 * ~0.5 = 3 → clamped to 4
         let cap_warm = eager_parse_cap(31, 20);
         assert!(cap_warm >= 4, "warm cap for 31: {cap_warm}");

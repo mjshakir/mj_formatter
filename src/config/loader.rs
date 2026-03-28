@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -790,8 +790,8 @@ impl ConfigLoader {
         }
     }
 
-    fn load_policy_settings(&self, style_root: &Path) -> Result<HashMap<String, PolicyConfig>> {
-        let mut result: HashMap<String, PolicyConfig> = HashMap::new();
+    fn load_policy_settings(&self, style_root: &Path) -> Result<FxHashMap<String, PolicyConfig>> {
+        let mut result: FxHashMap<String, PolicyConfig> = FxHashMap::default();
         let format_dir = style_root.join("format");
         if !format_dir.exists() {
             return Err(anyhow!(
@@ -835,10 +835,10 @@ impl ConfigLoader {
     fn load_style_sets(
         &self,
         style_root: &Path,
-    ) -> Result<(HashSet<String>, HashSet<String>)> {
+    ) -> Result<(FxHashSet<String>, FxHashSet<String>)> {
         let enable_path = style_root.join("enable").join("enable.toml");
         if !enable_path.exists() {
-            return Ok((HashSet::new(), HashSet::new()));
+            return Ok((FxHashSet::default(), FxHashSet::default()));
         }
         let content = fs::read_to_string(&enable_path)
             .with_context(|| format!("failed to read enable file {}", enable_path.display()))?;
@@ -878,7 +878,7 @@ impl ConfigLoader {
         let content = fs::read_to_string(compdb_path).ok()?;
         let parsed = serde_json::from_str::<serde_json::Value>(&content).ok()?;
         let entries = parsed.as_array()?;
-        let mut counts = HashMap::<String, usize>::new();
+        let mut counts: FxHashMap<String, usize> = FxHashMap::default();
         for entry in entries {
             let args = if let Some(arguments) =
                 entry.get("arguments").and_then(|v| v.as_array())

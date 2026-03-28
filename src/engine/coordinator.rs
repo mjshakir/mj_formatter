@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+
+use rustc_hash::FxHashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -321,7 +323,7 @@ impl FormatterEngine {
         }
 
         // Pass 2: block culprit policies and skip policies that produced zero edits in Pass 1
-        let zero_edit_policies: std::collections::HashSet<String> = pass_result.policy_traces.iter()
+        let zero_edit_policies: FxHashSet<String> = pass_result.policy_traces.iter()
             .filter(|t| t.candidate_line_count == 0 && !culprit_policies.contains(t.policy.as_str()))
             .map(|t| t.policy.as_str().to_string())
             .collect();
@@ -635,11 +637,11 @@ impl FormatterEngine {
         (local, check.culprit_lines.len())
     }
 
-    fn policies_touching_lines(edits: &[Edit], lines: &BTreeSet<usize>) -> HashSet<String> {
+    fn policies_touching_lines(edits: &[Edit], lines: &BTreeSet<usize>) -> FxHashSet<String> {
         if edits.is_empty() || lines.is_empty() {
-            return HashSet::new();
+            return FxHashSet::default();
         }
-        let mut policies = HashSet::new();
+        let mut policies = FxHashSet::default();
         for edit in edits {
             if edit.line == 0 || edit.policy.is_empty() || !lines.contains(&edit.line) {
                 continue;
@@ -653,7 +655,7 @@ impl FormatterEngine {
         edits: &[Edit],
         check: &PostEditCheckResult,
         before_snapshot: Option<&SemanticContractSnapshot>,
-    ) -> HashSet<String> {
+    ) -> FxHashSet<String> {
         let mut policies = Self::policies_touching_lines(edits, &check.culprit_lines);
         let needs_backtrack = check
             .failure_kinds
@@ -751,7 +753,7 @@ impl FormatterEngine {
     }
 
     fn dedup_warning_slices(sources: &[&[String]]) -> Vec<String> {
-        let mut seen = HashSet::<&str>::new();
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
         let mut merged = Vec::new();
         for source in sources {
             for warning in *source {

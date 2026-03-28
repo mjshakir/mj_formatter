@@ -344,7 +344,7 @@ impl<'a> SemanticContextQuery<'a> {
         }
 
         let total = lines.len().max(1);
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         total.hash(&mut hasher);
         Self::ratio_bucket(macro_lines, total, 8).hash(&mut hasher);
         Self::ratio_bucket(diagnostic_lines, total, 8).hash(&mut hasher);
@@ -422,8 +422,6 @@ mod tests {
         SemanticScope, SemanticScopeKind,
     };
     use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
-    use crate::parser::node_kind;
-
     #[test]
     fn queries_resolve_stable() {
         let semantic = SemanticFileContext {
@@ -436,6 +434,8 @@ mod tests {
                 column: 5,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![
                 SemanticReference {
@@ -459,7 +459,7 @@ mod tests {
             ],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 60,
                 start_line: 1,
@@ -489,11 +489,15 @@ mod tests {
                     line: 8,
                     column: 2,
                     severity: ClangDiagnosticSeverity::Error,
+                    warning_option: String::new(),
+                    fix_its: Vec::new(),
                 },
                 ClangDiagnosticEntry {
                     line: 9,
                     column: 2,
                     severity: ClangDiagnosticSeverity::Error,
+                    warning_option: String::new(),
+                    fix_its: Vec::new(),
                 },
             ],
             declarations: vec![SemanticDeclaration {
@@ -505,10 +509,12 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@broken#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
-                node_kind: "preproc_if",
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 20,
                 start_line: 1,
@@ -538,6 +544,8 @@ mod tests {
                 line: 9,
                 column: 2,
                 severity: ClangDiagnosticSeverity::Error,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
             declarations: vec![SemanticDeclaration {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -548,6 +556,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -561,7 +571,7 @@ mod tests {
             scopes: vec![
                 SemanticScope {
                     kind: SemanticScopeKind::Preprocessor,
-                    node_kind: "preproc_if",
+                    node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                     start_offset: 0,
                     end_offset: 8,
                     start_line: 1,
@@ -569,7 +579,7 @@ mod tests {
                 },
                 SemanticScope {
                     kind: SemanticScopeKind::Function,
-                    node_kind: node_kind::FUNCTION_DEFINITION,
+                    node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                     start_offset: 9,
                     end_offset: 80,
                     start_line: 2,
@@ -612,6 +622,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -624,7 +636,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 9,
                 end_offset: 80,
                 start_line: 2,

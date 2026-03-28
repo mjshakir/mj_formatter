@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -44,7 +46,7 @@ struct CachedFileResult {
 struct PersistedCheckResultCache {
     version: u32,
     fingerprint: String,
-    entries: std::collections::HashMap<String, CachedFileResult>,
+    entries: FxHashMap<String, CachedFileResult>,
 }
 
 pub struct CheckResultCache {
@@ -97,7 +99,7 @@ impl CheckResultCache {
     }
 
     pub fn content_hash(text: &str) -> String {
-        let crc = crc32fast::hash(text.as_bytes());
+        let crc = crate::files::crc::hash(text.as_bytes());
         format!("{crc:08x}-{:x}", text.len())
     }
 
@@ -137,7 +139,7 @@ impl CheckResultCache {
             return Ok(());
         }
 
-        let entries: std::collections::HashMap<String, CachedFileResult> = self
+        let entries: FxHashMap<String, CachedFileResult> = self
             .disk_entries
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().as_ref().clone()))
@@ -169,16 +171,16 @@ impl CheckResultCache {
             .to_string()
     }
 
-    fn load_entries(path: &Path, fingerprint: &str) -> std::collections::HashMap<String, CachedFileResult> {
+    fn load_entries(path: &Path, fingerprint: &str) -> FxHashMap<String, CachedFileResult> {
         if !path.exists() {
-            return std::collections::HashMap::new();
+            return FxHashMap::default();
         }
         let Ok(persisted) = StateCodec::read_decode_binary::<PersistedCheckResultCache>(path)
         else {
-            return std::collections::HashMap::new();
+            return FxHashMap::default();
         };
         if persisted.version != CACHE_VERSION || persisted.fingerprint != fingerprint {
-            return std::collections::HashMap::new();
+            return FxHashMap::default();
         }
         persisted.entries
     }

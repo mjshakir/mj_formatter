@@ -40,11 +40,11 @@ pub struct CertaintyFilterState {
 // Full 5x5 Kalman update with Joseph form for numerical stability
 fn kalman_update_full(
     prior_est: [f64; NUM_DIMS],
-    prior_cov: Mat5,
+    prior_cov: [[f64; N]; N],
     measurement: [f64; NUM_DIMS],
-    q: &Mat5,
-    r: &Mat5,
-) -> ([f64; NUM_DIMS], Mat5) {
+    q: &[[f64; N]; N],
+    r: &[[f64; N]; N],
+) -> ([f64; NUM_DIMS], [[f64; N]; N]) {
     // Predict: P_pred = P + Q (F=I)
     let p_pred = mat5_add(&prior_cov, q);
 
@@ -74,7 +74,7 @@ fn kalman_update_full(
     (est_out, cov_out)
 }
 
-fn clamp_diagonal(m: &mut Mat5, floor: &[f64; NUM_DIMS], ceil: &[f64; NUM_DIMS]) {
+fn clamp_diagonal(m: &mut [[f64; N]; N], floor: &[f64; NUM_DIMS], ceil: &[f64; NUM_DIMS]) {
     for d in 0..NUM_DIMS {
         m[d][d] = m[d][d].clamp(floor[d], ceil[d]);
     }

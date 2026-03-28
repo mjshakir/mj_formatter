@@ -1,4 +1,6 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
+
+use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -58,12 +60,12 @@ impl<'de> Deserialize<'de> for RetryScopeStage {
 
 #[derive(Clone, Debug, Default)]
 pub struct PolicyRunOptions {
-    pub blocked_policies: HashSet<String>,
+    pub blocked_policies: FxHashSet<String>,
     pub project_graph_snapshot: Option<Arc<ProjectGraphSnapshot>>,
     pub allowed_edit_lines: Option<BTreeSet<usize>>,
     pub retry_scope_stage: RetryScopeStage,
     pub previous_contract_failures: BTreeSet<SemanticInvariantClause>,
-    pub skip_zero_edit_policies: Option<HashSet<String>>,
+    pub skip_zero_edit_policies: Option<FxHashSet<String>>,
     pub observation_only: bool,
 }
 

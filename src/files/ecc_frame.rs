@@ -41,7 +41,7 @@ impl EccLayout {
 pub fn write_frame(writer: &mut impl Write, payload: &[u8]) -> Result<()> {
     let layout = EccLayout::for_payload(payload.len())?;
     let payload_len = u32::try_from(payload.len()).context("payload size exceeds u32")?;
-    let payload_crc = crc32fast::hash(payload);
+    let payload_crc = super::crc::hash(payload);
 
     let mut padded = vec![0u8; layout.data_shards * layout.shard_size];
     padded[..payload.len()].copy_from_slice(payload);
@@ -61,7 +61,7 @@ pub fn write_frame(writer: &mut impl Write, payload: &[u8]) -> Result<()> {
 
     let shard_crcs: Vec<u32> = shards
         .iter()
-        .map(|shard| crc32fast::hash(shard.as_slice()))
+        .map(|shard| super::crc::hash(shard.as_slice()))
         .collect();
 
     writer.write_all(FRAME_MAGIC)?;
@@ -131,7 +131,7 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     for expected_crc in &expected_crcs {
         let mut shard = vec![0u8; shard_size];
         reader.read_exact(&mut shard)?;
-        let actual_crc = crc32fast::hash(shard.as_slice());
+        let actual_crc = super::crc::hash(shard.as_slice());
         if actual_crc == *expected_crc {
             shards.push(Some(shard));
         } else {
@@ -168,7 +168,7 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     }
     payload.truncate(payload_len);
 
-    let actual_crc = crc32fast::hash(payload.as_slice());
+    let actual_crc = super::crc::hash(payload.as_slice());
     if actual_crc != payload_crc {
         anyhow::bail!(
             "payload checksum mismatch: expected {:08x}, got {:08x}",

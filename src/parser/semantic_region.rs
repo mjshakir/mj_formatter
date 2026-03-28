@@ -98,7 +98,7 @@ impl SemanticRegion {
         stable_id: Option<&str>,
         has_diagnostic_error: bool,
     ) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         canonical_path.hash(&mut hasher);
         kind.hash(&mut hasher);
         start_line.hash(&mut hasher);

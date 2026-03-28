@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::model::edit::Edit;
 use crate::model::violation::Violation;
@@ -6,9 +6,9 @@ use crate::model::violation::Violation;
 pub struct PolicyConflictDetector {
     enabled: bool,
     touch_threshold: usize,
-    line_history: HashMap<usize, Vec<Edit>>,
-    reported_reverts: HashSet<(usize, String, String)>,
-    reported_touches: HashSet<(usize, String)>,
+    line_history: FxHashMap<usize, Vec<Edit>>,
+    reported_reverts: FxHashSet<(usize, String, String)>,
+    reported_touches: FxHashSet<(usize, String)>,
 }
 
 impl PolicyConflictDetector {
@@ -16,9 +16,9 @@ impl PolicyConflictDetector {
         Self {
             enabled,
             touch_threshold: touch_threshold.max(2),
-            line_history: HashMap::new(),
-            reported_reverts: HashSet::new(),
-            reported_touches: HashSet::new(),
+            line_history: FxHashMap::default(),
+            reported_reverts: FxHashSet::default(),
+            reported_touches: FxHashSet::default(),
         }
     }
 
