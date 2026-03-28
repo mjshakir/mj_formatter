@@ -195,7 +195,6 @@ impl PolicyFactory {
                 let semantic = settings.bool_value("use_semantic_rename").unwrap_or(true);
                 let semantic_strict = settings
                     .bool_value("semantic_strict")
-                    .or_else(|| settings.bool_value("strict_local_scope"))
                     .unwrap_or(true);
                 let standard = settings.string_value("standard").unwrap_or_else(|| "mj".to_string());
                 let std_table = settings.table_value("standards").and_then(|t| t.get(&standard).and_then(|v| v.as_table()));
@@ -234,13 +233,9 @@ impl PolicyFactory {
                 let exclude_class_namespace = settings
                     .bool_value("exclude_class_namespace")
                     .unwrap_or(true);
-                let prefer_clang = settings.bool_value("prefer_clang").unwrap_or(true);
-                let use_tree_sitter = settings.bool_value("use_tree_sitter").unwrap_or(true);
                 Box::new(SnakeCasePolicy::new(
                     apply_target,
                     exclude_class_namespace,
-                    prefer_clang,
-                    use_tree_sitter,
                 ))
             }
             PolicyId::NumericLiteralSuffix => {

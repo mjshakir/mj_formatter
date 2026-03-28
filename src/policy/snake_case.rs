@@ -42,11 +42,7 @@ impl SnakeCasePolicy {
     pub fn new(
         apply_target: SnakeCaseApplyTarget,
         exclude_class_namespace: bool,
-        prefer_clang: bool,
-        use_tree_sitter: bool,
     ) -> Self {
-        let _ = prefer_clang;
-        let _ = use_tree_sitter;
         Self {
             apply_target,
             exclude_class_namespace,
@@ -282,7 +278,7 @@ mod tests {
 
     #[test]
     fn reports_non_snake() {
-        let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false, true, true);
+        let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false);
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n".to_string();
         let tree = parse_cpp(text.as_str());
         let path = PathBuf::from("sample.cpp");
@@ -296,7 +292,7 @@ mod tests {
 
     #[test]
     fn ignores_uppercase_types() {
-        let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Variables, true, true, true);
+        let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Variables, true);
         let text = "const MyType Value = {};\n".to_string();
         let tree = parse_cpp(text.as_str());
         let path = PathBuf::from("sample.cpp");
@@ -310,7 +306,7 @@ mod tests {
 
     #[test]
     fn clang_filters_tree() {
-        let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false, true, true);
+        let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false);
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n".to_string();
         let tree = parse_cpp(text.as_str());
         let _clang_parse_result = ClangParseResult::new(
