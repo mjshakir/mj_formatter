@@ -1,32 +1,8 @@
 [policy]
 name = "include_order"
-enabled = true
-type = "python"
-touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whitespace_only
-
-# Order for header files
 order_header = ["standard", "third_party", "project", "local"]
-# Order for source files
 order_source = ["main", "standard", "third_party", "project", "local"]
-
-# Explicit classification lists (required; can be empty)
-standard_headers = []
-standard_prefixes = []
-project_headers = []
-project_prefixes = []
-
-# Main header extension candidates
 main_header_extensions = [".hpp", ".h", ".hh", ".hxx"]
-
-# Clang-path heuristics for standard library detection
-standard_header_path_markers = ["/include/c++/", "/c++/v1/", "/include/bits/"]
-clang_builtin_include_prefix = "/lib/clang/"
-include_path_segment = "/include/"
-
-# Separator length (matches comment style)
-separator_length = 64
-# when false, rewrites only #include directives (preprocessor-safe for preprocessor_only contract)
-emit_group_comments = false
 
 [policy.group_titles]
 main = "Main header"
@@ -36,7 +12,6 @@ project = "Project headers"
 local = "User Defined Headers"
 
 [policy.third_party_labels]
-# fmt = "fmt"
 
 [policy.convergence]
 domain = "includes.structure"

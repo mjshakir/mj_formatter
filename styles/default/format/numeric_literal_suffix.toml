@@ -1,8 +1,5 @@
 [policy]
 name = "numeric_literal_suffix"
-enabled = true
-type = "rust"
-touch_contract = "code_only"
 enforcement = "soft"
 
 [policy.convergence]

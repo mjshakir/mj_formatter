@@ -1,8 +1,2 @@
 [policy]
 name = "lua_macro_spacing"
-type = "lua"
-enabled = true
-touch_contract = "preprocessor_only" # any | code_only | preprocessor_only | whitespace_only
-script = "styles/default/lua/macro_spacing.lua"
-function = "apply"
-sandbox = true

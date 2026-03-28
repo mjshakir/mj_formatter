@@ -1,14 +1,2 @@
 [policy]
 name = "snake_case"
-enabled = true
-type = "python"
-touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
-
-# apply to: variables | functions | both
-apply_to = "both"
-# exclude class/namespace names
-exclude_class_namespace = true
-prefer_clang = true
-use_tree_sitter = true
-parser_consensus_mode = "strict" # off | advisory | strict | adaptive
-enforcement = "hard" # must | hard | soft | advisory

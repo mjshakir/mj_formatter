@@ -1,15 +1,5 @@
 [policy]
 name = "class_layout"
-enabled = true
-type = "python"
-touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
-access_order = ["public", "protected", "private"]
-section_comments = true
-section_comment_format = "// ── {Access} Implementation ──"
-# allow constexpr-first blocks before access sections
-allow_constexpr_first = true
-
-# Required explicit paths/extensions (fail-fast if missing)
 source_extensions = [".cpp", ".cc", ".cxx"]
 header_extensions = [".hpp", ".h", ".hh", ".hxx"]
 header_search_roots = ["include"]
