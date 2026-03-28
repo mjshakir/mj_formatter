@@ -4,8 +4,8 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 
@@ -22,28 +22,40 @@ impl FunctionVoidParamsPolicy {
         }
     }
 
-    fn is_empty_parameter_list(params_text: &str) -> bool {
-        let trimmed = params_text.trim();
-        if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
-            return false;
+    fn is_empty_parameter_list(param_node: Node<'_>, source: &[u8]) -> bool {
+        let named = param_node.named_child_count();
+        if named == 0 {
+            return true;
         }
-        let inner = trimmed[1..trimmed.len().saturating_sub(1)].trim();
-        inner.is_empty() || inner == "void"
+        if named == 1 {
+            if let Some(child) = param_node.named_child(0) {
+                if child.kind_id() == ts_cpp_symbols::sym_parameter_declaration {
+                    if let Some(type_node) = child.child_by_field_id(ts_cpp_symbols::field_type) {
+                        return type_node.utf8_text(source).ok() == Some("void")
+                            && child.child_by_field_id(ts_cpp_symbols::field_declarator).is_none();
+                    }
+                }
+            }
+        }
+        false
     }
 
-    fn is_operator_declarator(node: Node<'_>, text: &str, param_start: usize) -> bool {
-        let head = text
-            .get(node.start_byte()..param_start)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        head.contains("operator")
+    fn is_operator_declarator(node: Node<'_>) -> bool {
+        ts_traversal::first_descendant(
+            node,
+            &[ts_cpp_symbols::sym_operator_name],
+            &[ts_cpp_symbols::sym_parameter_list],
+        )
+        .is_some()
     }
 
     fn collect_function_declarators<'a>(
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<Node<'a>> {
-        ts_traversal::query_or_traverse_collect(root, "(function_declarator) @decl", query_cache, &[node_kind::FUNCTION_DECLARATOR])
+        ts_traversal::query_or_traverse_in_ranges_collect(root, "(function_declarator) @decl", query_cache, &[ts_cpp_symbols::sym_function_declarator], source, changed_ranges)
     }
 
     fn line_edits(before: &str, after: &str) -> Vec<Edit> {
@@ -87,14 +99,14 @@ impl Policy for FunctionVoidParamsPolicy {
         let mut warnings = Vec::new();
         let root = tree.root_node();
 
-        let declarators = Self::collect_function_declarators(root, context.query_cache);
+        let declarators = Self::collect_function_declarators(root, context.query_cache, context.text.as_bytes(), context.changed_ranges);
 
         for node in &declarators {
             let node = *node;
             let Some(param_node) = ts_traversal::first_descendant(
                 node,
-                &[node_kind::PARAMETER_LIST],
-                &[node_kind::COMPOUND_STATEMENT, node_kind::FIELD_DECLARATION_LIST],
+                &[ts_cpp_symbols::sym_parameter_list],
+                &[ts_cpp_symbols::sym_compound_statement, ts_cpp_symbols::sym_field_declaration_list],
             ) else {
                 continue;
             };
@@ -105,23 +117,23 @@ impl Policy for FunctionVoidParamsPolicy {
                 continue;
             };
 
-            if !Self::is_empty_parameter_list(params_text) {
+            if !Self::is_empty_parameter_list(param_node, context.text.as_bytes()) {
                 continue;
             }
 
-            if Self::is_operator_declarator(node, context.text, param_start) {
+            if Self::is_operator_declarator(node) {
                 continue;
             }
 
             let name_node = ts_traversal::rightmost_descendant(
                 node,
                 &[
-                    node_kind::IDENTIFIER,
-                    node_kind::FIELD_IDENTIFIER,
-                    node_kind::TYPE_IDENTIFIER,
-                    node_kind::DESTRUCTOR_NAME,
+                    ts_cpp_symbols::sym_identifier,
+                    ts_cpp_symbols::alias_sym_field_identifier,
+                    ts_cpp_symbols::alias_sym_type_identifier,
+                    ts_cpp_symbols::sym_destructor_name,
                 ],
-                &[node_kind::PARAMETER_LIST, node_kind::TEMPLATE_PARAMETER_LIST],
+                &[ts_cpp_symbols::sym_parameter_list, ts_cpp_symbols::sym_template_parameter_list],
             );
             let (line, column, name_text) = if let Some(name_node) = name_node {
                 let name = name_node

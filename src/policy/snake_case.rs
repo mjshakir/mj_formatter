@@ -3,8 +3,8 @@ use tree_sitter::Node;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 
@@ -53,15 +53,6 @@ impl SnakeCasePolicy {
         }
     }
 
-    fn is_valid_identifier(name: &str) -> bool {
-        let mut chars = name.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        (first.is_ascii_alphabetic() || first == '_')
-            && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    }
-
     fn is_snake_case(name: &str) -> bool {
         if name.is_empty() {
             return true;
@@ -101,17 +92,21 @@ impl SnakeCasePolicy {
     fn collect_targets<'a>(
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<Node<'a>> {
-        ts_traversal::query_or_traverse_collect(
+        ts_traversal::query_or_traverse_in_ranges_collect(
             root,
             Self::TARGET_QUERY,
             query_cache,
             &[
-                node_kind::FUNCTION_DEFINITION,
-                node_kind::DECLARATION,
-                node_kind::FIELD_DECLARATION,
-                node_kind::PARAMETER_DECLARATION,
+                ts_cpp_symbols::sym_function_definition,
+                ts_cpp_symbols::sym_declaration,
+                ts_cpp_symbols::sym_field_declaration,
+                ts_cpp_symbols::sym_parameter_declaration,
             ],
+            source,
+            changed_ranges,
         )
     }
 
@@ -136,38 +131,36 @@ impl Policy for SnakeCasePolicy {
         let mut violations = Vec::new();
         let root = tree.root_node();
 
-        let targets = Self::collect_targets(root, context.query_cache);
+        let targets = Self::collect_targets(root, context.query_cache, context.text.as_bytes(), context.changed_ranges);
 
         for node in &targets {
             let node = *node;
-            let kind = node.kind();
+            let kid = node.kind_id();
 
-            if self.apply_target.include_functions() && kind == node_kind::FUNCTION_DEFINITION {
+            if self.apply_target.include_functions() && kid == ts_cpp_symbols::sym_function_definition {
                 if let Some(declarator) = ts_traversal::first_descendant(
                     node,
-                    &[node_kind::FUNCTION_DECLARATOR],
-                    &[node_kind::COMPOUND_STATEMENT],
+                    &[ts_cpp_symbols::sym_function_declarator],
+                    &[ts_cpp_symbols::sym_compound_statement],
                 ) {
                     if let Some(name_node) = ts_traversal::rightmost_descendant(
                         declarator,
                         &[
-                            node_kind::IDENTIFIER,
-                            node_kind::FIELD_IDENTIFIER,
-                            node_kind::TYPE_IDENTIFIER,
-                            node_kind::DESTRUCTOR_NAME,
+                            ts_cpp_symbols::sym_identifier,
+                            ts_cpp_symbols::alias_sym_field_identifier,
+                            ts_cpp_symbols::alias_sym_type_identifier,
+                            ts_cpp_symbols::sym_destructor_name,
                         ],
-                        &[node_kind::PARAMETER_LIST, node_kind::TEMPLATE_PARAMETER_LIST],
+                        &[ts_cpp_symbols::sym_parameter_list, ts_cpp_symbols::sym_template_parameter_list],
                     ) {
-                        let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
                         let line = name_node.start_position().row + 1;
                         let column = name_node.start_position().column + 1;
-                        let allowed = [
-                            clang_sys::CXCursor_FunctionDecl,
-                            clang_sys::CXCursor_CXXMethod,
-                            clang_sys::CXCursor_Constructor,
-                            clang_sys::CXCursor_Destructor,
-                        ];
-                        let Some(symbol) = semantic_query.symbol_at(line, column, &allowed) else {
+                        let Some(symbol) = semantic_query
+                            .symbol_at(line, column, &[])
+                            .filter(|decl| {
+                                crate::parser::clang_types::is_function_like_kind(decl.kind)
+                            })
+                        else {
                             continue;
                         };
                         if symbol.kind == clang_sys::CXCursor_Constructor
@@ -175,7 +168,7 @@ impl Policy for SnakeCasePolicy {
                         {
                             continue;
                         }
-                        let short_name = symbol.name.split("::").last().unwrap_or(name);
+                        let short_name = symbol.name.as_str();
                         if !short_name.starts_with("operator")
                             && !short_name.starts_with('~')
                             && !short_name.contains('<')
@@ -194,26 +187,24 @@ impl Policy for SnakeCasePolicy {
             }
 
             if self.apply_target.include_variables()
-                && matches!(
-                    kind,
-                    node_kind::DECLARATION
-                        | node_kind::FIELD_DECLARATION
-                        | node_kind::PARAMETER_DECLARATION
-                )
+                && (kid == ts_cpp_symbols::sym_declaration
+                    || kid == ts_cpp_symbols::sym_field_declaration
+                    || kid == ts_cpp_symbols::sym_parameter_declaration)
             {
                 if let Some(name_node) = Self::declarator_identifier(node) {
                     let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
-                    if name.is_empty() || !Self::is_valid_identifier(name) {
+                    if name.is_empty() {
                         continue;
                     }
                     let line = name_node.start_position().row + 1;
                     let column = name_node.start_position().column + 1;
-                    let allowed = [
-                        clang_sys::CXCursor_VarDecl,
-                        clang_sys::CXCursor_FieldDecl,
-                        clang_sys::CXCursor_ParmDecl,
-                    ];
-                    if semantic_query.symbol_at(line, column, &allowed).is_none() {
+                    if semantic_query
+                        .symbol_at(line, column, &[])
+                        .filter(|decl| {
+                            crate::parser::clang_types::is_variable_like_kind(decl.kind)
+                        })
+                        .is_none()
+                    {
                         continue;
                     }
                     if !self.should_exclude_type_like(name)
@@ -231,13 +222,13 @@ impl Policy for SnakeCasePolicy {
         }
 
         let mut warnings = Vec::new();
-        if let Some(clang_parse) = context.clang_parse_result {
-            if !clang_parse.success {
+        if let Some(semantic) = context.semantic_file_context {
+            if !semantic.clang_success {
                 warnings.push(
                     "snake_case: clang syntax diagnostics detected; semantic confidence reduced"
                         .to_string(),
                 );
-                for message in clang_parse.diagnostics.iter().take(3) {
+                for message in semantic.diagnostics.iter().take(3) {
                     warnings.push(format!("clang: {message}"));
                 }
             }
@@ -261,7 +252,7 @@ mod tests {
     use super::*;
     use crate::model::policy_context::PolicyContext;
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
-    use crate::parser::clang_symbol::ClangSymbol;
+    use crate::parser::file_context::SemanticDeclaration;
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticFileContext;
 
@@ -295,10 +286,9 @@ mod tests {
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n".to_string();
         let tree = parse_cpp(text.as_str());
         let path = PathBuf::from("sample.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.violations.len() >= 2);
@@ -310,10 +300,9 @@ mod tests {
         let text = "const MyType Value = {};\n".to_string();
         let tree = parse_cpp(text.as_str());
         let path = PathBuf::from("sample.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert!(result.violations.is_empty());
@@ -324,31 +313,22 @@ mod tests {
         let policy = SnakeCasePolicy::new(SnakeCaseApplyTarget::Both, false, true, true);
         let text = "int CamelVar = 0;\nint BadName() { return CamelVar; }\n".to_string();
         let tree = parse_cpp(text.as_str());
-        let clang_parse_result = ClangParseResult::new(
+        let _clang_parse_result = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "DifferentName".to_string(),
                 kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
                 column: 5,
-                usr: None,
-                scope_usr: None,
-                storage_class: None,
-                is_const: false,
-                is_volatile: false,
-                type_kind: clang_sys::CXType_Unexposed,
-                type_display: String::new(),
-            canonical_type_kind: clang_sys::CXType_Unexposed,
-            template_name: None,
+                ..Default::default()
             }],
             ClangDiagnosticSummary::default(),
             Vec::new(),
         );
         let path = PathBuf::from("sample.cpp");
         let ctx = PolicyContext::new(text.as_str(), &path)
-            .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert!(result.violations.is_empty());
     }

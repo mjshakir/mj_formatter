@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,8 +11,8 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::manager::ParserManager;
-use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 
@@ -22,11 +24,12 @@ enum AccessLevel {
 }
 
 impl AccessLevel {
-    fn from_text(text: &str) -> Option<Self> {
-        match text.trim().trim_end_matches(':') {
-            "public" => Some(Self::Public),
-            "protected" => Some(Self::Protected),
-            "private" => Some(Self::Private),
+    fn from_node(node: Node<'_>) -> Option<Self> {
+        let kw = node.child(0)?;
+        match kw.kind_id() {
+            ts_cpp_symbols::anon_sym_public => Some(Self::Public),
+            ts_cpp_symbols::anon_sym_protected => Some(Self::Protected),
+            ts_cpp_symbols::anon_sym_private => Some(Self::Private),
             _ => None,
         }
     }
@@ -57,7 +60,7 @@ struct HeaderMethodEntry {
 }
 
 pub struct ClassLayoutPolicy {
-    source_extensions: HashSet<String>,
+    source_extensions: FxHashSet<String>,
     header_extensions: Vec<String>,
     header_search_roots: Vec<String>,
     parser_manager: ParserManager,
@@ -70,9 +73,9 @@ impl ClassLayoutPolicy {
         header_search_roots: Vec<String>,
     ) -> Self {
         let source_extensions = if source_extensions.is_empty() {
-            [".cpp", ".cc", ".cxx"]
-                .into_iter()
-                .map(ToString::to_string)
+            crate::files::file_unit::IMPLEMENTATION_EXTENSIONS
+                .iter()
+                .map(|e| format!(".{e}"))
                 .collect()
         } else {
             source_extensions
@@ -81,12 +84,10 @@ impl ClassLayoutPolicy {
                 .collect()
         };
         let header_extensions = if header_extensions.is_empty() {
-            vec![
-                ".hpp".to_string(),
-                ".h".to_string(),
-                ".hh".to_string(),
-                ".hxx".to_string(),
-            ]
+            crate::files::file_unit::HEADER_EXTENSIONS
+                .iter()
+                .map(|e| format!(".{e}"))
+                .collect()
         } else {
             header_extensions
                 .into_iter()
@@ -94,7 +95,10 @@ impl ClassLayoutPolicy {
                 .collect()
         };
         let header_search_roots = if header_search_roots.is_empty() {
-            vec!["include".to_string()]
+            crate::files::file_unit::HEADER_DIR_NAMES
+                .iter()
+                .map(|d| d.to_string())
+                .collect()
         } else {
             header_search_roots
         };
@@ -153,16 +157,16 @@ impl ClassLayoutPolicy {
         let name_node = ts_traversal::rightmost_descendant(
             node,
             &[
-                node_kind::IDENTIFIER,
-                node_kind::FIELD_IDENTIFIER,
-                node_kind::TYPE_IDENTIFIER,
-                node_kind::DESTRUCTOR_NAME,
+                ts_cpp_symbols::sym_identifier,
+                ts_cpp_symbols::alias_sym_field_identifier,
+                ts_cpp_symbols::alias_sym_type_identifier,
+                ts_cpp_symbols::sym_destructor_name,
             ],
-            &[node_kind::PARAMETER_LIST, node_kind::TEMPLATE_PARAMETER_LIST],
+            &[ts_cpp_symbols::sym_parameter_list, ts_cpp_symbols::sym_template_parameter_list],
         )?;
         let name = Self::node_text(name_node, text)?;
-        let short = name.split("::").last().unwrap_or(name.as_str()).trim();
-        (!short.is_empty()).then_some(short.to_string())
+        let trimmed = name.trim();
+        (!trimmed.is_empty()).then_some(trimmed.to_string())
     }
 
     const CLASS_QUERY: &str = r#"[
@@ -177,15 +181,15 @@ impl ClassLayoutPolicy {
         query_cache: Option<&TsQueryCache>,
     ) -> Vec<HeaderMethodEntry> {
         let mut order = Vec::new();
-        let class_nodes = Self::collect_class_nodes(root, query_cache);
+        let class_nodes = Self::collect_class_nodes(root, query_cache, text.as_bytes(), None);
 
         for node in &class_nodes {
             let node = *node;
             let Some(class_name_node) =
                 ts_traversal::first_descendant_excluding_root(
                     node,
-                    &[node_kind::TYPE_IDENTIFIER],
-                    &[node_kind::FIELD_DECLARATION_LIST],
+                    &[ts_cpp_symbols::alias_sym_type_identifier],
+                    &[ts_cpp_symbols::sym_field_declaration_list],
                 )
             else {
                 continue;
@@ -194,12 +198,12 @@ impl ClassLayoutPolicy {
                 continue;
             };
             let Some(body) =
-                ts_traversal::first_child_by_kind(node, node_kind::FIELD_DECLARATION_LIST)
+                ts_traversal::first_child_by_kind(node, ts_cpp_symbols::sym_field_declaration_list)
             else {
                 continue;
             };
 
-            let is_struct = node.kind() == node_kind::STRUCT_SPECIFIER;
+            let is_struct = node.kind_id() == ts_cpp_symbols::sym_struct_specifier;
             let mut current_access = if is_struct {
                 AccessLevel::Public
             } else {
@@ -210,30 +214,28 @@ impl ClassLayoutPolicy {
                 let Some(child) = body.child(idx as u32) else {
                     continue;
                 };
-                if child.kind() == node_kind::ACCESS_SPECIFIER {
-                    if let Some(spec_text) = Self::node_text(child, text) {
-                        if let Some(level) = AccessLevel::from_text(&spec_text) {
-                            current_access = level;
-                        }
+                if child.kind_id() == ts_cpp_symbols::sym_access_specifier {
+                    if let Some(level) = AccessLevel::from_node(child) {
+                        current_access = level;
                     }
                     continue;
                 }
-                let mut child_stack = vec![child];
-                while let Some(walk_node) = child_stack.pop() {
-                    if walk_node.kind() == node_kind::FUNCTION_DECLARATOR {
-                        if let Some(method_name) =
-                            Self::extract_method_name_from_declarator(walk_node, text)
-                        {
-                            order.push(HeaderMethodEntry {
-                                full_name: format!("{class_name}::{method_name}"),
-                                access: current_access,
-                            });
-                        }
-                    }
-                    for cidx in (0..walk_node.child_count()).rev() {
-                        if let Some(grandchild) = walk_node.child(cidx as u32) {
-                            child_stack.push(grandchild);
-                        }
+                let declarators = ts_traversal::query_or_traverse_in_ranges_collect(
+                    child,
+                    "(function_declarator) @f",
+                    query_cache,
+                    &[ts_cpp_symbols::sym_function_declarator],
+                    text.as_bytes(),
+                    None,
+                );
+                for walk_node in declarators {
+                    if let Some(method_name) =
+                        Self::extract_method_name_from_declarator(walk_node, text)
+                    {
+                        order.push(HeaderMethodEntry {
+                            full_name: format!("{class_name}::{method_name}"),
+                            access: current_access,
+                        });
                     }
                 }
             }
@@ -245,27 +247,31 @@ impl ClassLayoutPolicy {
     fn collect_class_nodes<'a>(
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<Node<'a>> {
-        ts_traversal::query_or_traverse_collect(
+        ts_traversal::query_or_traverse_in_ranges_collect(
             root,
             Self::CLASS_QUERY,
             query_cache,
-            &[node_kind::CLASS_SPECIFIER, node_kind::STRUCT_SPECIFIER],
+            &[ts_cpp_symbols::sym_class_specifier, ts_cpp_symbols::sym_struct_specifier],
+            source,
+            changed_ranges,
         )
     }
 
     fn extract_source_function_name(node: Node<'_>, text: &str) -> Option<String> {
         let declarator =
-            ts_traversal::first_descendant_excluding_root(node, &[node_kind::FUNCTION_DECLARATOR], &[node_kind::COMPOUND_STATEMENT])?;
+            ts_traversal::first_descendant_excluding_root(node, &[ts_cpp_symbols::sym_function_declarator], &[ts_cpp_symbols::sym_compound_statement])?;
         let name_node = ts_traversal::rightmost_descendant(
             declarator,
             &[
-                node_kind::IDENTIFIER,
-                node_kind::FIELD_IDENTIFIER,
-                node_kind::TYPE_IDENTIFIER,
-                node_kind::DESTRUCTOR_NAME,
+                ts_cpp_symbols::sym_identifier,
+                ts_cpp_symbols::alias_sym_field_identifier,
+                ts_cpp_symbols::alias_sym_type_identifier,
+                ts_cpp_symbols::sym_destructor_name,
             ],
-            &[node_kind::PARAMETER_LIST, node_kind::TEMPLATE_PARAMETER_LIST],
+            &[ts_cpp_symbols::sym_parameter_list, ts_cpp_symbols::sym_template_parameter_list],
         )?;
         let full_name = Self::node_text(name_node, text)?;
         full_name.contains("::").then_some(full_name)
@@ -276,10 +282,11 @@ impl ClassLayoutPolicy {
         text: &str,
         root: Node<'_>,
         query_cache: Option<&TsQueryCache>,
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<SourceBlock> {
         let mut blocks = Vec::new();
 
-        let func_nodes = Self::collect_function_definitions(root, query_cache);
+        let func_nodes = Self::collect_function_definitions(root, query_cache, text.as_bytes(), changed_ranges);
 
         for node in &func_nodes {
             let node = *node;
@@ -307,12 +314,16 @@ impl ClassLayoutPolicy {
     fn collect_function_definitions<'a>(
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<Node<'a>> {
-        ts_traversal::query_or_traverse_collect(
+        ts_traversal::query_or_traverse_in_ranges_collect(
             root,
             "(function_definition) @func",
             query_cache,
-            &[node_kind::FUNCTION_DEFINITION],
+            &[ts_cpp_symbols::sym_function_definition],
+            source,
+            changed_ranges,
         )
     }
 }
@@ -368,16 +379,17 @@ impl Policy for ClassLayoutPolicy {
             context.text,
             source_tree.root_node(),
             context.query_cache,
+            context.changed_ranges,
         );
         if source_blocks.len() < 2 {
             return PolicyResult::unchanged();
         }
 
-        let order_set: HashSet<&str> = header_order
+        let order_set: FxHashSet<&str> = header_order
             .iter()
             .map(|entry| entry.full_name.as_str())
             .collect();
-        let access_map: HashMap<&str, AccessLevel> = header_order
+        let access_map: FxHashMap<&str, AccessLevel> = header_order
             .iter()
             .map(|entry| (entry.full_name.as_str(), entry.access))
             .collect();
@@ -400,7 +412,7 @@ impl Policy for ClassLayoutPolicy {
         }
         candidates.sort_by_key(|item| item.start);
 
-        let mut by_name: HashMap<String, VecDeque<SourceBlock>> = HashMap::new();
+        let mut by_name: FxHashMap<String, VecDeque<SourceBlock>> = FxHashMap::default();
         for block in &candidates {
             by_name
                 .entry(block.full_name.clone())
@@ -422,7 +434,7 @@ impl Policy for ClassLayoutPolicy {
             return PolicyResult::unchanged();
         }
 
-        let consumed: HashSet<(usize, usize)> = ordered_blocks
+        let consumed: FxHashSet<(usize, usize)> = ordered_blocks
             .iter()
             .map(|(item, _)| (item.start, item.end))
             .collect();
