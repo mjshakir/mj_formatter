@@ -57,9 +57,6 @@ impl ProposerController {
             if !project_query.is_available() {
                 hard_constraints_touched |= SemanticInvariantClause::ParserAvailability.bit();
             }
-            if !capability.allows_zone(zone) {
-                hard_constraints_touched |= SemanticInvariantClause::TouchContract.bit();
-            }
             let trust_deficit_penalty = adaptive.trust_deficit_penalty();
             let mut symbol_footprint: SmallVec<[u64; 8]> = convergence_signal
                 .symbol_ids

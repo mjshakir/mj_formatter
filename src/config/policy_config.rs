@@ -4,15 +4,11 @@ use anyhow::{anyhow, Result};
 use toml::Table;
 
 use crate::config::enums::Enforcement;
-use crate::config::enums::PolicyType;
-use crate::config::enums::TouchContract;
 
 #[derive(Clone, Debug)]
 pub struct PolicyConfig {
     pub name: String,
     pub enabled: bool,
-    pub policy_type: PolicyType,
-    pub touch_contract: TouchContract,
     pub enforcement: Enforcement,
     pub raw: Table,
 }
@@ -29,16 +25,6 @@ impl PolicyConfig {
             .get("enabled")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let policy_type = table
-            .get("type")
-            .and_then(|value| value.as_str())
-            .map(PolicyType::from_value)
-            .unwrap_or(PolicyType::Python);
-        let touch_contract = table
-            .get("touch_contract")
-            .and_then(|value| value.as_str())
-            .map(TouchContract::from_value)
-            .unwrap_or(TouchContract::Any);
         let enforcement = table
             .get("enforcement")
             .and_then(|value| value.as_str())
@@ -48,8 +34,6 @@ impl PolicyConfig {
         Ok(Self {
             name,
             enabled,
-            policy_type,
-            touch_contract,
             enforcement,
             raw: table.clone(),
         })
@@ -64,18 +48,6 @@ impl PolicyConfig {
             .get("enabled")
             .and_then(|value| value.as_bool())
             .unwrap_or(self.enabled);
-        self.policy_type = self
-            .raw
-            .get("type")
-            .and_then(|value| value.as_str())
-            .map(PolicyType::from_value)
-            .unwrap_or_else(|| self.policy_type.clone());
-        self.touch_contract = self
-            .raw
-            .get("touch_contract")
-            .and_then(|value| value.as_str())
-            .map(TouchContract::from_value)
-            .unwrap_or_else(|| self.touch_contract.clone());
         self.enforcement = self
             .raw
             .get("enforcement")

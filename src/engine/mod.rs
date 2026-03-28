@@ -7,7 +7,6 @@ pub mod context_tracker;
 pub mod convergence;
 pub mod coordinator;
 pub mod edit_candidate;
-pub mod edit_guard;
 pub mod gate_decision;
 pub mod mat5;
 pub mod pipeline;

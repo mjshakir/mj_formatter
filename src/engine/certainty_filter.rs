@@ -225,12 +225,6 @@ impl CertaintyFilterState {
         1
     }
 
-    // ── Edit guard derivations ───────────────────────────────────────
-
-    pub fn relax_comment_string(&self, structural_safe: bool) -> bool {
-        structural_safe && self.estimates[0] > 0.6
-    }
-
     // ── Post-check derivations ───────────────────────────────────────
 
     pub fn diagnostic_weights(&self) -> (u32, u32, u32, u32) {
@@ -689,14 +683,6 @@ mod tests {
         // v[1]=0.10 → 0.10*30=3
         assert_eq!(state.fuzzy_min_semantic(), 3);
         assert_eq!(state.fuzzy_min_other(), 1);
-    }
-
-    #[test]
-    fn derivation_relax_comment_string() {
-        let state = CertaintyFilterState::new();
-        // e[0]=0.85 > 0.6 → true when structural_safe=true
-        assert!(state.relax_comment_string(true));
-        assert!(!state.relax_comment_string(false));
     }
 
     #[test]

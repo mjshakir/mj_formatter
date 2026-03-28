@@ -23,7 +23,6 @@ use crate::engine::convergence::ConvergenceController;
 use crate::engine::convergence::ConvergencePolicyProfile;
 use crate::engine::convergence::ConvergencePolicySignal;
 use crate::engine::convergence::ConvergenceRiskTier;
-use crate::engine::edit_guard::EditGuard;
 use crate::engine::conflict_solver::GlobalConflictSolver;
 use crate::engine::catalog::PolicyCapabilities;
 use crate::engine::catalog::PolicyCapabilityMatrix;
@@ -997,28 +996,6 @@ impl PolicyPipeline {
         let mut confidence_threshold = None;
         let mut dropped_line_count = 0usize;
         if let Some(settings) = self.policy_settings.get(policy_name) {
-            let guard_adaptive = self.adaptive_state.load();
-            let guard_violations = EditGuard::validate(
-                policy_name,
-                &settings.touch_contract,
-                result.edits.as_slice(),
-                state.parse.tree.as_ref(),
-                state.current.as_bytes(),
-                Some(&self.query_cache),
-                prepared.capability.structural_safe,
-                &guard_adaptive,
-            );
-            if !guard_violations.is_empty() {
-                let mut violations = result.violations;
-                violations.extend(guard_violations);
-                result = PolicyResult {
-                    text: state.current.to_string(),
-                    violations,
-                    edits: Vec::new(),
-                    warnings: result.warnings,
-                    changed: false,
-                };
-            }
             if self.confidence_enabled && !result.edits.is_empty() {
                 let is_semantic = prepared.capability.semantic_rewrite
                     && state.parse.has_semantic_compdb;

@@ -19,7 +19,6 @@ pub enum SemanticInvariantClause {
     ScopeIntegrity,
     UsageRoleConsistency,
     MacroRegionSafety,
-    TouchContract,
     DeclarationReferenceIntegrity,
     EditSafety,
 }
@@ -48,7 +47,6 @@ impl SemanticInvariantClause {
             Self::ScopeIntegrity => "scope_integrity",
             Self::UsageRoleConsistency => "usage_role_consistency",
             Self::MacroRegionSafety => "macro_region_safety",
-            Self::TouchContract => "touch_contract",
             Self::DeclarationReferenceIntegrity => "declaration_reference_integrity",
             Self::EditSafety => "edit_safety",
         }
@@ -62,7 +60,6 @@ impl SemanticInvariantClause {
             "scope_integrity" => Some(Self::ScopeIntegrity),
             "usage_role_consistency" => Some(Self::UsageRoleConsistency),
             "macro_region_safety" => Some(Self::MacroRegionSafety),
-            "touch_contract" => Some(Self::TouchContract),
             "declaration_reference_integrity" => Some(Self::DeclarationReferenceIntegrity),
             "edit_safety" => Some(Self::EditSafety),
             _ => None,
@@ -77,7 +74,6 @@ pub const ALL_CLAUSES: &[SemanticInvariantClause] = &[
     SemanticInvariantClause::ScopeIntegrity,
     SemanticInvariantClause::UsageRoleConsistency,
     SemanticInvariantClause::MacroRegionSafety,
-    SemanticInvariantClause::TouchContract,
     SemanticInvariantClause::DeclarationReferenceIntegrity,
     SemanticInvariantClause::EditSafety,
 ];
@@ -91,9 +87,8 @@ impl SemanticInvariantClause {
             Self::ScopeIntegrity                => 1 << 3,
             Self::UsageRoleConsistency          => 1 << 4,
             Self::MacroRegionSafety             => 1 << 5,
-            Self::TouchContract                 => 1 << 6,
-            Self::DeclarationReferenceIntegrity => 1 << 7,
-            Self::EditSafety                    => 1 << 8,
+            Self::DeclarationReferenceIntegrity => 1 << 6,
+            Self::EditSafety                    => 1 << 7,
         }
     }
 }
@@ -125,7 +120,7 @@ pub struct SemanticInvariantSpec {
     pub description: &'static str,
 }
 
-const INVARIANT_SPECS: [SemanticInvariantSpec; 9] = [
+const INVARIANT_SPECS: [SemanticInvariantSpec; 8] = [
     SemanticInvariantSpec {
         clause: SemanticInvariantClause::ParserAvailability,
         hard: true,
@@ -157,12 +152,6 @@ const INVARIANT_SPECS: [SemanticInvariantSpec; 9] = [
         hard: false,
         description:
             "macro/preprocessor edits are flagged for review unless explicitly protected by policy contract",
-    },
-    SemanticInvariantSpec {
-        clause: SemanticInvariantClause::TouchContract,
-        hard: true,
-        description:
-            "touch-contract must never be violated by accepted edit batches",
     },
     SemanticInvariantSpec {
         clause: SemanticInvariantClause::DeclarationReferenceIntegrity,
@@ -436,7 +425,6 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::config::policy_config::PolicyConfig;
-    use crate::config::enums::TouchContract;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
         SemanticScope, SemanticScopeKind,
@@ -449,8 +437,6 @@ mod tests {
         PolicyConfig {
             name: "test_policy".to_string(),
             enabled: true,
-            policy_type: crate::config::enums::PolicyType::Python,
-            touch_contract: TouchContract::CodeOnly,
             enforcement: crate::config::enums::Enforcement::Hard,
             raw: toml::Table::new(),
         }

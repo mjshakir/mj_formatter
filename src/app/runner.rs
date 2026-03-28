@@ -1336,8 +1336,8 @@ impl App {
         for name in policy_names {
             if let Some(policy) = config.policy_settings.get(name.as_str()) {
                 lines.push(format!(
-                    "policy={}:{:?}:{:?}:{:?}:{}",
-                    name, policy.enabled, policy.policy_type, policy.touch_contract, policy.raw
+                    "policy={}:{:?}:{}",
+                    name, policy.enabled, policy.raw
                 ));
             }
         }
