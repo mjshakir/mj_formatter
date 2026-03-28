@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,8 +9,6 @@ use crate::parser::manager::SemanticCompdbContextKind;
 const MAX_HEADER_CONSENSUS_ARGSETS: usize = 6;
 const MAX_SOURCE_CONSENSUS_ARGSETS: usize = 6;
 const SOURCE_CONSENSUS_MIN_SCORE: i32 = 12;
-
-type CompdbArgsMap = Arc<HashMap<String, Vec<String>>>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CompdbCommandEntry {
@@ -29,7 +27,7 @@ struct HeaderConsensusCandidate {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompdbIndex {
     key: Option<String>,
-    args_by_path: Option<CompdbArgsMap>,
+    args_by_path: Option<Arc<FxHashMap<String, Vec<String>>>>,
     entries: Option<Arc<Vec<CompdbCommandEntry>>>,
 }
 
@@ -107,7 +105,7 @@ impl CompdbIndex {
         let paired_source_candidates = FileUnitKind::paired_companion_paths_on_disk(header_path)
             .into_iter()
             .map(|path| Self::normalize_path(path.as_path()))
-            .collect::<HashSet<_>>();
+            .collect::<FxHashSet<_>>();
         let header_parent = header_path
             .parent()
             .map(Self::normalize_path)
@@ -145,12 +143,7 @@ impl CompdbIndex {
                 if source
                     .extension()
                     .and_then(|value| value.to_str())
-                    .is_some_and(|ext| {
-                        matches!(
-                            ext.to_ascii_lowercase().as_str(),
-                            "c" | "cc" | "cpp" | "cxx"
-                        )
-                    })
+                    .is_some_and(crate::files::file_unit::is_implementation_extension)
                 {
                     score += 2;
                 }
@@ -183,7 +176,7 @@ impl CompdbIndex {
         paired_only: bool,
     ) -> Vec<Vec<String>> {
         let mut unique = Vec::<Vec<String>>::new();
-        let mut seen = HashSet::<String>::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         for candidate in candidates {
             if paired_only && !candidate.paired_source {
                 continue;
@@ -271,7 +264,7 @@ impl CompdbIndex {
         candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
 
         let mut unique = Vec::<Vec<String>>::new();
-        let mut seen = HashSet::<String>::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         for (score, _, args) in candidates {
             if score < SOURCE_CONSENSUS_MIN_SCORE {
                 continue;
@@ -337,11 +330,12 @@ impl CompdbIndex {
         )
     }
 
+    #[allow(clippy::type_complexity)]
     fn load_compdb_args(
         clang_compdb_path: Option<PathBuf>,
     ) -> (
         Option<String>,
-        Option<CompdbArgsMap>,
+        Option<Arc<FxHashMap<String, Vec<String>>>>,
         Option<Arc<Vec<CompdbCommandEntry>>>,
     ) {
         let path = clang_compdb_path.or_else(|| {
@@ -364,7 +358,7 @@ impl CompdbIndex {
             return (key, None, None);
         };
 
-        let mut mapping = HashMap::<String, Vec<String>>::new();
+        let mut mapping: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut command_entries = Vec::<CompdbCommandEntry>::new();
         for entry in entries {
             let Some(table) = entry.as_object() else {

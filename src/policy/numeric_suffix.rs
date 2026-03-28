@@ -1,12 +1,12 @@
-use tree_sitter::Node;
+use tree_sitter::{Node, StreamingIterator};
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::parser::clang_result::ClangParseResult;
-use crate::parser::node_kind;
+use crate::parser::file_context::SemanticFileContext;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 
@@ -37,68 +37,68 @@ impl NumericLiteralSuffixPolicy {
     }
 
     fn suffix_from_ts_type_node(type_node: &Node<'_>, source: &[u8]) -> Option<(&'static str, bool)> {
-        let kind = type_node.kind();
+        let kind_id = type_node.kind_id();
         let text = type_node.utf8_text(source).ok()?;
 
-        match kind {
-            node_kind::PRIMITIVE_TYPE => match text {
+        if kind_id == ts_cpp_symbols::sym_primitive_type {
+            match text {
                 "float" => Some(("f", true)),
                 "double" => Some(("", true)),
                 "int" | "short" | "char" => Some(("", false)),
                 _ => None,
-            },
-            node_kind::SIZED_TYPE_SPECIFIER => {
-                let mut unsigned = false;
-                let mut long_count: usize = 0;
-                let mut has_double = false;
-                let mut has_short = false;
-                for i in 0..type_node.child_count() {
-                    let Some(child) = type_node.child(i as u32) else {
-                        continue;
-                    };
-                    let Ok(child_text) = child.utf8_text(source) else {
-                        continue;
-                    };
-                    match child_text {
-                        "unsigned" => unsigned = true,
-                        "long" => long_count += 1,
-                        "short" => has_short = true,
-                        "double" => has_double = true,
-                        _ => {}
-                    }
-                }
-                if has_double {
-                    return Some((if long_count >= 1 { "L" } else { "" }, true));
-                }
-                let suffix = match (unsigned, long_count) {
-                    (_, 0) if has_short => {
-                        if unsigned { "U" } else { "" }
-                    }
-                    (false, 0) => "",
-                    (false, 1) => "L",
-                    (false, 2) => "LL",
-                    (true, 0) => "U",
-                    (true, 1) => "UL",
-                    (true, 2) => "ULL",
-                    _ => return None,
-                };
-                Some((suffix, false))
             }
-            _ => None,
+        } else if kind_id == ts_cpp_symbols::sym_sized_type_specifier {
+            let mut unsigned = false;
+            let mut long_count: usize = 0;
+            let mut has_double = false;
+            let mut has_short = false;
+            for i in 0..type_node.child_count() {
+                let Some(child) = type_node.child(i as u32) else {
+                    continue;
+                };
+                let Ok(child_text) = child.utf8_text(source) else {
+                    continue;
+                };
+                match child_text {
+                    "unsigned" => unsigned = true,
+                    "long" => long_count += 1,
+                    "short" => has_short = true,
+                    "double" => has_double = true,
+                    _ => {}
+                }
+            }
+            if has_double {
+                return Some((if long_count >= 1 { "L" } else { "" }, true));
+            }
+            let suffix = match (unsigned, long_count) {
+                (_, 0) if has_short => {
+                    if unsigned { "U" } else { "" }
+                }
+                (false, 0) => "",
+                (false, 1) => "L",
+                (false, 2) => "LL",
+                (true, 0) => "U",
+                (true, 1) => "UL",
+                (true, 2) => "ULL",
+                _ => return None,
+            };
+            Some((suffix, false))
+        } else {
+            None
         }
     }
 
     fn declarator_name<'a>(decl_node: &Node<'a>, source: &[u8]) -> Option<String> {
-        for i in 0..decl_node.child_count() {
-            let Some(child) = decl_node.child(i as u32) else { continue };
-            if child.kind() == node_kind::INIT_DECLARATOR {
-                if let Some(declarator) = child.child_by_field_name("declarator") {
-                    if declarator.kind() == node_kind::IDENTIFIER {
+        for i in 0..decl_node.named_child_count() {
+            let Some(child) = decl_node.named_child(i as u32) else { continue };
+            if child.kind_id() == ts_cpp_symbols::sym_init_declarator {
+                if let Some(declarator) = child.child_by_field_id(ts_cpp_symbols::field_declarator) {
+                    if declarator.kind_id() == ts_cpp_symbols::sym_identifier {
                         return declarator.utf8_text(source).ok().map(|s| s.to_string());
                     }
                 }
             }
-            if child.kind() == node_kind::FIELD_IDENTIFIER {
+            if child.kind_id() == ts_cpp_symbols::alias_sym_field_identifier {
                 return child.utf8_text(source).ok().map(|s| s.to_string());
             }
         }
@@ -108,18 +108,18 @@ impl NumericLiteralSuffixPolicy {
     fn resolve_suffix(
         decl_node: &Node<'_>,
         source: &[u8],
-        clang_parse: Option<&ClangParseResult>,
+        semantic: Option<&SemanticFileContext>,
     ) -> Option<(&'static str, bool)> {
         let line = decl_node.start_position().row + 1;
 
-        if let Some(parse) = clang_parse {
+        if let Some(ctx) = semantic {
             if let Some(name) = Self::declarator_name(decl_node, source) {
-                if let Some(symbol) = parse.symbol_on_line(
-                    &name,
-                    line,
-                    &[clang_sys::CXCursor_VarDecl, clang_sys::CXCursor_FieldDecl],
-                ) {
-                    if let Some(result) = Self::suffix_from_type_kind(symbol.canonical_type_kind) {
+                if let Some(decl) = ctx.symbol_on_line(&name, line, &[])
+                    .filter(|d| {
+                        d.kind == clang_sys::CXCursor_VarDecl || d.kind == clang_sys::CXCursor_FieldDecl
+                    })
+                {
+                    if let Some(result) = Self::suffix_from_type_kind(decl.canonical_type_kind) {
                         return Some(result);
                     }
                 }
@@ -225,22 +225,21 @@ impl NumericLiteralSuffixPolicy {
         (new_literal != literal).then_some(new_literal)
     }
 
+    fn is_type_node_kind(id: u16) -> bool {
+        ts_cpp_symbols::is_type_specifier(id)
+    }
+
     fn find_type_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
-        const TYPE_NODE_KINDS: &[&str] = &[
-            node_kind::PRIMITIVE_TYPE,
-            node_kind::SIZED_TYPE_SPECIFIER,
-            node_kind::TYPE_IDENTIFIER,
-        ];
-        if let Some(type_node) = node.child_by_field_name("type") {
-            if TYPE_NODE_KINDS.contains(&type_node.kind()) {
+        if let Some(type_node) = node.child_by_field_id(ts_cpp_symbols::field_type) {
+            if Self::is_type_node_kind(type_node.kind_id()) {
                 return Some(type_node);
             }
         }
-        for i in 0..node.child_count() {
-            let Some(child) = node.child(i as u32) else {
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i as u32) else {
                 continue;
             };
-            if TYPE_NODE_KINDS.contains(&child.kind()) {
+            if Self::is_type_node_kind(child.kind_id()) {
                 return Some(child);
             }
         }
@@ -254,20 +253,24 @@ impl NumericLiteralSuffixPolicy {
     }
 
     fn collect_number_literals(node: Node<'_>) -> Vec<Node<'_>> {
-        let mut result = Vec::new();
-        let mut stack = vec![node];
-        while let Some(current) = stack.pop() {
-            if current.kind() == node_kind::NUMBER_LITERAL {
-                result.push(current);
-                continue;
-            }
-            for i in (0..current.child_count()).rev() {
-                if let Some(child) = current.child(i as u32) {
-                    stack.push(child);
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        if let Ok(query) = tree_sitter::Query::new(&language, "(number_literal) @num") {
+            let mut cursor = tree_sitter::QueryCursor::new();
+            let empty: &[u8] = &[];
+            let mut result = Vec::new();
+            let mut matches = cursor.matches(&query, node, empty);
+            while let Some(m) = {
+                matches.advance();
+                matches.get()
+            } {
+                for capture in m.captures {
+                    result.push(capture.node);
                 }
             }
+            result
+        } else {
+            Vec::new()
         }
-        result
     }
 
     const DECL_QUERY: &str = r#"[
@@ -278,29 +281,33 @@ impl NumericLiteralSuffixPolicy {
     fn collect_decl_nodes<'a>(
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<Node<'a>> {
-        ts_traversal::query_or_traverse_collect(
+        ts_traversal::query_or_traverse_in_ranges_collect(
             root,
             Self::DECL_QUERY,
             query_cache,
-            &[node_kind::DECLARATION, node_kind::FIELD_DECLARATION],
+            &[ts_cpp_symbols::sym_declaration, ts_cpp_symbols::sym_field_declaration],
+            source,
+            changed_ranges,
         )
     }
 
     fn gather_initializer_literals<'a>(decl_node: Node<'a>) -> Vec<Node<'a>> {
         let mut literals = Vec::new();
-        for i in 0..decl_node.child_count() {
-            let Some(child) = decl_node.child(i as u32) else {
+        for i in 0..decl_node.named_child_count() {
+            let Some(child) = decl_node.named_child(i as u32) else {
                 continue;
             };
-            if child.kind() == node_kind::INIT_DECLARATOR {
-                if let Some(value) = child.child_by_field_name("value") {
+            if child.kind_id() == ts_cpp_symbols::sym_init_declarator {
+                if let Some(value) = child.child_by_field_id(ts_cpp_symbols::field_value) {
                     literals.extend(Self::collect_number_literals(value));
                 }
             }
         }
-        if decl_node.kind() == node_kind::FIELD_DECLARATION {
-            if let Some(default) = decl_node.child_by_field_name("default_value") {
+        if decl_node.kind_id() == ts_cpp_symbols::sym_field_declaration {
+            if let Some(default) = decl_node.child_by_field_id(ts_cpp_symbols::field_default_value) {
                 literals.extend(Self::collect_number_literals(default));
             }
         }
@@ -321,19 +328,19 @@ impl Policy for NumericLiteralSuffixPolicy {
 
         let text = context.text;
         let source = text.as_bytes();
-        let clang_parse = context.clang_parse_result;
+        let semantic = context.semantic_file_context;
         let mut replacements: Vec<(usize, usize, usize, usize, String)> = Vec::new();
         let mut violations = Vec::new();
         let warnings = Vec::new();
 
         let root = tree.root_node();
-        let decl_nodes = Self::collect_decl_nodes(root, context.query_cache);
+        let decl_nodes = Self::collect_decl_nodes(root, context.query_cache, context.text.as_bytes(), context.changed_ranges);
 
         for node in &decl_nodes {
             if node.has_error() || node.is_error() {
                 continue;
             }
-            let Some((suffix, is_float)) = Self::resolve_suffix(node, source, clang_parse) else {
+            let Some((suffix, is_float)) = Self::resolve_suffix(node, source, semantic) else {
                 continue;
             };
             let type_text = Self::extract_type_text(node, source).unwrap_or_default();
@@ -405,7 +412,7 @@ mod tests {
     use super::*;
     use crate::model::policy_context::PolicyContext;
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
-    use crate::parser::clang_symbol::ClangSymbol;
+    use crate::parser::file_context::SemanticDeclaration;
 
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
@@ -420,31 +427,38 @@ mod tests {
         line: usize,
         column: usize,
         canonical_kind: i32,
-    ) -> ClangSymbol {
-        ClangSymbol {
+    ) -> SemanticDeclaration {
+        SemanticDeclaration {
             name: name.to_string(),
             kind: clang_sys::CXCursor_VarDecl,
             line,
             column,
-            usr: None,
-            scope_usr: None,
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Typedef,
-            type_display: String::new(),
             canonical_type_kind: canonical_kind,
-            template_name: None,
+            ..Default::default()
         }
     }
 
-    fn make_parse_result(symbols: Vec<ClangSymbol>) -> ClangParseResult {
+    fn make_parse_result(symbols: Vec<SemanticDeclaration>) -> ClangParseResult {
         ClangParseResult::new(
             true,
             Vec::new(),
             symbols,
             ClangDiagnosticSummary::default(),
             Vec::new(),
+        )
+    }
+
+    fn semantic_from(
+        text: &str,
+        path: &std::path::Path,
+        tree: &tree_sitter::Tree,
+        clang: &ClangParseResult,
+    ) -> crate::parser::file_context::SemanticFileContext {
+        crate::parser::file_context::SemanticFileContext::from_parses(
+            text,
+            path,
+            Some(tree),
+            Some(clang),
         )
     }
 
@@ -626,9 +640,10 @@ mod tests {
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
         let clang = make_parse_result(vec![make_clang_var("x", 1, 9, clang_sys::CXType_UChar)]);
+        let semantic = semantic_from(text, &path, &tree, &clang);
         let ctx = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "uint8_t x = 1U;\n");
         assert_eq!(result.edits.len(), 1);
@@ -641,9 +656,10 @@ mod tests {
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
         let clang = make_parse_result(vec![make_clang_var("x", 1, 10, clang_sys::CXType_ULongLong)]);
+        let semantic = semantic_from(text, &path, &tree, &clang);
         let ctx = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "uint64_t x = 1ULL;\n");
     }
@@ -655,9 +671,10 @@ mod tests {
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
         let clang = make_parse_result(vec![make_clang_var("x", 1, 9, clang_sys::CXType_Int)]);
+        let semantic = semantic_from(text, &path, &tree, &clang);
         let ctx = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int32_t x = 1;\n");
     }
@@ -669,9 +686,10 @@ mod tests {
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
         let clang = make_parse_result(vec![make_clang_var("x", 1, 9, clang_sys::CXType_LongLong)]);
+        let semantic = semantic_from(text, &path, &tree, &clang);
         let ctx = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "int64_t x = 1LL;\n");
     }
@@ -684,9 +702,10 @@ mod tests {
         let path = PathBuf::from("sample.cpp");
         // LP64: size_t is unsigned long
         let clang = make_parse_result(vec![make_clang_var("x", 1, 8, clang_sys::CXType_ULong)]);
+        let semantic = semantic_from(text, &path, &tree, &clang);
         let ctx = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(result.text, "size_t x = 10UL;\n");
     }
@@ -697,10 +716,9 @@ mod tests {
         let text = "static constexpr size_t x = 2UL;\n";
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
-        let clang = make_parse_result(vec![make_clang_var("x", 1, 25, clang_sys::CXType_ULong)]);
+        let _clang = make_parse_result(vec![make_clang_var("x", 1, 25, clang_sys::CXType_ULong)]);
         let ctx = PolicyContext::new(text, &path)
-            .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         assert!(!result.changed);
     }
@@ -712,9 +730,10 @@ mod tests {
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.hpp");
         let clang = make_parse_result(vec![make_clang_var("C_MAX", 2, 29, clang_sys::CXType_ULong)]);
+        let semantic = semantic_from(text, &path, &tree, &clang);
         let ctx = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&ctx);
         assert_eq!(
             result.text,
@@ -788,10 +807,9 @@ mod tests {
         let tree = parse_cpp(text);
         let path = PathBuf::from("sample.cpp");
         // Provide a clang symbol with a different name — should fall back to tree-sitter
-        let clang = make_parse_result(vec![make_clang_var("y", 1, 7, clang_sys::CXType_ULong)]);
+        let _clang = make_parse_result(vec![make_clang_var("y", 1, 7, clang_sys::CXType_ULong)]);
         let ctx = PolicyContext::new(text, &path)
-            .with_tree(Some(&tree))
-            .with_clang(Some(&clang));
+            .with_tree(Some(&tree));
         let result = policy.apply(&ctx);
         // Tree-sitter sees "float" type → suffix "f", not ULong's "UL"
         assert_eq!(result.text, "float x = 1.f;\n");

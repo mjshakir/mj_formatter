@@ -33,10 +33,10 @@ impl LuaMacroSpacingPolicy {
     }
 
     fn is_cpp_source(path: &str) -> bool {
-        let lower = path.to_lowercase();
-        [".c", ".cc", ".cpp", ".cxx"]
-            .iter()
-            .any(|ext| lower.ends_with(ext))
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(crate::files::file_unit::is_implementation_extension)
     }
 }
 

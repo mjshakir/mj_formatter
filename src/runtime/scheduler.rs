@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -119,7 +121,7 @@ pub(crate) struct DispatchHistoryEntry {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DispatchHistoryStore {
     path: PathBuf,
-    entries: HashMap<String, DispatchHistoryEntry>,
+    entries: FxHashMap<String, DispatchHistoryEntry>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -215,7 +217,7 @@ pub(crate) struct DispatchFeatureCache {
     path: PathBuf,
     writable: bool,
     dirty: bool,
-    entries: HashMap<String, DispatchFeatureCacheEntry>,
+    entries: FxHashMap<String, DispatchFeatureCacheEntry>,
 }
 
 impl DispatchFeatureCache {
@@ -228,7 +230,7 @@ impl DispatchFeatureCache {
                     path,
                     writable,
                     dirty: false,
-                    entries: HashMap::new(),
+                    entries: FxHashMap::default(),
                 };
             }
         };
@@ -239,7 +241,7 @@ impl DispatchFeatureCache {
                     path,
                     writable,
                     dirty: false,
-                    entries: HashMap::new(),
+                    entries: FxHashMap::default(),
                 };
             }
         };
@@ -248,7 +250,7 @@ impl DispatchFeatureCache {
                 path,
                 writable,
                 dirty: false,
-                entries: HashMap::new(),
+                entries: FxHashMap::default(),
             };
         }
         Self {
@@ -265,7 +267,7 @@ impl DispatchFeatureCache {
             path: PathBuf::new(),
             writable: false,
             dirty: false,
-            entries: HashMap::new(),
+            entries: FxHashMap::default(),
         }
     }
 
@@ -338,7 +340,7 @@ impl DispatchHistoryStore {
             Err(_) => {
                 return Self {
                     path,
-                    entries: HashMap::new(),
+                    entries: FxHashMap::default(),
                 };
             }
         };
@@ -347,14 +349,14 @@ impl DispatchHistoryStore {
             _ => {
                 return Self {
                     path,
-                    entries: HashMap::new(),
+                    entries: FxHashMap::default(),
                 };
             }
         };
         if snapshot.version != DISPATCH_HISTORY_VERSION {
             return Self {
                 path,
-                entries: HashMap::new(),
+                entries: FxHashMap::default(),
             };
         }
         Self {
@@ -367,7 +369,7 @@ impl DispatchHistoryStore {
     pub(crate) fn ephemeral() -> Self {
         Self {
             path: PathBuf::new(),
-            entries: HashMap::new(),
+            entries: FxHashMap::default(),
         }
     }
 
@@ -486,7 +488,7 @@ impl DispatchScheduler {
         feature_cache: &mut DispatchFeatureCache,
     ) -> Vec<DispatchUnit> {
         let layout = FileUnitLayout::from_paths(files.as_slice());
-        let mut grouped = HashMap::<String, Vec<PathBuf>>::new();
+        let mut grouped: FxHashMap<String, Vec<PathBuf>> = FxHashMap::default();
         for path in files {
             let group_key = layout.group_key_for_path(path.as_path());
             grouped.entry(group_key).or_default().push(path);
@@ -815,15 +817,16 @@ impl From<FileUnitKind> for DispatchUnitKind {
 
 impl ExtensionClass {
     fn for_path(path: &Path) -> Self {
-        match path
+        let ext = path
             .extension()
             .and_then(|value| value.to_str())
-            .map(|value| value.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("h" | "hh" | "hpp" | "hxx") => Self::HeaderLike,
-            Some("c" | "cc" | "cpp" | "cxx") => Self::ImplementationLike,
-            _ => Self::Other,
+            .unwrap_or("");
+        if crate::files::file_unit::is_header_extension(ext) {
+            Self::HeaderLike
+        } else if crate::files::file_unit::is_implementation_extension(ext) {
+            Self::ImplementationLike
+        } else {
+            Self::Other
         }
     }
 

@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use tree_sitter::Node;
 
@@ -8,6 +9,7 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 use std::borrow::Cow;
@@ -29,15 +31,15 @@ struct IncludeEntry {
 pub struct IncludeOrderPolicy {
     order_header: Vec<String>,
     order_source: Vec<String>,
-    standard_headers: HashSet<String>,
+    standard_headers: FxHashSet<String>,
     standard_prefixes: Vec<String>,
-    project_headers: HashSet<String>,
+    project_headers: FxHashSet<String>,
     project_prefixes: Vec<String>,
     main_header_extensions: Vec<String>,
     separator_length: usize,
     emit_group_comments: bool,
-    group_titles: HashMap<String, String>,
-    third_party_labels: HashMap<String, String>,
+    group_titles: FxHashMap<String, String>,
+    third_party_labels: FxHashMap<String, String>,
 }
 
 impl IncludeOrderPolicy {
@@ -45,15 +47,15 @@ impl IncludeOrderPolicy {
     pub fn new(
         order_header: Vec<String>,
         order_source: Vec<String>,
-        standard_headers: HashSet<String>,
+        standard_headers: FxHashSet<String>,
         standard_prefixes: Vec<String>,
-        project_headers: HashSet<String>,
+        project_headers: FxHashSet<String>,
         project_prefixes: Vec<String>,
         main_header_extensions: Vec<String>,
         separator_length: usize,
         emit_group_comments: bool,
-        group_titles: HashMap<String, String>,
-        third_party_labels: HashMap<String, String>,
+        group_titles: FxHashMap<String, String>,
+        third_party_labels: FxHashMap<String, String>,
     ) -> Self {
         Self {
             order_header: if order_header.is_empty() {
@@ -82,12 +84,10 @@ impl IncludeOrderPolicy {
             project_headers,
             project_prefixes,
             main_header_extensions: if main_header_extensions.is_empty() {
-                vec![
-                    ".hpp".to_string(),
-                    ".h".to_string(),
-                    ".hh".to_string(),
-                    ".hxx".to_string(),
-                ]
+                crate::files::file_unit::HEADER_EXTENSIONS
+                    .iter()
+                    .map(|e| format!(".{e}"))
+                    .collect()
             } else {
                 main_header_extensions
             },
@@ -99,10 +99,10 @@ impl IncludeOrderPolicy {
     }
 
     fn parse_include_from_node(node: &Node<'_>, source: &[u8]) -> Option<IncludeEntry> {
-        let path_node = node.child_by_field_name("path")?;
+        let path_node = node.child_by_field_id(ts_cpp_symbols::field_path)?;
         let text = path_node.utf8_text(source).ok()?;
-        match path_node.kind() {
-            "system_lib_string" => {
+        match path_node.kind_id() {
+            ts_cpp_symbols::sym_system_lib_string => {
                 let header = text.strip_prefix('<')?.strip_suffix('>')?.trim().to_string();
                 if header.is_empty() {
                     return None;
@@ -112,7 +112,7 @@ impl IncludeOrderPolicy {
                     quote: IncludeQuote::Angle,
                 })
             }
-            "string_literal" => {
+            ts_cpp_symbols::sym_string_literal => {
                 let header = text.strip_prefix('"')?.strip_suffix('"')?.trim().to_string();
                 if header.is_empty() {
                     return None;
@@ -158,7 +158,8 @@ impl IncludeOrderPolicy {
             root,
             "(preproc_include) @inc",
             query_cache,
-            &["preproc_include"],
+            &[ts_cpp_symbols::sym_preproc_include],
+            source,
             |node| {
                 let line_idx = node.start_position().row;
                 if line_idx < line_count {
@@ -175,15 +176,13 @@ impl IncludeOrderPolicy {
     }
 
     fn is_header_file(path: &str) -> bool {
-        let ext = Path::new(path)
+        Path::new(path)
             .extension()
             .and_then(|value| value.to_str())
-            .map(|value| format!(".{}", value.to_lowercase()))
-            .unwrap_or_default();
-        matches!(ext.as_str(), ".h" | ".hpp" | ".hh" | ".hxx")
+            .is_some_and(crate::files::file_unit::is_header_extension)
     }
 
-    fn main_header_candidates(&self, path: &str) -> HashSet<String> {
+    fn main_header_candidates(&self, path: &str) -> FxHashSet<String> {
         let stem = Path::new(path)
             .file_stem()
             .and_then(|value| value.to_str())
@@ -223,7 +222,7 @@ impl IncludeOrderPolicy {
         &self,
         entry: &IncludeEntry,
         is_header_file: bool,
-        main_candidates: &HashSet<String>,
+        main_candidates: &FxHashSet<String>,
     ) -> &'static str {
         let header = entry.header.to_lowercase();
         if !is_header_file && main_candidates.contains(&header) {
@@ -257,7 +256,7 @@ impl IncludeOrderPolicy {
             return title;
         }
 
-        let mut labels = HashSet::new();
+        let mut labels = FxHashSet::default();
         for item in items {
             let prefix = item.header.split('/').next().unwrap_or("").to_lowercase();
             if prefix.is_empty() {
@@ -319,7 +318,7 @@ impl Policy for IncludeOrderPolicy {
         let include_entries =
             Self::collect_include_entries_from_tree(tree.root_node(), source, lines.len(), context.query_cache);
         let include_lines: Vec<usize> = include_entries.iter().map(|(idx, _)| *idx).collect();
-        let entry_map: HashMap<usize, &IncludeEntry> =
+        let entry_map: FxHashMap<usize, &IncludeEntry> =
             include_entries.iter().map(|(idx, entry)| (*idx, entry)).collect();
         let Some(cluster) = self.choose_include_cluster(&include_lines) else {
             return PolicyResult::unchanged();
@@ -342,7 +341,7 @@ impl Policy for IncludeOrderPolicy {
         // Structural-safe policy: per-policy checkpoint validates tree-sitter after edits.
         // Only macro regions are skipped; diagnostic error lines are not a concern.
 
-        let mut groups: HashMap<&'static str, Vec<IncludeEntry>> = HashMap::new();
+        let mut groups: FxHashMap<&'static str, Vec<IncludeEntry>> = FxHashMap::default();
         groups.insert("main", Vec::new());
         groups.insert("standard", Vec::new());
         groups.insert("third_party", Vec::new());
@@ -438,7 +437,7 @@ impl Policy for IncludeOrderPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::path::PathBuf;
 
     use tree_sitter::Parser;
@@ -473,21 +472,21 @@ mod tests {
                 "project".to_string(),
                 "local".to_string(),
             ],
-            HashSet::new(),
+            FxHashSet::default(),
             Vec::new(),
-            HashSet::new(),
+            FxHashSet::default(),
             project_prefixes,
             vec![".hpp".to_string(), ".h".to_string()],
             64,
             false,
-            HashMap::from([
+            [
                 ("main".to_string(), "Main header".to_string()),
                 ("standard".to_string(), "Standard Cpp Libraries".to_string()),
                 ("third_party".to_string(), "Third-party headers".to_string()),
                 ("project".to_string(), "Project headers".to_string()),
                 ("local".to_string(), "User Defined Headers".to_string()),
-            ]),
-            HashMap::new(),
+            ].into_iter().collect(),
+            FxHashMap::default(),
         );
 
         let text = "#include \"project/foo.h\"\n#include <vector>\n#include \"main.hpp\"\n#include <fmt/format.h>\n\nint main() { return 0; }\n".to_string();

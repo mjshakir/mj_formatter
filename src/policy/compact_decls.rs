@@ -5,8 +5,8 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::parser::node_kind;
 use crate::parser::ts_traversal;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::query_cache::TsQueryCache;
 use crate::policy::Policy;
 use std::borrow::Cow;
@@ -36,12 +36,16 @@ impl CompactDeclarationsPolicy {
     fn collect_decl_nodes<'a>(
         root: Node<'a>,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> Vec<Node<'a>> {
-        ts_traversal::query_or_traverse_collect(
+        ts_traversal::query_or_traverse_in_ranges_collect(
             root,
             Self::DECL_QUERY,
             query_cache,
-            &[node_kind::DECLARATION],
+            &[ts_cpp_symbols::sym_declaration],
+            source,
+            changed_ranges,
         )
     }
 
@@ -49,11 +53,11 @@ impl CompactDeclarationsPolicy {
         if node.start_position().row != node.end_position().row {
             return None;
         }
-        let declarator = node.child_by_field_name("declarator")?;
-        if declarator.kind() != node_kind::IDENTIFIER {
+        let declarator = node.child_by_field_id(ts_cpp_symbols::field_declarator)?;
+        if declarator.kind_id() != ts_cpp_symbols::sym_identifier {
             return None;
         }
-        let type_node = node.child_by_field_name("type")?;
+        let type_node = node.child_by_field_id(ts_cpp_symbols::field_type)?;
         let type_text = type_node.utf8_text(source).ok()?;
         if type_text.is_empty() {
             return None;
@@ -63,10 +67,10 @@ impl CompactDeclarationsPolicy {
             let Some(child) = node.child(i as u32) else {
                 continue;
             };
-            if child.id() == declarator.id() || child.kind() == ";" {
+            if child.id() == declarator.id() || child.kind_id() == ts_cpp_symbols::anon_sym_SEMI {
                 break;
             }
-            if child.kind() == "type_qualifier" || child.kind() == "storage_class_specifier" {
+            if child.kind_id() == ts_cpp_symbols::sym_type_qualifier || child.kind_id() == ts_cpp_symbols::sym_storage_class_specifier {
                 if let Ok(text) = child.utf8_text(source) {
                     type_prefix_parts.push(text);
                 }
@@ -103,8 +107,9 @@ impl CompactDeclarationsPolicy {
         root: Node<'_>,
         source: &[u8],
         query_cache: Option<&TsQueryCache>,
+        changed_ranges: Option<&[tree_sitter::Range]>,
     ) -> FxHashMap<usize, CandidateDecl> {
-        let decl_nodes = Self::collect_decl_nodes(root, query_cache);
+        let decl_nodes = Self::collect_decl_nodes(root, query_cache, source, changed_ranges);
         let mut map = FxHashMap::default();
         for node in &decl_nodes {
             if let Some((row, candidate)) = Self::candidate_from_node(node, source) {
@@ -172,7 +177,7 @@ impl Policy for CompactDeclarationsPolicy {
         }
 
         let source = context.text.as_bytes();
-        let candidates = Self::build_candidate_map(tree.root_node(), source, context.query_cache);
+        let candidates = Self::build_candidate_map(tree.root_node(), source, context.query_cache, context.changed_ranges);
 
         let mut after_lines: Vec<Cow<'_, str>> = Vec::with_capacity(before_lines.len());
         let mut violations = Vec::new();

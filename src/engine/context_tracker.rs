@@ -24,12 +24,11 @@ impl FileContextKind {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match ext.as_str() {
-            "h" | "hh" | "hpp" | "hxx" | "ipp" | "inl" => Self::Header,
-            "c" | "cc" | "cpp" | "cxx" => Self::Implementation,
-            _ => Self::Header,
+            .unwrap_or("");
+        if crate::files::file_unit::is_implementation_extension(ext) {
+            Self::Implementation
+        } else {
+            Self::Header
         }
     }
 
@@ -46,8 +45,8 @@ pub enum BlockContextKind {
     Template = 5,
 }
 
-impl BlockContextKind {
-    pub fn from_scope_kind(kind: SemanticScopeKind) -> Self {
+impl From<SemanticScopeKind> for BlockContextKind {
+    fn from(kind: SemanticScopeKind) -> Self {
         match kind {
             SemanticScopeKind::Namespace => Self::Namespace,
             SemanticScopeKind::Type => Self::Type,
@@ -515,8 +514,8 @@ mod tests {
     fn file_modifiers_neutral() {
         let tracker = PolicyContextTracker::new();
         let mods = tracker.batch_file_modifiers(FileContextKind::Header);
-        for i in 0..NUM_POLICIES {
-            assert!((mods[i] - 1.0).abs() < 1e-6, "policy {} not neutral: {}", i, mods[i]);
+        for (i, &m) in mods.iter().enumerate().take(NUM_POLICIES) {
+            assert!((m - 1.0).abs() < 1e-6, "policy {} not neutral: {}", i, m);
         }
     }
 
@@ -591,8 +590,8 @@ mod tests {
     fn block_modifiers_neutral() {
         let tracker = PolicyContextTracker::new();
         let mods = tracker.batch_block_modifiers(BlockContextKind::Function);
-        for p in 0..NUM_POLICIES {
-            assert!((mods[p] - 1.0).abs() < 1e-6, "policy {p} should be neutral");
+        for (p, &m) in mods.iter().enumerate().take(NUM_POLICIES) {
+            assert!((m - 1.0).abs() < 1e-6, "policy {p} should be neutral");
         }
     }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use crate::config::app_config::AppConfig;
 use crate::config::policy_config::PolicyConfig;
@@ -99,15 +99,15 @@ impl PolicyFactory {
                     .string_value("mode")
                     .map(|value| IncludeGuardMode::from_value(&value))
                     .unwrap_or(IncludeGuardMode::PragmaOnce);
-                let header_extensions: HashSet<String> = settings
+                let header_extensions: FxHashSet<String> = settings
                     .string_list_value("header_extensions")
                     .into_iter()
                     .map(|value| value.to_lowercase())
                     .collect();
                 let header_extensions = if header_extensions.is_empty() {
-                    [".h", ".hpp", ".hh", ".hxx"]
+                    crate::files::file_unit::HEADER_EXTENSIONS
                         .iter()
-                        .map(|value| value.to_string())
+                        .map(|e| format!(".{e}"))
                         .collect()
                 } else {
                     header_extensions
@@ -117,7 +117,7 @@ impl PolicyFactory {
             PolicyId::IncludeOrder => {
                 let order_header = settings.string_list_value("order_header");
                 let order_source = settings.string_list_value("order_source");
-                let standard_headers: HashSet<String> = settings
+                let standard_headers: FxHashSet<String> = settings
                     .string_list_value("standard_headers")
                     .into_iter()
                     .map(|item| item.to_lowercase())
@@ -127,7 +127,7 @@ impl PolicyFactory {
                     .into_iter()
                     .map(|item| item.to_lowercase())
                     .collect();
-                let project_headers: HashSet<String> = settings
+                let project_headers: FxHashSet<String> = settings
                     .string_list_value("project_headers")
                     .into_iter()
                     .map(|item| item.to_lowercase())

@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
-use tree_sitter::{Node, Tree};
+use tree_sitter::{Node, StreamingIterator, Tree};
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
@@ -9,6 +9,8 @@ use crate::model::violation::Violation;
 use crate::policy::Policy;
 use std::borrow::Cow;
 
+use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::policy::text_utils::join_lines_cow;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,11 +32,11 @@ impl IncludeGuardMode {
 
 pub struct IncludeGuardsPolicy {
     mode: IncludeGuardMode,
-    header_extensions: HashSet<String>,
+    header_extensions: FxHashSet<String>,
 }
 
 impl IncludeGuardsPolicy {
-    pub fn new(mode: IncludeGuardMode, header_extensions: HashSet<String>) -> Self {
+    pub fn new(mode: IncludeGuardMode, header_extensions: FxHashSet<String>) -> Self {
         Self {
             mode,
             header_extensions,
@@ -48,38 +50,28 @@ impl IncludeGuardsPolicy {
             .any(|ext| lower.ends_with(ext.as_str()))
     }
 
-    fn has_pragma_once_ts(tree: &Tree, source: &[u8]) -> bool {
-        let root = tree.root_node();
-        for i in 0..root.child_count() {
-            let Some(child) = root.child(i as u32) else {
-                continue;
-            };
-            if child.kind() != "preproc_call" {
-                continue;
-            }
-            if let Some(directive) = child.child_by_field_name("directive") {
-                if let Ok(text) = directive.utf8_text(source) {
-                    if text == "#pragma" {
-                        if let Some(argument) = child.child_by_field_name("argument") {
-                            if let Ok(arg) = argument.utf8_text(source) {
-                                if arg.trim() == "once" {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
-    }
+    const PRAGMA_ONCE_QUERY: &str = r##"(preproc_call
+        directive: (preproc_directive) @d (#eq? @d "#pragma")
+        argument: (preproc_arg) @a (#eq? @a "once")
+    ) @call"##;
 
-    fn has_pragma_once(tree: Option<&Tree>, source: &[u8]) -> bool {
-        if let Some(tree) = tree {
-            Self::has_pragma_once_ts(tree, source)
-        } else {
-            false
-        }
+    fn has_pragma_once(
+        tree: Option<&Tree>,
+        source: &[u8],
+        query_cache: Option<&TsQueryCache>,
+    ) -> bool {
+        let tree = match tree {
+            Some(t) => t,
+            None => return false,
+        };
+        let query = match query_cache.and_then(|qc| qc.get_or_compile(Self::PRAGMA_ONCE_QUERY).ok()) {
+            Some(q) => q,
+            None => return false,
+        };
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source);
+        matches.advance();
+        matches.get().is_some()
     }
 
     fn find_top_insert(lines: &[Cow<'_, str>]) -> usize {
@@ -128,14 +120,14 @@ impl IncludeGuardsPolicy {
 
     fn has_include_guard_ts(tree: &Tree, source: &[u8]) -> bool {
         let root = tree.root_node();
-        for i in 0..root.child_count() {
-            let Some(child) = root.child(i as u32) else {
+        for i in 0..root.named_child_count() {
+            let Some(child) = root.named_child(i as u32) else {
                 continue;
             };
-            if child.kind() != "preproc_ifdef" {
+            if child.kind_id() != ts_cpp_symbols::sym_preproc_ifdef {
                 continue;
             }
-            let Some(name_node) = child.child_by_field_name("name") else {
+            let Some(name_node) = child.child_by_field_id(ts_cpp_symbols::field_name) else {
                 continue;
             };
             let Ok(ifndef_name) = name_node.utf8_text(source) else {
@@ -152,14 +144,14 @@ impl IncludeGuardsPolicy {
     }
 
     fn has_matching_define(ifdef_node: &Node<'_>, source: &[u8], guard_name: &str) -> bool {
-        for i in 0..ifdef_node.child_count() {
-            let Some(child) = ifdef_node.child(i as u32) else {
+        for i in 0..ifdef_node.named_child_count() {
+            let Some(child) = ifdef_node.named_child(i as u32) else {
                 continue;
             };
-            if child.kind() != "preproc_def" {
+            if child.kind_id() != ts_cpp_symbols::sym_preproc_def {
                 continue;
             }
-            if let Some(name_node) = child.child_by_field_name("name") {
+            if let Some(name_node) = child.child_by_field_id(ts_cpp_symbols::field_name) {
                 if let Ok(name) = name_node.utf8_text(source) {
                     if name == guard_name {
                         return true;
@@ -206,7 +198,7 @@ impl Policy for IncludeGuardsPolicy {
 
         let tree = context.tree_sitter_tree;
         let source = context.text.as_bytes();
-        let has_pragma = Self::has_pragma_once(tree, source);
+        let has_pragma = Self::has_pragma_once(tree, source, context.query_cache);
         let has_guard = Self::has_include_guard(tree, source);
 
         if matches!(
@@ -298,7 +290,7 @@ impl Policy for IncludeGuardsPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet;
     use std::path::PathBuf;
 
     use super::*;
@@ -308,7 +300,7 @@ mod tests {
 
     #[test]
     fn adds_pragma_once() {
-        let mut exts = HashSet::new();
+        let mut exts = FxHashSet::default();
         exts.insert(".hpp".to_string());
         let policy = IncludeGuardsPolicy::new(IncludeGuardMode::PragmaOnce, exts);
         let text = "class A {};\n".to_string();

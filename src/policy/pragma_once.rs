@@ -1,9 +1,10 @@
-use tree_sitter::Tree;
+use tree_sitter::{StreamingIterator, Tree};
 
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
+use crate::parser::query_cache::TsQueryCache;
 use crate::policy::Policy;
 use std::borrow::Cow;
 
@@ -18,20 +19,24 @@ impl PragmaOnceSpacingPolicy {
         Self { blank_lines_after }
     }
 
-    fn find_pragma_once_line_ts(tree: &Tree, source: &[u8]) -> Option<usize> {
-        let root = tree.root_node();
-        for i in 0..root.child_count() {
-            let Some(child) = root.child(i as u32) else { continue };
-            if child.kind() != "preproc_call" {
-                continue;
-            }
-            let directive = child.child_by_field_name("directive")?;
-            if directive.utf8_text(source).ok()? != "pragma" {
-                continue;
-            }
-            if let Some(argument) = child.child_by_field_name("argument") {
-                if argument.utf8_text(source).ok().is_some_and(|t| t.trim() == "once") {
-                    return Some(child.start_position().row);
+    const PRAGMA_ONCE_QUERY: &str = r##"(preproc_call
+        directive: (preproc_directive) @d (#eq? @d "#pragma")
+        argument: (preproc_arg) @a (#eq? @a "once")
+    ) @call"##;
+
+    fn find_pragma_once_line(
+        tree: &Tree,
+        source: &[u8],
+        query_cache: Option<&TsQueryCache>,
+    ) -> Option<usize> {
+        let query = query_cache?.get_or_compile(Self::PRAGMA_ONCE_QUERY).ok()?;
+        let call_idx = query.capture_index_for_name("call")?;
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source);
+        while let Some(m) = { matches.advance(); matches.get() } {
+            for capture in m.captures {
+                if capture.index == call_idx {
+                    return Some(capture.node.start_position().row);
                 }
             }
         }
@@ -63,7 +68,7 @@ impl Policy for PragmaOnceSpacingPolicy {
 
         let pragma_index = context
             .tree_sitter_tree
-            .and_then(|tree| Self::find_pragma_once_line_ts(tree, text.as_bytes()));
+            .and_then(|tree| Self::find_pragma_once_line(tree, text.as_bytes(), context.query_cache));
         let Some(pragma_index) = pragma_index else {
             return PolicyResult::unchanged();
         };

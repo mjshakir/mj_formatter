@@ -68,10 +68,13 @@ impl FileUnitKind {
         let mut candidates = vec![parent.to_path_buf()];
         let segments = parent_key.split('/').collect::<Vec<_>>();
         for index in 0..segments.len() {
-            let replacements = match segments[index].to_ascii_lowercase().as_str() {
-                "include" | "inc" => ["src", "source"].as_slice(),
-                "src" | "source" => ["include", "inc"].as_slice(),
-                _ => continue,
+            let lower = segments[index].to_ascii_lowercase();
+            let replacements: &[&str] = if HEADER_DIR_NAMES.iter().any(|d| d.eq_ignore_ascii_case(&lower)) {
+                &SOURCE_DIR_NAMES
+            } else if SOURCE_DIR_NAMES.iter().any(|d| d.eq_ignore_ascii_case(&lower)) {
+                &HEADER_DIR_NAMES
+            } else {
+                continue;
             };
             for replacement in replacements {
                 let mut candidate_segments = segments.clone();
@@ -225,8 +228,18 @@ struct FileUnitAccumulator {
     has_implementation: bool,
 }
 
-const HEADER_EXTENSIONS: [&str; 6] = ["h", "hh", "hpp", "hxx", "ipp", "inl"];
-const IMPLEMENTATION_EXTENSIONS: [&str; 4] = ["c", "cc", "cpp", "cxx"];
+pub(crate) const HEADER_EXTENSIONS: [&str; 6] = ["h", "hh", "hpp", "hxx", "ipp", "inl"];
+pub(crate) const IMPLEMENTATION_EXTENSIONS: [&str; 4] = ["c", "cc", "cpp", "cxx"];
+pub(crate) const HEADER_DIR_NAMES: [&str; 2] = ["include", "inc"];
+pub(crate) const SOURCE_DIR_NAMES: [&str; 2] = ["src", "source"];
+
+pub(crate) fn is_header_extension(ext: &str) -> bool {
+    HEADER_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
+
+pub(crate) fn is_implementation_extension(ext: &str) -> bool {
+    IMPLEMENTATION_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
 
 #[cfg(test)]
 mod tests {

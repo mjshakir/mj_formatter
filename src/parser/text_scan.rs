@@ -1,3 +1,5 @@
+use tree_sitter::StreamingIterator;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TextScanEngine;
 
@@ -101,27 +103,7 @@ impl TextScanEngine {
         if from >= haystack.len() {
             return None;
         }
-        if needle.len() == 1 {
-            return self.find_byte_in_range(haystack, needle[0], from, haystack.len());
-        }
-        if haystack.len().saturating_sub(from) < needle.len() {
-            return None;
-        }
-
-        let first = needle[0];
-        let suffix = &needle[1..];
-        let last_start = haystack.len() - needle.len();
-        let mut cursor = from;
-        while cursor <= last_start {
-            let search_end = last_start + 1;
-            let candidate = self.find_byte_in_range(haystack, first, cursor, search_end)?;
-            let end = candidate + needle.len();
-            if haystack[candidate + 1..end] == *suffix {
-                return Some(candidate);
-            }
-            cursor = candidate + 1;
-        }
-        None
+        memchr::memmem::find(&haystack[from..], needle).map(|pos| pos + from)
     }
 
     #[inline]
@@ -134,20 +116,6 @@ impl TextScanEngine {
         for pos in memchr::memchr_iter(needle, bytes) {
             on_match(pos);
         }
-    }
-
-    #[inline]
-    fn find_byte_in_range(
-        &self,
-        bytes: &[u8],
-        needle: u8,
-        from: usize,
-        end_exclusive: usize,
-    ) -> Option<usize> {
-        if from >= end_exclusive || end_exclusive > bytes.len() {
-            return None;
-        }
-        memchr::memchr(needle, &bytes[from..end_exclusive]).map(|pos| pos + from)
     }
 
     #[inline]
@@ -599,32 +567,33 @@ pub(crate) fn find_subslice_from(haystack: &[u8], needle: &[u8], from: usize) ->
     TEXT_SCAN.find_subslice_from(haystack, needle, from)
 }
 
+const NON_CODE_QUERY: &str = r#"[
+    (comment) @nc
+    (string_literal) @nc
+    (raw_string_literal) @nc
+    (char_literal) @nc
+    (system_lib_string) @nc
+    (concatenated_string) @nc
+]"#;
+
 pub(crate) fn non_code_ranges(tree: &tree_sitter::Tree) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
-    let mut cursor = tree.walk();
-    non_code_ranges_walk(&mut cursor, &mut ranges);
-    ranges.sort_unstable_by_key(|r| r.0);
-    ranges
-}
-
-fn non_code_ranges_walk(
-    cursor: &mut tree_sitter::TreeCursor,
-    ranges: &mut Vec<(usize, usize)>,
-) {
-    loop {
-        let node = cursor.node();
-        let kind = node.kind();
-        if kind == super::node_kind::COMMENT || super::node_kind::is_string_like(kind)
-        {
-            ranges.push((node.start_byte(), node.end_byte()));
-        } else if cursor.goto_first_child() {
-            non_code_ranges_walk(cursor, ranges);
-            cursor.goto_parent();
-        }
-        if !cursor.goto_next_sibling() {
-            break;
+    let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+    if let Ok(query) = tree_sitter::Query::new(&language, NON_CODE_QUERY) {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let empty: &[u8] = &[];
+        let mut matches = cursor.matches(&query, tree.root_node(), empty);
+        while let Some(m) = {
+            matches.advance();
+            matches.get()
+        } {
+            for capture in m.captures {
+                ranges.push((capture.node.start_byte(), capture.node.end_byte()));
+            }
         }
     }
+    ranges.sort_unstable_by_key(|r| r.0);
+    ranges
 }
 
 #[cfg(test)]

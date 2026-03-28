@@ -5,6 +5,7 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 use std::borrow::Cow;
@@ -37,16 +38,14 @@ impl OperatorOverloadSpacingPolicy {
             root,
             Self::OPERATOR_QUERY,
             query_cache,
-            &["operator_name"],
+            &[ts_cpp_symbols::sym_operator_name],
+            text.as_bytes(),
             |node| {
-                let snippet = node.utf8_text(text.as_bytes()).unwrap_or("");
-                if snippet.contains("operator") {
-                    spans.push(OperatorSpan {
-                        byte_start: node.start_byte(),
-                        byte_end: node.end_byte(),
-                        line: node.start_position().row,
-                    });
-                }
+                spans.push(OperatorSpan {
+                    byte_start: node.start_byte(),
+                    byte_end: node.end_byte(),
+                    line: node.start_position().row,
+                });
             },
         );
 
@@ -57,17 +56,13 @@ impl OperatorOverloadSpacingPolicy {
         context: &PolicyContext<'_>,
         line: usize,
     ) -> Option<String> {
-        let clang = context.clang_parse_result?;
-        let symbol = clang.symbol_on_line_by_kinds(
-            line,
-            &[
-                clang_sys::CXCursor_CXXMethod,
-                clang_sys::CXCursor_FunctionDecl,
-                clang_sys::CXCursor_FunctionTemplate,
-            ],
-        )?;
-        if symbol.name.starts_with("operator") {
-            Some(symbol.name.clone())
+        let semantic = context.semantic_file_context?;
+        let decl = semantic.symbol_on_line_by_kinds(line, &[])
+            .filter(|d| {
+                crate::parser::clang_types::is_function_like_kind(d.kind)
+            })?;
+        if decl.name.starts_with("operator") {
+            Some(decl.name.clone())
         } else {
             None
         }
@@ -230,11 +225,10 @@ mod tests {
         let path = PathBuf::from("op.cpp");
         let source = "struct X { X operator +(const X& rhs) const; };\n";
         let tree = parse_cpp(source);
-        let (clang, semantic) = semantic_for(source, &path, &tree);
+        let (_clang, semantic) = semantic_for(source, &path, &tree);
         let shared = PolicySharedData::new(source, None);
         let ctx = PolicyContext::new(source, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
@@ -250,11 +244,10 @@ mod tests {
         let path = PathBuf::from("op.cpp");
         let source = "struct X { explicit operator bool() const; };\n";
         let tree = parse_cpp(source);
-        let (clang, semantic) = semantic_for(source, &path, &tree);
+        let (_clang, semantic) = semantic_for(source, &path, &tree);
         let shared = PolicySharedData::new(source, None);
         let ctx = PolicyContext::new(source, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use tree_sitter::Node;
 
@@ -6,8 +6,8 @@ use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::violation::Violation;
-use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
+use crate::parser::ts_cpp_symbols;
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 use std::borrow::Cow;
@@ -23,8 +23,8 @@ struct BlockCandidate {
 }
 
 pub struct NsCommentsPolicy {
-    blocks_filter: HashSet<String>,
-    control_block_kinds: HashSet<String>,
+    blocks_filter: FxHashSet<String>,
+    control_block_kinds: FxHashSet<String>,
     max_named_lines: usize,
     max_label_length: usize,
 }
@@ -54,38 +54,33 @@ impl NsCommentsPolicy {
         }
     }
 
-    fn canonical_kind(node_kind: &str) -> Option<&'static str> {
-        match node_kind {
-            node_kind::NAMESPACE_DEFINITION => Some("namespace"),
-            node_kind::CLASS_SPECIFIER => Some("class"),
-            node_kind::STRUCT_SPECIFIER => Some("struct"),
-            node_kind::FUNCTION_DEFINITION => Some("function"),
-            node_kind::IF_STATEMENT => Some("if"),
-            node_kind::FOR_STATEMENT => Some("for"),
-            node_kind::WHILE_STATEMENT => Some("while"),
-            node_kind::SWITCH_STATEMENT => Some("switch"),
-            node_kind::CATCH_CLAUSE => Some("catch"),
+    fn canonical_kind(kind_id: u16) -> Option<&'static str> {
+        match kind_id {
+            ts_cpp_symbols::sym_namespace_definition => Some("namespace"),
+            ts_cpp_symbols::sym_class_specifier => Some("class"),
+            ts_cpp_symbols::sym_struct_specifier => Some("struct"),
+            ts_cpp_symbols::sym_function_definition => Some("function"),
+            ts_cpp_symbols::sym_if_statement => Some("if"),
+            ts_cpp_symbols::sym_for_statement => Some("for"),
+            ts_cpp_symbols::sym_while_statement => Some("while"),
+            ts_cpp_symbols::sym_switch_statement => Some("switch"),
+            ts_cpp_symbols::sym_catch_clause => Some("catch"),
             _ => None,
         }
     }
 
     fn body_node(node: Node<'_>) -> Option<Node<'_>> {
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = node.child_by_field_id(ts_cpp_symbols::field_body) {
             return Some(body);
         }
-        if let Some(consequence) = node.child_by_field_name("consequence") {
+        if let Some(consequence) = node.child_by_field_id(ts_cpp_symbols::field_consequence) {
             return Some(consequence);
         }
-        let body_kinds = [
-            node_kind::COMPOUND_STATEMENT,
-            node_kind::DECLARATION_LIST,
-            node_kind::FIELD_DECLARATION_LIST,
-        ];
-        for idx in 0..node.child_count() {
-            let Some(child) = node.child(idx as u32) else {
+        for idx in 0..node.named_child_count() {
+            let Some(child) = node.named_child(idx as u32) else {
                 continue;
             };
-            if body_kinds.contains(&child.kind()) {
+            if ts_cpp_symbols::is_compound_body(child.kind_id()) {
                 return Some(child);
             }
         }
@@ -109,8 +104,8 @@ impl NsCommentsPolicy {
             "namespace" => {
                 let node = ts_traversal::first_descendant_excluding_root(
                     node,
-                    &[node_kind::NAMESPACE_IDENTIFIER, node_kind::IDENTIFIER],
-                    &[node_kind::DECLARATION_LIST],
+                    &[ts_cpp_symbols::alias_sym_namespace_identifier, ts_cpp_symbols::sym_identifier],
+                    &[ts_cpp_symbols::sym_declaration_list],
                 )?;
                 let name = Self::node_text(node, text)?;
                 (!name.is_empty()).then_some(format!("namespace {name}"))
@@ -118,8 +113,8 @@ impl NsCommentsPolicy {
             "class" | "struct" => {
                 let node = ts_traversal::first_descendant_excluding_root(
                     node,
-                    &[node_kind::TYPE_IDENTIFIER],
-                    &[node_kind::FIELD_DECLARATION_LIST],
+                    &[ts_cpp_symbols::alias_sym_type_identifier],
+                    &[ts_cpp_symbols::sym_field_declaration_list],
                 )?;
                 let name = Self::node_text(node, text)?;
                 (!name.is_empty()).then_some(format!("{canonical_kind} {name}"))
@@ -127,16 +122,16 @@ impl NsCommentsPolicy {
             "function" => {
                 let declarator = ts_traversal::first_descendant_excluding_root(
                     node,
-                    &[node_kind::FUNCTION_DECLARATOR],
-                    &[node_kind::COMPOUND_STATEMENT],
+                    &[ts_cpp_symbols::sym_function_declarator],
+                    &[ts_cpp_symbols::sym_compound_statement],
                 )?;
                 let name_node = ts_traversal::rightmost_descendant(
                     declarator,
-                    &[node_kind::IDENTIFIER, node_kind::FIELD_IDENTIFIER, node_kind::TYPE_IDENTIFIER],
-                    &[node_kind::PARAMETER_LIST, node_kind::TEMPLATE_PARAMETER_LIST],
+                    &[ts_cpp_symbols::sym_identifier, ts_cpp_symbols::alias_sym_field_identifier, ts_cpp_symbols::alias_sym_type_identifier],
+                    &[ts_cpp_symbols::sym_parameter_list, ts_cpp_symbols::sym_template_parameter_list],
                 )?;
                 let name = Self::node_text(name_node, text)?;
-                let short = name.split("::").last().unwrap_or(name.as_str()).trim();
+                let short = name.trim();
                 (!short.is_empty()).then_some(format!("{short}(...)"))
             }
             _ => None,
@@ -215,7 +210,7 @@ impl NsCommentsPolicy {
         let mut blocks = Vec::new();
 
         let process_node = |node: Node<'_>, blocks: &mut Vec<BlockCandidate>| {
-            if let Some(canonical_kind) = Self::canonical_kind(node.kind()) {
+            if let Some(canonical_kind) = Self::canonical_kind(node.kind_id()) {
                 if self.include_block_kind(canonical_kind) {
                     if let Some(body) = Self::body_node(node) {
                         let open_line = node.start_position().row + 1;
@@ -240,16 +235,17 @@ impl NsCommentsPolicy {
             Self::BLOCK_QUERY,
             query_cache,
             &[
-                node_kind::NAMESPACE_DEFINITION,
-                node_kind::CLASS_SPECIFIER,
-                node_kind::STRUCT_SPECIFIER,
-                node_kind::FUNCTION_DEFINITION,
-                node_kind::IF_STATEMENT,
-                node_kind::FOR_STATEMENT,
-                node_kind::WHILE_STATEMENT,
-                node_kind::SWITCH_STATEMENT,
-                node_kind::CATCH_CLAUSE,
+                ts_cpp_symbols::sym_namespace_definition,
+                ts_cpp_symbols::sym_class_specifier,
+                ts_cpp_symbols::sym_struct_specifier,
+                ts_cpp_symbols::sym_function_definition,
+                ts_cpp_symbols::sym_if_statement,
+                ts_cpp_symbols::sym_for_statement,
+                ts_cpp_symbols::sym_while_statement,
+                ts_cpp_symbols::sym_switch_statement,
+                ts_cpp_symbols::sym_catch_clause,
             ],
+            text.as_bytes(),
             |node| {
                 process_node(node, &mut blocks);
             },
@@ -410,11 +406,10 @@ mod tests {
         let text = "namespace demo {\nint x = 1;\n}\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
@@ -427,11 +422,10 @@ mod tests {
         let text = "namespace demo {\nint x = 1;\n} // wrong\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
@@ -444,11 +438,10 @@ mod tests {
         let text = "int f(void) {\nreturn 0;\n} // end f(void)\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
@@ -461,11 +454,10 @@ mod tests {
         let text = "int f(void) {\nreturn 0;\n}\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
@@ -478,11 +470,10 @@ mod tests {
         let text = "struct Slot {\nint value;\n};\n".to_string();
         let tree = parse_cpp(&text);
         let path = PathBuf::from("a.cpp");
-        let (clang, semantic) = semantic_for(text.as_str(), &path, &tree);
+        let (_clang, semantic) = semantic_for(text.as_str(), &path, &tree);
         let shared = PolicySharedData::new(text.as_str(), None);
         let ctx = PolicyContext::new(text.as_str(), &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&*clang))
             .with_semantic(Some(&semantic))
             .with_shared(Some(&shared));
         let result = policy.apply(&ctx);
