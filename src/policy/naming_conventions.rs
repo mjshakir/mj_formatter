@@ -10,13 +10,13 @@ use crate::model::policy_result::PolicyResult;
 use crate::model::context_query::SemanticContextQuery;
 use crate::model::rename_plan::SemanticRenamePlan;
 use crate::model::violation::Violation;
+use crate::parser::clang_types;
 use crate::parser::clang_types::ClangDeclKey;
-use crate::parser::clang_result::ClangParseResult;
-use crate::parser::file_context::SemanticFileContext;
-use crate::parser::node_kind;
+use crate::parser::file_context::{SemanticDeclaration, SemanticFileContext};
 use crate::parser::ts_traversal;
 use crate::policy::Policy;
 use crate::parser::text_scan;
+use crate::parser::ts_cpp_symbols;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RenamePlan {
@@ -178,7 +178,6 @@ struct IdentifierContext<'a> {
     pub(crate) ts_pointer: bool,
     pub(crate) ts_reference: bool,
     pub(crate) ts_type_text: Option<&'a str>,
-    pub(crate) clang_symbol: Option<&'a crate::parser::clang_symbol::ClangSymbol>,
 }
 
 struct RenameDiagnostics<'a> {
@@ -196,36 +195,18 @@ use crate::parser::simd_classify::find_uppercase_positions_into;
 use crate::parser::simd_classify::is_snake_case_bytes;
 use crate::parser::simd_classify::is_upper_snake_case_bytes;
 
-fn push_children_rev<'a>(stack: &mut SmallVec<[Node<'a>; 64]>, node: Node<'a>) {
-    for idx in (0..node.child_count()).rev() {
-        if let Some(child) = node.child(idx as u32) {
-            stack.push(child);
-        }
-    }
-}
-
 impl NamingConventionsPolicy {
-    fn semantic_parse_clean(
-        parse: &ClangParseResult,
-        semantic_context: Option<&SemanticFileContext>,
-    ) -> bool {
-        let summary = parse.diagnostic_summary();
-        if summary.fatal > 0 {
+    fn semantic_parse_clean(semantic: &SemanticFileContext) -> bool {
+        if semantic.diagnostic_summary.fatal > 0 {
             return false;
         }
-        if !parse.symbols.is_empty() {
+        if !semantic.declarations.is_empty() {
             return true;
         }
-        if semantic_context.is_some_and(|semantic| {
-            let summary = semantic.summary();
-            summary.declaration_count > 0 && summary.reference_count > 0
-        }) {
+        let summary = semantic.summary();
+        if summary.declaration_count > 0 && summary.reference_count > 0 {
             return true;
         }
-        // Allow renames without clang symbols when there are no fatal errors.
-        // Tree-sitter provides rename candidates; clang symbols only add
-        // confidence (stable_id, expected_occurrences). Without them, renames
-        // proceed at lower confidence through the trust gate.
         true
     }
 
@@ -243,48 +224,79 @@ impl NamingConventionsPolicy {
     }
 
     fn extract_ts_template_name<'a>(decl_node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
-        let type_node = decl_node.child_by_field_name("type")?;
-        if type_node.kind() != node_kind::TEMPLATE_TYPE {
+        let type_node = decl_node.child_by_field_id(ts_cpp_symbols::field_type)?;
+        if type_node.kind_id() != ts_cpp_symbols::sym_template_type {
             return None;
         }
-        let name_node = type_node.child_by_field_name("name")?;
+        let name_node = type_node.child_by_field_id(ts_cpp_symbols::field_name)?;
         let leaf = ts_traversal::first_descendant(
             name_node,
-            &[node_kind::TYPE_IDENTIFIER],
+            &[ts_cpp_symbols::alias_sym_type_identifier],
             &[],
         ).unwrap_or(name_node);
         leaf.utf8_text(source).ok()
     }
 
+    fn extract_type_context_from_clang<'a>(
+        decl: &SemanticDeclaration,
+        decl_node: Node<'a>,
+        source: &'a [u8],
+    ) -> IdentifierContext<'a> {
+        let ts_reference = decl_node
+            .child_by_field_id(ts_cpp_symbols::field_declarator)
+            .is_some_and(|declarator| {
+                if declarator.kind_id() == ts_cpp_symbols::sym_reference_declarator {
+                    return true;
+                }
+                if declarator.kind_id() == ts_cpp_symbols::sym_init_declarator {
+                    if let Some(inner) = declarator.child_by_field_id(ts_cpp_symbols::field_declarator) {
+                        return inner.kind_id() == ts_cpp_symbols::sym_reference_declarator;
+                    }
+                }
+                false
+            });
+        IdentifierContext {
+            ts_static: decl.storage_class == clang_sys::CX_SC_Static,
+            ts_const: decl.is_const_qualified,
+            ts_volatile: decl.is_volatile_qualified,
+            ts_pointer: decl.pointee_type_kind.is_some_and(|k| k != clang_sys::CXType_Invalid),
+            ts_reference,
+            ts_type_text: Self::extract_ts_template_name(decl_node, source),
+            ..IdentifierContext::default()
+        }
+    }
+
     fn extract_ts_type_context<'a>(decl_node: Node<'a>, source: &'a [u8]) -> IdentifierContext<'a> {
         let mut ctx = IdentifierContext::default();
-        for i in 0..decl_node.child_count() {
-            let Some(child) = decl_node.child(i as u32) else { continue };
-            match child.kind() {
-                "storage_class_specifier" => {
-                    if child.utf8_text(source).ok() == Some("static") {
+        for i in 0..decl_node.named_child_count() {
+            let Some(child) = decl_node.named_child(i as u32) else { continue };
+            match child.kind_id() {
+                ts_cpp_symbols::sym_storage_class_specifier => {
+                    if child.child(0).is_some_and(|c| c.kind_id() == ts_cpp_symbols::anon_sym_static) {
                         ctx.ts_static = true;
                     }
                 }
-                "type_qualifier" => {
-                    match child.utf8_text(source).ok() {
-                        Some("const") => ctx.ts_const = true,
-                        Some("volatile") => ctx.ts_volatile = true,
-                        _ => {}
+                ts_cpp_symbols::sym_type_qualifier => {
+                    if let Some(kw) = child.child(0) {
+                        match kw.kind_id() {
+                            ts_cpp_symbols::anon_sym_const => ctx.ts_const = true,
+                            ts_cpp_symbols::anon_sym_volatile => ctx.ts_volatile = true,
+                            _ => {}
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        if let Some(declarator) = decl_node.child_by_field_name("declarator") {
-            match declarator.kind() {
-                "pointer_declarator" => ctx.ts_pointer = true,
-                "reference_declarator" => ctx.ts_reference = true,
-                "init_declarator" => {
-                    if let Some(inner) = declarator.child_by_field_name("declarator") {
-                        match inner.kind() {
-                            "pointer_declarator" => ctx.ts_pointer = true,
-                            "reference_declarator" => ctx.ts_reference = true,
+        if let Some(declarator) = decl_node.child_by_field_id(ts_cpp_symbols::field_declarator) {
+            match declarator.kind_id() {
+                ts_cpp_symbols::sym_pointer_declarator => ctx.ts_pointer = true,
+                ts_cpp_symbols::sym_reference_declarator => ctx.ts_reference = true,
+                ts_cpp_symbols::sym_init_declarator => {
+                    if let Some(inner) = declarator.child_by_field_id(ts_cpp_symbols::field_declarator) {
+                        match inner.kind_id() {
+                            ts_cpp_symbols::sym_pointer_declarator => ctx.ts_pointer = true,
+                            ts_cpp_symbols::sym_reference_declarator => ctx.ts_reference = true,
                             _ => {}
                         }
                     }
@@ -315,86 +327,36 @@ impl NamingConventionsPolicy {
             prefix.push_str(&candidates.local);
         }
 
-        if let Some(sym) = ctx.clang_symbol {
-            if sym
-                .storage_class
-                .is_some_and(|sc| sc == clang_sys::CX_SC_Static)
-            {
-                prefix.push_str(&candidates.static_lower);
-            }
-            if sym.is_const {
-                prefix.push_str(&candidates.const_lower);
-            }
-            if sym.is_volatile {
-                prefix.push_str(&candidates.volatile);
-            }
-            let tmpl = sym.template_name.as_deref();
-            let type_pfx = match sym.type_kind {
-                clang_sys::CXType_Pointer => {
-                    if tmpl == Some("shared_ptr") {
-                        &candidates.shared_ptr
-                    } else if tmpl == Some("unique_ptr") {
-                        &candidates.unique_ptr
-                    } else if tmpl == Some("weak_ptr") {
-                        &candidates.weak_ptr
-                    } else {
-                        &candidates.pointer
-                    }
-                }
-                clang_sys::CXType_LValueReference | clang_sys::CXType_RValueReference => {
-                    &candidates.reference
-                }
-                clang_sys::CXType_Enum => &candidates.enum_var,
-                clang_sys::CXType_Record => &candidates.struct_var,
-                _ => {
-                    if tmpl == Some("shared_ptr") {
-                        &candidates.shared_ptr
-                    } else if tmpl == Some("unique_ptr") {
-                        &candidates.unique_ptr
-                    } else if tmpl == Some("weak_ptr") {
-                        &candidates.weak_ptr
-                    } else if tmpl == Some("function") {
-                        &candidates.function
-                    } else if tmpl == Some("atomic") {
-                        &candidates.atomic
-                    } else {
-                        ""
-                    }
-                }
-            };
-            prefix.push_str(type_pfx);
-        } else {
-            if ctx.ts_static {
-                prefix.push_str(&candidates.static_lower);
-            }
-            if ctx.ts_const {
-                prefix.push_str(&candidates.const_lower);
-            }
-            if ctx.ts_volatile {
-                prefix.push_str(&candidates.volatile);
-            }
-            let tmpl = ctx.ts_type_text;
-            let type_pfx = if ctx.ts_pointer {
-                match tmpl {
-                    Some("shared_ptr") => &candidates.shared_ptr,
-                    Some("unique_ptr") => &candidates.unique_ptr,
-                    Some("weak_ptr") => &candidates.weak_ptr,
-                    _ => &candidates.pointer,
-                }
-            } else if ctx.ts_reference {
-                &candidates.reference
-            } else {
-                match tmpl {
-                    Some("shared_ptr") => &candidates.shared_ptr,
-                    Some("unique_ptr") => &candidates.unique_ptr,
-                    Some("weak_ptr") => &candidates.weak_ptr,
-                    Some("function") | Some("Function") => &candidates.function,
-                    Some("atomic") | Some("Atomic") => &candidates.atomic,
-                    _ => "",
-                }
-            };
-            prefix.push_str(type_pfx);
+        if ctx.ts_static {
+            prefix.push_str(&candidates.static_lower);
         }
+        if ctx.ts_const {
+            prefix.push_str(&candidates.const_lower);
+        }
+        if ctx.ts_volatile {
+            prefix.push_str(&candidates.volatile);
+        }
+        let tmpl = ctx.ts_type_text;
+        let type_pfx = if ctx.ts_pointer {
+            match tmpl {
+                Some("shared_ptr") => &candidates.shared_ptr,
+                Some("unique_ptr") => &candidates.unique_ptr,
+                Some("weak_ptr") => &candidates.weak_ptr,
+                _ => &candidates.pointer,
+            }
+        } else if ctx.ts_reference {
+            &candidates.reference
+        } else {
+            match tmpl {
+                Some("shared_ptr") => &candidates.shared_ptr,
+                Some("unique_ptr") => &candidates.unique_ptr,
+                Some("weak_ptr") => &candidates.weak_ptr,
+                Some("function") | Some("Function") => &candidates.function,
+                Some("atomic") | Some("Atomic") => &candidates.atomic,
+                _ => "",
+            }
+        };
+        prefix.push_str(type_pfx);
     }
 
     const RENAME_CANDIDATE_QUERY: &str = r#"[
@@ -406,27 +368,21 @@ impl NamingConventionsPolicy {
     fn has_semantic_rename_candidates(
         root: Node<'_>,
         query_cache: Option<&crate::parser::query_cache::TsQueryCache>,
+        source: &[u8],
     ) -> bool {
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::RENAME_CANDIDATE_QUERY).ok())
-        {
+        let cached = query_cache
+            .and_then(|qc| qc.get_or_compile(Self::RENAME_CANDIDATE_QUERY).ok());
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let direct = if cached.is_none() {
+            tree_sitter::Query::new(&language, Self::RENAME_CANDIDATE_QUERY).ok()
+        } else {
+            None
+        };
+        if let Some(query) = cached.as_deref().or(direct.as_ref()) {
             let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
+            let mut matches = cursor.matches(query, root, source);
             matches.advance();
             return matches.get().is_some();
-        }
-
-        let mut stack: SmallVec<[Node; 64]> = SmallVec::from_elem(root, 1);
-        while let Some(node) = stack.pop() {
-            if matches!(
-                node.kind(),
-                node_kind::FUNCTION_DEFINITION
-                    | node_kind::DECLARATION
-                    | node_kind::FIELD_DECLARATION
-            ) {
-                return true;
-            }
-            push_children_rev(&mut stack, node);
         }
         false
     }
@@ -435,9 +391,11 @@ impl NamingConventionsPolicy {
         let Some(parent) = node.parent() else {
             return false;
         };
-        match parent.kind() {
-            node_kind::FOR_STATEMENT | node_kind::FOR_RANGE_LOOP | node_kind::WHILE_STATEMENT => {
-                let body = parent.child_by_field_name("body");
+        match parent.kind_id() {
+            ts_cpp_symbols::sym_for_statement
+            | ts_cpp_symbols::sym_for_range_loop
+            | ts_cpp_symbols::sym_while_statement => {
+                let body = parent.child_by_field_id(ts_cpp_symbols::field_body);
                 if let Some(body_node) = body {
                     node.start_byte() < body_node.start_byte()
                 } else {
@@ -452,20 +410,20 @@ impl NamingConventionsPolicy {
         let mut cursor = node;
         while let Some(parent) = cursor.parent() {
             if matches!(
-                parent.kind(),
-                node_kind::CLASS_SPECIFIER | node_kind::STRUCT_SPECIFIER
+                parent.kind_id(),
+                ts_cpp_symbols::sym_class_specifier | ts_cpp_symbols::sym_struct_specifier
             ) {
                 // Check the "name" field and all TYPE_IDENTIFIER children.
                 // Handles `class EXPORT_MACRO ClassName` where the name field
                 // may point to the macro rather than the class name.
-                if let Some(name_node) = parent.child_by_field_name("name") {
+                if let Some(name_node) = parent.child_by_field_id(ts_cpp_symbols::field_name) {
                     if name_node.utf8_text(source).is_ok_and(|cn| cn == name) {
                         return true;
                     }
                 }
-                for i in 0..parent.child_count() {
-                    if let Some(child) = parent.child(i as u32) {
-                        if child.kind() == node_kind::TYPE_IDENTIFIER
+                for i in 0..parent.named_child_count() {
+                    if let Some(child) = parent.named_child(i as u32) {
+                        if child.kind_id() == ts_cpp_symbols::alias_sym_type_identifier
                             && child.utf8_text(source).is_ok_and(|cn| cn == name)
                         {
                             return true;
@@ -483,29 +441,20 @@ impl NamingConventionsPolicy {
         Self::is_enclosing_class_match(name_node, name, source)
     }
 
-    fn is_ts_destructor<'a>(name_node: Node<'a>, _name: &str, source: &[u8]) -> bool {
-        // Check if any ancestor is destructor_name — handles the case where
-        // rightmost_descendant found the IDENTIFIER child inside destructor_name
+    fn is_ts_destructor<'a>(name_node: Node<'a>, _name: &str, _source: &[u8]) -> bool {
         let mut cursor = name_node;
         while let Some(parent) = cursor.parent() {
-            if parent.kind() == node_kind::DESTRUCTOR_NAME {
+            if parent.kind_id() == ts_cpp_symbols::sym_destructor_name {
                 return true;
             }
-            if parent.kind() == node_kind::FUNCTION_DECLARATOR
-                || parent.kind() == node_kind::FUNCTION_DEFINITION
+            if parent.kind_id() == ts_cpp_symbols::sym_function_declarator
+                || parent.kind_id() == ts_cpp_symbols::sym_function_definition
             {
                 break;
             }
             cursor = parent;
         }
-        // Fallback: check preceding ~ byte (for grammars that don't use destructor_name)
-        let start = name_node.start_byte();
-        if start == 0 || source[start - 1] != b'~' {
-            return false;
-        }
-        // In .cpp files the destructor implementation has no enclosing class_specifier,
-        // but ~ before the name is sufficient evidence
-        true
+        false
     }
 
     fn is_snake_case(name: &str) -> bool {
@@ -549,14 +498,6 @@ impl NamingConventionsPolicy {
         false
     }
 
-    #[cfg(test)]
-    fn to_snake_case(value: &str) -> String {
-        let mut out = String::with_capacity(value.len().saturating_add(4));
-        let mut pos_buf: SmallVec<[usize; 16]> = SmallVec::new();
-        Self::to_snake_case_into(value, &mut pos_buf, &mut out);
-        out
-    }
-
     fn to_snake_case_into(value: &str, pos_buf: &mut SmallVec<[usize; 16]>, out: &mut String) {
         out.clear();
         let bytes = value.as_bytes();
@@ -590,11 +531,6 @@ impl NamingConventionsPolicy {
                 result.push(bytes[i]);
             }
         }
-    }
-
-    #[cfg(test)]
-    fn to_upper_snake_case(value: &str) -> String {
-        Self::to_snake_case(value).to_ascii_uppercase()
     }
 
     fn has_identifier_boundaries(text: &str, start: usize, end: usize) -> bool {
@@ -668,7 +604,7 @@ impl NamingConventionsPolicy {
     #[allow(clippy::too_many_arguments)]
     fn resolve_rename_plan(
         semantic_query: &SemanticContextQuery<'_>,
-        clang_parse: &ClangParseResult,
+        semantic: &SemanticFileContext,
         old_name: &str,
         suggested: String,
         line: usize,
@@ -697,6 +633,9 @@ impl NamingConventionsPolicy {
                 });
                 return true;
             };
+            if declaration.is_anonymous {
+                return false;
+            }
             stable_id = Some(declaration.stable_id.clone());
             let references = semantic_query.references_of(declaration.stable_id.as_str());
             let safe_reference_count = references
@@ -706,7 +645,7 @@ impl NamingConventionsPolicy {
             expected_occurrences = references.len().max(1);
             minimum_required_occurrences = safe_reference_count.max(1);
         }
-        if clang_parse.has_name_elsewhere(&suggested, line) {
+        if semantic.has_name_elsewhere(&suggested, line) {
             return false;
         }
         rename_plans.push(RenamePlan {
@@ -730,7 +669,7 @@ impl NamingConventionsPolicy {
     fn build_replacements(
         &self,
         text: &str,
-        clang_parse: &ClangParseResult,
+        semantic: &SemanticFileContext,
         plans: &[RenamePlan],
         semantic_query: &SemanticContextQuery<'_>,
         non_code_ranges: &[(usize, usize)],
@@ -763,7 +702,7 @@ impl NamingConventionsPolicy {
                 semantic_offsets.dedup();
                 semantic_offsets
             } else {
-                let clang_offsets = clang_parse.rename_offsets(
+                let clang_offsets = semantic.rename_offsets(
                     &plan.old_name,
                     plan.line,
                     std::slice::from_ref(&plan.kind),
@@ -1019,7 +958,7 @@ impl NamingConventionsPolicy {
     fn apply_semantic_renames(
         &self,
         text: &str,
-        clang_parse: &ClangParseResult,
+        semantic: &SemanticFileContext,
         plans: &[RenamePlan],
         semantic_query: &SemanticContextQuery<'_>,
         non_code_ranges: &[(usize, usize)],
@@ -1027,7 +966,7 @@ impl NamingConventionsPolicy {
     ) -> (String, Vec<Edit>) {
         let mut replacements = self.build_replacements(
             text,
-            clang_parse,
+            semantic,
             plans,
             semantic_query,
             non_code_ranges,
@@ -1078,29 +1017,28 @@ impl Policy for NamingConventionsPolicy {
         let mut prefix_buf = String::with_capacity(16);
         let mut snake_buf = String::with_capacity(64);
         let mut upper_pos_buf: SmallVec<[usize; 16]> = SmallVec::new();
-        let clang_parse = context.clang_parse_result;
         let semantic_query = context.semantic_query();
         let semantic_file_context = context.semantic_file_context;
         let semantic_enabled = self.semantic_mode
-            && clang_parse
-                .is_some_and(|parse| Self::semantic_parse_clean(parse, semantic_file_context));
+            && semantic_file_context
+                .is_some_and(Self::semantic_parse_clean);
 
         let root = tree.root_node();
         let has_candidate_nodes =
-            Self::has_semantic_rename_candidates(root, context.query_cache);
+            Self::has_semantic_rename_candidates(root, context.query_cache, context.text.as_bytes());
 
         if self.semantic_mode {
-            match clang_parse {
-                Some(parse)
+            match semantic_file_context {
+                Some(ctx)
                     if has_candidate_nodes
-                        && !Self::semantic_parse_clean(parse, semantic_file_context) =>
+                        && !Self::semantic_parse_clean(ctx) =>
                 {
-                    let summary = parse.diagnostic_summary();
+                    let summary = ctx.diagnostic_summary;
                     warnings.push(
                         format!(
                             "naming_conventions: semantic rename skipped due insufficient semantic parse reliability (success={}, symbols={}, errors={}, fatals={})",
-                            parse.success,
-                            parse.symbols.len(),
+                            ctx.clang_success,
+                            ctx.declarations.len(),
                             summary.error,
                             summary.fatal
                         ),
@@ -1123,62 +1061,127 @@ impl Policy for NamingConventionsPolicy {
                 );
             }
         }
-        let mut stack: SmallVec<[Node; 64]> = SmallVec::from_elem(root, 1);
+        let candidates = ts_traversal::query_or_traverse_in_ranges_collect(
+            root,
+            Self::RENAME_CANDIDATE_QUERY,
+            context.query_cache,
+            &[ts_cpp_symbols::sym_function_definition, ts_cpp_symbols::sym_declaration, ts_cpp_symbols::sym_field_declaration],
+            context.text.as_bytes(),
+            context.changed_ranges,
+        );
+        for node in candidates {
+            'process: {
+                if node.kind_id() == ts_cpp_symbols::sym_function_definition {
+                    if let Some(declarator) =
+                        ts_traversal::first_descendant(node, &[ts_cpp_symbols::sym_function_declarator], &[ts_cpp_symbols::sym_compound_statement])
+                    {
+                        if let Some(name_node) = ts_traversal::rightmost_descendant(
+                            declarator,
+                            &[
+                                ts_cpp_symbols::sym_identifier,
+                                ts_cpp_symbols::alias_sym_field_identifier,
+                                ts_cpp_symbols::alias_sym_type_identifier,
+                                ts_cpp_symbols::sym_destructor_name,
+                            ],
+                            &[ts_cpp_symbols::sym_parameter_list, ts_cpp_symbols::sym_template_parameter_list],
+                        ) {
+                            let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
+                            let short = name;
+                            let line = name_node.start_position().row + 1;
+                            let source_column = name_node.start_position().column + 1;
+                            if name_node.kind_id() == ts_cpp_symbols::sym_destructor_name {
+                                break 'process;
+                            }
+                            let matched_symbol = semantic_file_context
+                                .and_then(|ctx| ctx.symbol_on_line(short, line, &[]))
+                                .filter(|decl| {
+                                    clang_types::is_function_like_kind(decl.kind)
+                                })
+                                .map(|decl| (decl.kind, decl.column));
+                            if matched_symbol.is_none() && name_node.kind_id() == ts_cpp_symbols::alias_sym_type_identifier {
+                                break 'process;
+                            }
 
-        while let Some(node) = stack.pop() {
-            if node.kind() == node_kind::FUNCTION_DEFINITION {
-                if let Some(declarator) =
-                    ts_traversal::first_descendant(node, &[node_kind::FUNCTION_DECLARATOR], &[node_kind::COMPOUND_STATEMENT])
-                {
-                    if let Some(name_node) = ts_traversal::rightmost_descendant(
-                        declarator,
-                        &[
-                            node_kind::IDENTIFIER,
-                            node_kind::FIELD_IDENTIFIER,
-                            node_kind::TYPE_IDENTIFIER,
-                            node_kind::DESTRUCTOR_NAME,
-                        ],
-                        &[node_kind::PARAMETER_LIST, node_kind::TEMPLATE_PARAMETER_LIST],
-                    ) {
-                        let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
-                        let short = name.split("::").last().unwrap_or(name);
-                        let line = name_node.start_position().row + 1;
-                        let source_column = name_node.start_position().column + 1;
-                        if name_node.kind() == node_kind::DESTRUCTOR_NAME {
-                            continue;
-                        }
-                        let allowed = [
-                            clang_sys::CXCursor_FunctionDecl,
-                            clang_sys::CXCursor_FunctionTemplate,
-                            clang_sys::CXCursor_CXXMethod,
-                            clang_sys::CXCursor_Constructor,
-                            clang_sys::CXCursor_Destructor,
-                        ];
-                        let matched_symbol = if let Some(parse) = clang_parse {
-                            parse.symbol_on_line(short, line, &allowed)
-                                .map(|symbol| (symbol.kind, symbol.column))
-                        } else {
-                            None
-                        };
-                        if matched_symbol.is_none() && name_node.kind() == node_kind::TYPE_IDENTIFIER {
-                            continue;
-                        }
-
-                        if !short.starts_with("operator")
-                            && !Self::is_snake_case(short)
-                        {
-                            if let Some((kind, _)) = matched_symbol {
-                                if kind == clang_sys::CXCursor_Constructor
-                                    || kind == clang_sys::CXCursor_Destructor
+                            let is_operator = matched_symbol
+                                .is_some_and(|(kind, _)| kind == clang_sys::CXCursor_ConversionFunction)
+                                || name_node.parent().is_some_and(|p|
+                                    p.kind_id() == ts_cpp_symbols::sym_operator_name
+                                    || p.parent().is_some_and(|gp| gp.kind_id() == ts_cpp_symbols::sym_operator_name)
+                                );
+                            if !is_operator
+                                && !Self::is_snake_case(short)
+                            {
+                                if let Some((kind, _)) = matched_symbol {
+                                    if kind == clang_sys::CXCursor_Constructor
+                                        || kind == clang_sys::CXCursor_Destructor
+                                    {
+                                        break 'process;
+                                    }
+                                } else if Self::is_ts_constructor(name_node, short, context.text.as_bytes())
+                                    || Self::is_ts_destructor(name_node, short, context.text.as_bytes())
                                 {
-                                    continue;
+                                    break 'process;
+                                }
+                                Self::to_snake_case_into(short, &mut upper_pos_buf, &mut snake_buf);
+                                violations.push(Violation {
+                                    policy: policy_name.clone(),
+                                    message: format!(
+                                        "function '{}' is not snake_case; suggested '{}'",
+                                        short, &snake_buf
+                                    ),
+                                    line,
+                                    column: Some(source_column),
+                                });
+
+                                if semantic_enabled {
+                                    let Some(sem_ctx) = semantic_file_context else {
+                                        break 'process;
+                                    };
+                                    if let Some((kind, column)) = matched_symbol {
+                                        if !Self::resolve_rename_plan(
+                                            &semantic_query, sem_ctx, short, snake_buf.clone(),
+                                            line, source_column, kind, column, &[],
+                                            &mut rename_plans,
+                                        ) {
+                                            break 'process;
+                                        }
+                                    } else {
+                                        rename_plans.push(RenamePlan {
+                                            old_name: short.to_string(),
+                                            new_name: snake_buf.clone(),
+                                            line,
+                                            column: source_column,
+                                            kind: clang_sys::CXCursor_CXXMethod,
+                                            minimum_required_occurrences: 0,
+                                            expected_occurrences: 0,
+                                            stable_id: None,
+                                        });
+                                    }
                                 }
                             }
-                            if Self::is_ts_constructor(name_node, short, context.text.as_bytes())
-                                || Self::is_ts_destructor(name_node, short, context.text.as_bytes())
+                        }
+                    }
+                }
+
+                if node.is_error() {
+                    if let Some(sem_ctx) = semantic_file_context {
+                        let error_start_line = node.start_position().row + 1;
+                        let error_end_line = node.end_position().row + 1;
+                        for decl in &sem_ctx.declarations {
+                            if decl.line < error_start_line || decl.line > error_end_line {
+                                continue;
+                            }
+                            if !clang_types::is_function_like_kind(decl.kind) {
+                                continue;
+                            }
+                            let short = decl.name.as_str();
+                            if short.starts_with("operator")
+                                || Self::is_snake_case(short)
                             {
                                 continue;
                             }
+                            let line = decl.line;
+                            let source_column = decl.column;
                             Self::to_snake_case_into(short, &mut upper_pos_buf, &mut snake_buf);
                             violations.push(Violation {
                                 policy: policy_name.clone(),
@@ -1190,32 +1193,87 @@ impl Policy for NamingConventionsPolicy {
                                 column: Some(source_column),
                             });
 
-                            if semantic_enabled {
-                                let Some(parse) = clang_parse else {
-                                    continue;
-                                };
-                                if let Some((kind, column)) = matched_symbol {
-                                    if !Self::resolve_rename_plan(
-                                        &semantic_query, parse, short, snake_buf.clone(),
-                                        line, source_column, kind, column, &allowed,
-                                        &mut rename_plans,
-                                    ) {
-                                        continue;
-                                    }
-                                } else {
-                                    // No clang symbol — create text-scan-only rename plan.
-                                    // Tree-sitter identified the function; clang just lacks
-                                    // symbols for this file (e.g., template-heavy headers).
-                                    rename_plans.push(RenamePlan {
-                                        old_name: short.to_string(),
-                                        new_name: snake_buf.clone(),
-                                        line,
-                                        column: source_column,
-                                        kind: clang_sys::CXCursor_CXXMethod,
-                                        minimum_required_occurrences: 0,
-                                        expected_occurrences: 0,
-                                        stable_id: None,
-                                    });
+                            if semantic_enabled
+                                && !Self::resolve_rename_plan(
+                                    &semantic_query, sem_ctx, short, snake_buf.clone(),
+                                    line, source_column, decl.kind, source_column, &[],
+                                    &mut rename_plans,
+                                )
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                if matches!(
+                    node.kind_id(),
+                    ts_cpp_symbols::sym_declaration | ts_cpp_symbols::sym_field_declaration | ts_cpp_symbols::sym_parameter_declaration
+                ) {
+                    if node.kind_id() == ts_cpp_symbols::sym_parameter_declaration
+                        || node.kind_id() == ts_cpp_symbols::sym_field_declaration
+                    {
+                        break 'process;
+                    }
+                    if Self::is_loop_header_declaration(node) {
+                        break 'process;
+                    }
+                    if let Some(name_node) = ts_traversal::declarator_identifier(node) {
+                        let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
+                        let line = name_node.start_position().row + 1;
+                        let source_column = name_node.start_position().column + 1;
+                        let sym = semantic_file_context
+                            .and_then(|ctx| ctx.symbol_on_line(name, line, &[]))
+                            .filter(|decl| {
+                                clang_types::is_variable_like_kind(decl.kind)
+                            });
+                        if sym.is_some_and(|d| d.kind == clang_sys::CXCursor_ParmDecl) {
+                            break 'process;
+                        }
+
+                        if self.prefixes.has_known_prefix(name)
+                            || Self::is_constant_like_identifier(name)
+                        {
+                            break 'process;
+                        }
+
+                        let id_ctx = if let Some(decl) = sym {
+                            let is_field = decl.kind == clang_sys::CXCursor_FieldDecl;
+                            let is_global = decl.scope_usr.is_none() && decl.kind == clang_sys::CXCursor_VarDecl;
+                            let mut ctx = Self::extract_type_context_from_clang(decl, node, context.text.as_bytes());
+                            ctx.is_field = is_field;
+                            ctx.is_global = is_global;
+                            ctx
+                        } else {
+                            Self::extract_ts_type_context(node, context.text.as_bytes())
+                        };
+                        let is_global = id_ctx.is_global;
+                        self.build_stacked_prefix_into(&mut prefix_buf, &id_ctx);
+                        Self::to_snake_case_into(name, &mut upper_pos_buf, &mut snake_buf);
+                        snake_buf.insert_str(0, &prefix_buf);
+                        if is_global {
+                            snake_buf.make_ascii_uppercase();
+                        }
+                        let msg = if is_global {
+                            format!("global identifier '{name}' should be UPPER_SNAKE_CASE with prefix; suggested '{}'", &snake_buf)
+                        } else {
+                            format!("local/member-like identifier '{name}' missing prefix; suggested '{}'", &snake_buf)
+                        };
+                        violations.push(Violation {
+                            policy: policy_name.clone(),
+                            message: msg,
+                            line,
+                            column: Some(source_column),
+                        });
+
+                        if semantic_enabled {
+                            if let (Some(sem_ctx), Some(decl)) = (semantic_file_context, sym) {
+                                if !Self::resolve_rename_plan(
+                                    &semantic_query, sem_ctx, name, snake_buf.clone(),
+                                    line, source_column, decl.kind, decl.column, &[],
+                                    &mut rename_plans,
+                                ) {
+                                    break 'process;
                                 }
                             }
                         }
@@ -1223,149 +1281,15 @@ impl Policy for NamingConventionsPolicy {
                 }
             }
 
-            if node.is_error() {
-                if let Some(parse) = clang_parse {
-                    let error_start_line = node.start_position().row + 1;
-                    let error_end_line = node.end_position().row + 1;
-                    let allowed = [
-                        clang_sys::CXCursor_FunctionDecl,
-                        clang_sys::CXCursor_FunctionTemplate,
-                        clang_sys::CXCursor_CXXMethod,
-                    ];
-                    for symbol in &parse.symbols {
-                        if symbol.line < error_start_line || symbol.line > error_end_line {
-                            continue;
-                        }
-                        if !allowed.contains(&symbol.kind) {
-                            continue;
-                        }
-                        let short = symbol.name.split("::").last().unwrap_or(&symbol.name);
-                        if short.starts_with("operator")
-                            || Self::is_snake_case(short)
-                        {
-                            continue;
-                        }
-                        let line = symbol.line;
-                        let source_column = symbol.column;
-                        Self::to_snake_case_into(short, &mut upper_pos_buf, &mut snake_buf);
-                        violations.push(Violation {
-                            policy: policy_name.clone(),
-                            message: format!(
-                                "function '{}' is not snake_case; suggested '{}'",
-                                short, &snake_buf
-                            ),
-                            line,
-                            column: Some(source_column),
-                        });
-
-                        if semantic_enabled
-                            && !Self::resolve_rename_plan(
-                                &semantic_query, parse, short, snake_buf.clone(),
-                                line, source_column, symbol.kind, source_column, &allowed,
-                                &mut rename_plans,
-                            )
-                        {
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            if matches!(
-                node.kind(),
-                node_kind::DECLARATION | node_kind::FIELD_DECLARATION | node_kind::PARAMETER_DECLARATION
-            ) {
-                if node.kind() == node_kind::PARAMETER_DECLARATION
-                    || node.kind() == node_kind::FIELD_DECLARATION
-                {
-                    push_children_rev(&mut stack, node);
-                    continue;
-                }
-                if Self::is_loop_header_declaration(node) {
-                    continue;
-                }
-                if let Some(name_node) = ts_traversal::declarator_identifier(node) {
-                    let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
-                    let line = name_node.start_position().row + 1;
-                    let source_column = name_node.start_position().column + 1;
-                    let allowed = [
-                        clang_sys::CXCursor_VarDecl,
-                        clang_sys::CXCursor_FieldDecl,
-                        clang_sys::CXCursor_ParmDecl,
-                    ];
-                    let sym = clang_parse.and_then(|p| p.symbol_on_line(name, line, &allowed));
-                    if sym.is_some_and(|s| s.kind == clang_sys::CXCursor_ParmDecl) {
-                        push_children_rev(&mut stack, node);
-                        continue;
-                    }
-
-                    if self.prefixes.has_known_prefix(name)
-                        || Self::is_constant_like_identifier(name)
-                    {
-                        push_children_rev(&mut stack, node);
-                        continue;
-                    }
-
-                    let id_ctx = if let Some(sym) = sym {
-                        let is_field = sym.kind == clang_sys::CXCursor_FieldDecl;
-                        let is_global = sym.scope_usr.is_none() && sym.kind == clang_sys::CXCursor_VarDecl;
-                        IdentifierContext {
-                            is_field,
-                            is_global,
-                            ts_static: false,
-                            ts_const: false,
-                            ts_volatile: false,
-                            ts_pointer: false,
-                            ts_reference: false,
-                            ts_type_text: None,
-                            clang_symbol: Some(sym),
-                        }
-                    } else {
-                        Self::extract_ts_type_context(node, context.text.as_bytes())
-                    };
-                    let is_global = id_ctx.is_global;
-                    self.build_stacked_prefix_into(&mut prefix_buf, &id_ctx);
-                    Self::to_snake_case_into(name, &mut upper_pos_buf, &mut snake_buf);
-                    snake_buf.insert_str(0, &prefix_buf);
-                    if is_global {
-                        snake_buf.make_ascii_uppercase();
-                    }
-                    let msg = if is_global {
-                        format!("global identifier '{name}' should be UPPER_SNAKE_CASE with prefix; suggested '{}'", &snake_buf)
-                    } else {
-                        format!("local/member-like identifier '{name}' missing prefix; suggested '{}'", &snake_buf)
-                    };
-                    violations.push(Violation {
-                        policy: policy_name.clone(),
-                        message: msg,
-                        line,
-                        column: Some(source_column),
-                    });
-
-                    if semantic_enabled {
-                        if let (Some(parse), Some(clang_sym)) = (clang_parse, sym) {
-                            if !Self::resolve_rename_plan(
-                                &semantic_query, parse, name, snake_buf.clone(),
-                                line, source_column, clang_sym.kind, clang_sym.column, &allowed,
-                                &mut rename_plans,
-                            ) {
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            push_children_rev(&mut stack, node);
         }
 
-        if let Some(parse) = clang_parse {
-            if !parse.success {
+        if let Some(sem_ctx) = semantic_file_context {
+            if !sem_ctx.clang_success {
                 warnings.push(
                     "naming_conventions: clang syntax diagnostics detected; semantic confidence reduced"
                         .to_string(),
                 );
-                for message in parse.diagnostics.iter().take(5) {
+                for message in sem_ctx.diagnostics.iter().take(5) {
                     warnings.push(format!("clang: {message}"));
                 }
             }
@@ -1402,14 +1326,14 @@ impl Policy for NamingConventionsPolicy {
             .collect();
         let non_code_ranges = text_scan::non_code_ranges(tree);
         let (updated_text, edits) = if semantic_enabled {
-            if let Some(parse) = clang_parse {
+            if let Some(sem_ctx) = semantic_file_context {
                 let mut diag = RenameDiagnostics {
                     warnings: &mut warnings,
                     strict_issues: &mut strict_issues,
                 };
                 self.apply_semantic_renames(
                     context.text,
-                    parse,
+                    sem_ctx,
                     &trust_filtered_plans,
                     &semantic_query,
                     &non_code_ranges,
@@ -1417,7 +1341,7 @@ impl Policy for NamingConventionsPolicy {
                 )
             } else {
                 warnings.push(
-                    "naming_conventions: semantic rename skipped due missing clang context"
+                    "naming_conventions: semantic rename skipped due missing semantic context"
                         .to_string(),
                 );
                 (context.text.to_string(), Vec::new())
@@ -1470,7 +1394,7 @@ mod tests {
     use super::*;
     use crate::model::policy_context::PolicyContext;
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
-    use crate::parser::clang_symbol::ClangSymbol;
+    use crate::parser::file_context::SemanticDeclaration;
     use crate::parser::clang_types::ClangSymbolKey;
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
@@ -1478,6 +1402,15 @@ mod tests {
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
             .expect("cpp language");
         parser.parse(text, None).expect("parse tree")
+    }
+
+    fn semantic_from(
+        text: &str,
+        path: &std::path::Path,
+        tree: &tree_sitter::Tree,
+        clang: &ClangParseResult,
+    ) -> SemanticFileContext {
+        SemanticFileContext::from_parses(text, path, Some(tree), Some(clang))
     }
 
     #[test]
@@ -1488,28 +1421,21 @@ mod tests {
         let clang_parse_result = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "DifferentName".to_string(),
                 kind: clang_sys::CXCursor_FunctionDecl,
                 line: 2,
                 column: 5,
-                usr: None,
-                scope_usr: None,
-                storage_class: None,
-                is_const: false,
-                is_volatile: false,
-                type_kind: clang_sys::CXType_Unexposed,
-                type_display: String::new(),
-            canonical_type_kind: clang_sys::CXType_Unexposed,
-            template_name: None,
+                ..Default::default()
             }],
             ClangDiagnosticSummary::default(),
             Vec::new(),
         );
         let path = PathBuf::from("sample.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
         assert!(
             !result.violations.is_empty(),
@@ -1524,38 +1450,47 @@ mod tests {
         let tree = parse_cpp(text);
         let declaration_offset = text.find("CamelVar").expect("declaration offset");
         let reference_offset = text.rfind("CamelVar").expect("reference offset");
-        let symbol = ClangSymbol {
+        let symbol = SemanticDeclaration {
             name: "CamelVar".to_string(),
             kind: clang_sys::CXCursor_VarDecl,
             line: 2,
             column: 7,
-            usr: None,
             scope_usr: Some("c:@F@f#".to_string()),
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: String::new(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
+            ..Default::default()
         };
         let rename_offsets = FxHashMap::from_iter([(
             ClangSymbolKey::new(symbol.name.clone(), symbol.kind, symbol.line),
             vec![declaration_offset, reference_offset],
         )]);
-        let clang_parse_result = ClangParseResult::with_rename_offsets(
+        let path = PathBuf::from("sample.cpp");
+        let canonical = std::fs::canonicalize(&path)
+            .unwrap_or_else(|_| path.clone())
+            .to_string_lossy()
+            .to_string();
+        let decl_key = crate::parser::clang_types::ClangDeclKey::new(
+            canonical,
+            symbol.line,
+            symbol.column,
+            symbol.kind,
+        );
+        let reference_offsets = FxHashMap::from_iter([(
+            decl_key,
+            vec![reference_offset],
+        )]);
+        let clang_parse_result = ClangParseResult::with_semantic_offsets(
             true,
             Vec::new(),
             vec![symbol],
             rename_offsets,
+            reference_offsets,
             ClangDiagnosticSummary::default(),
             Vec::new(),
         );
 
-        let path = PathBuf::from("sample.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
 
         assert!(result.text.contains("_camel_var"));
@@ -1571,35 +1506,19 @@ mod tests {
         let declaration_offset = text.find("CamelVar").expect("declaration offset");
         let reference_offset = text.rfind("CamelVar").expect("reference offset");
 
-        let camel_symbol = ClangSymbol {
+        let camel_symbol = SemanticDeclaration {
             name: "CamelVar".to_string(),
             kind: clang_sys::CXCursor_VarDecl,
             line: 1,
             column: 5,
-            usr: None,
-            scope_usr: None,
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: String::new(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
+            ..Default::default()
         };
-        let existing_symbol = ClangSymbol {
+        let existing_symbol = SemanticDeclaration {
             name: "G_CAMEL_VAR".to_string(),
             kind: clang_sys::CXCursor_VarDecl,
             line: 2,
             column: 5,
-            usr: None,
-            scope_usr: None,
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: String::new(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
+            ..Default::default()
         };
         let rename_offsets = FxHashMap::from_iter([(
             ClangSymbolKey::new(
@@ -1619,9 +1538,10 @@ mod tests {
         );
 
         let path = PathBuf::from("sample.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
 
         assert_eq!(result.text, text);
@@ -1649,12 +1569,15 @@ mod tests {
                 line: 1,
                 column: 1,
                 severity: crate::parser::clang_result::ClangDiagnosticSeverity::Error,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
         );
         let path = PathBuf::from("sample.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
 
         assert_eq!(result.text, text);
@@ -1672,20 +1595,14 @@ mod tests {
         let tree = parse_cpp(text);
         let declaration_offset = text.find("CamelVar").expect("declaration offset");
         let reference_offset = text.rfind("CamelVar").expect("reference offset");
-        let symbol = ClangSymbol {
+        let symbol = SemanticDeclaration {
             name: "CamelVar".to_string(),
             kind: clang_sys::CXCursor_VarDecl,
             line: 1,
             column: 5,
             usr: Some("usr:test:camelvar".to_string()),
             scope_usr: Some("usr:test:scope".to_string()),
-            storage_class: None,
-            is_const: false,
-            is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: String::new(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
+            ..Default::default()
         };
         let rename_offsets = FxHashMap::from_iter([(
             ClangSymbolKey::new(symbol.name.clone(), symbol.kind, symbol.line),
@@ -1704,13 +1621,16 @@ mod tests {
                 line: 10,
                 column: 4,
                 severity: crate::parser::clang_result::ClangDiagnosticSeverity::Fatal,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
         );
 
         let path = PathBuf::from("sample.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
 
         assert_eq!(result.text, text);
@@ -1728,28 +1648,21 @@ mod tests {
         let clang_parse_result = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "Node".to_string(),
                 kind: clang_sys::CXCursor_Constructor,
                 line: 2,
                 column: 3,
-                usr: None,
-                scope_usr: None,
-                storage_class: None,
-                is_const: false,
-                is_volatile: false,
-                type_kind: clang_sys::CXType_Unexposed,
-                type_display: String::new(),
-            canonical_type_kind: clang_sys::CXType_Unexposed,
-            template_name: None,
+                ..Default::default()
             }],
             ClangDiagnosticSummary::default(),
             Vec::new(),
         );
         let path = PathBuf::from("sample.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
 
         assert!(result
@@ -1832,9 +1745,10 @@ mod tests {
             Vec::new(),
         );
         let path = PathBuf::from("HashSet.cpp");
+        let semantic = semantic_from(text, &path, &tree, &clang_parse_result);
         let context = PolicyContext::new(text, &path)
             .with_tree(Some(&tree))
-            .with_clang(Some(&clang_parse_result));
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
         assert!(result.edits.is_empty());
         assert!(!result.warnings.iter().any(|item| {
@@ -1856,176 +1770,54 @@ mod tests {
         );
     }
 
-    // --- build_stacked_prefix unit tests ---
+    // --- build_stacked_prefix unit tests (tree-sitter path only) ---
 
     #[test]
-    fn prefix_shared_ptr_via_clang() {
+    fn prefix_shared_ptr_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "data".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: "std::shared_ptr<int>".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: Some("shared_ptr".to_string()),
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { ts_type_text: Some("shared_ptr"), ..Default::default() });
         assert_eq!(prefix, "_sp_", "shared_ptr local should be '_sp_'");
     }
 
     #[test]
-    fn prefix_unique_ptr_via_clang() {
+    fn prefix_unique_ptr_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "handle".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: "std::unique_ptr<int>".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: Some("unique_ptr".to_string()),
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { ts_type_text: Some("unique_ptr"), ..Default::default() });
         assert_eq!(prefix, "_up_", "unique_ptr local should be '_up_'");
     }
 
     #[test]
-    fn prefix_weak_ptr_via_clang() {
+    fn prefix_weak_ptr_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "obs".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: "std::weak_ptr<int>".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: Some("weak_ptr".to_string()),
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { ts_type_text: Some("weak_ptr"), ..Default::default() });
         assert_eq!(prefix, "_wp_", "weak_ptr local should be '_wp_'");
     }
 
     #[test]
-    fn prefix_function_type_via_clang() {
+    fn prefix_function_type_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "cb".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: "std::function<void ()>".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: Some("function".to_string()),
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { ts_type_text: Some("function"), ..Default::default() });
         assert_eq!(prefix, "_f_", "function type local should be '_f_'");
     }
 
     #[test]
-    fn prefix_atomic_via_clang() {
+    fn prefix_atomic_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "counter".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Unexposed,
-            type_display: "std::atomic<int>".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: Some("atomic".to_string()),
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { ts_type_text: Some("atomic"), ..Default::default() });
         assert_eq!(prefix, "_a_", "atomic local should be '_a_'");
     }
 
     #[test]
-    fn prefix_enum_via_clang() {
+    fn prefix_pointer_member_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "val".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Enum,
-            type_display: "Color".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
-        assert_eq!(prefix, "_e_", "enum var local should be '_e_'");
-    }
-
-    #[test]
-    fn prefix_struct_via_clang() {
-        let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "pos".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Record,
-            type_display: "Point".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { clang_symbol: Some(&sym), ..Default::default() });
-        assert_eq!(prefix, "_t_", "struct var local should be '_t_'");
-    }
-
-    #[test]
-    fn prefix_pointer_member_via_clang() {
-        let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "tree".to_string(),
-            kind: clang_sys::CXCursor_FieldDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: None,
-            is_const: false, is_volatile: false,
-            type_kind: clang_sys::CXType_Pointer,
-            type_display: "int *".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { is_field: true, clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { is_field: true, ts_pointer: true, ..Default::default() });
         assert_eq!(prefix, "m_p_", "pointer member should be 'm_p_'");
     }
 
     #[test]
-    fn prefix_static_const_pointer_member_via_clang() {
+    fn prefix_static_const_pointer_member_via_ts() {
         let policy = NamingConventionsPolicy::new(true, true);
-        let sym = ClangSymbol {
-            name: "tree".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 1, column: 1,
-            usr: None, scope_usr: None,
-            storage_class: Some(clang_sys::CX_SC_Static),
-            is_const: true, is_volatile: false,
-            type_kind: clang_sys::CXType_Pointer,
-            type_display: "const int *".to_string(),
-        canonical_type_kind: clang_sys::CXType_Unexposed,
-        template_name: None,
-        };
-        let prefix = policy.build_stacked_prefix(&IdentifierContext { is_field: true, clang_symbol: Some(&sym), ..Default::default() });
+        let prefix = policy.build_stacked_prefix(&IdentifierContext { is_field: true, ts_static: true, ts_const: true, ts_pointer: true, ..Default::default() });
         assert_eq!(prefix, "m_s_c_p_", "static const pointer member should be 'm_s_c_p_'");
     }
 
