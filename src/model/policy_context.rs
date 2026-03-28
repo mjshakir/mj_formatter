@@ -5,7 +5,6 @@ use tree_sitter::Tree;
 use crate::model::project_query::ProjectContextQuery;
 use crate::model::context_query::SemanticContextQuery;
 use crate::parser::clang_result::ClangDiagnosticSummary;
-use crate::parser::clang_result::ClangParseResult;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::query_cache::TsQueryCache;
 use crate::graph::snapshot::ProjectGraphSnapshot;
@@ -16,12 +15,12 @@ pub struct PolicyContext<'a> {
     pub text: &'a str,
     pub path: &'a Path,
     pub tree_sitter_tree: Option<&'a Tree>,
-    pub clang_parse_result: Option<&'a ClangParseResult>,
     pub semantic_file_context: Option<&'a SemanticFileContext>,
     pub project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
     pub query_cache: Option<&'a TsQueryCache>,
     pub forced_batch_size: Option<usize>,
     pub shared: Option<&'a PolicySharedData<'a>>,
+    pub changed_ranges: Option<&'a [tree_sitter::Range]>,
 }
 
 impl<'a> PolicyContext<'a> {
@@ -30,12 +29,12 @@ impl<'a> PolicyContext<'a> {
             text,
             path,
             tree_sitter_tree: None,
-            clang_parse_result: None,
             semantic_file_context: None,
             project_graph_snapshot: None,
             query_cache: None,
             forced_batch_size: None,
             shared: None,
+            changed_ranges: None,
         }
     }
 
@@ -46,14 +45,6 @@ impl<'a> PolicyContext<'a> {
 
     pub fn with_tree(mut self, tree_sitter_tree: Option<&'a Tree>) -> Self {
         self.tree_sitter_tree = tree_sitter_tree;
-        self
-    }
-
-    pub fn with_clang(
-        mut self,
-        clang_parse_result: Option<&'a ClangParseResult>,
-    ) -> Self {
-        self.clang_parse_result = clang_parse_result;
         self
     }
 
@@ -78,6 +69,11 @@ impl<'a> PolicyContext<'a> {
         self
     }
 
+    pub fn with_changed_ranges(mut self, ranges: Option<&'a [tree_sitter::Range]>) -> Self {
+        self.changed_ranges = ranges;
+        self
+    }
+
     pub fn path_str(&self) -> &str {
         self.path.to_str().unwrap_or_default()
     }
@@ -91,8 +87,8 @@ impl<'a> PolicyContext<'a> {
     }
 
     pub fn clang_diagnostic_summary(&self) -> Option<ClangDiagnosticSummary> {
-        self.clang_parse_result
-            .map(ClangParseResult::diagnostic_summary)
+        self.semantic_file_context
+            .map(|ctx| ctx.diagnostic_summary)
     }
 
     pub fn fatal_diag_count(&self) -> usize {

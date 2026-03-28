@@ -1,7 +1,7 @@
 pub(super) mod checkpoint;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
@@ -70,13 +70,11 @@ use crate::parser::ts_traversal;
 use crate::policy::shared_data::PolicySharedData;
 
 const CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE: usize = 6;
-type SemanticImpactRangesByLine = BTreeMap<usize, SmallVec<[(usize, usize); 4]>>;
-type SemanticImpactSymbolsByLine = BTreeMap<usize, SmallVec<[u64; 4]>>;
 
 pub struct PolicyPipeline {
     policies: Vec<Box<dyn Policy>>,
     parser_manager: ParserManager,
-    policy_settings: HashMap<String, PolicyConfig>,
+    policy_settings: FxHashMap<String, PolicyConfig>,
     convergence_profiles: Arc<FxHashMap<String, ConvergencePolicyProfile>>,
     confidence_enabled: bool,
     confidence_default_enforcement: Enforcement,
@@ -91,6 +89,7 @@ pub struct PolicyPipeline {
 struct ParseCache {
     tree: Option<Tree>,
     prev_tree: Option<Tree>,
+    changed_ranges: Option<Vec<tree_sitter::Range>>,
     clang: Option<Arc<ClangParseResult>>,
     semantic: Option<SemanticFileContext>,
     comment_lines: Option<BTreeSet<usize>>,
@@ -120,8 +119,19 @@ impl ParseCache {
         self.error_lines.as_ref().unwrap()
     }
 
+    fn compute_changed_ranges(&mut self) {
+        self.changed_ranges = match (&self.prev_tree, &self.tree) {
+            (Some(prev), Some(current)) => {
+                let ranges: Vec<_> = prev.changed_ranges(current).collect();
+                if ranges.is_empty() { None } else { Some(ranges) }
+            }
+            _ => None,
+        };
+    }
+
     fn invalidate(&mut self, is_semantic_rewrite: bool, clang_invalidating: bool) {
         self.prev_tree = self.tree.take();
+        self.changed_ranges = None;
         self.error_lines = None;
         if is_semantic_rewrite && clang_invalidating {
             self.clang = None;
@@ -255,7 +265,7 @@ impl PolicyPipeline {
     pub fn new(
         policies: Vec<Box<dyn Policy>>,
         parser_manager: ParserManager,
-        policy_settings: HashMap<String, PolicyConfig>,
+        policy_settings: FxHashMap<String, PolicyConfig>,
         confidence_config: ConfidenceConfig,
         conflict_detection_enabled: bool,
         conflict_touch_threshold: usize,
@@ -393,6 +403,7 @@ impl PolicyPipeline {
             parse: ParseCache {
                 tree: None,
                 prev_tree: None,
+                changed_ranges: None,
                 clang: None,
                 semantic: None,
                 comment_lines: None,
@@ -447,7 +458,7 @@ impl PolicyPipeline {
             }
             let kind = semantic
                 .scope_at_location(crate::parser::file_context::SourceLocation::new(edit.line, 1))
-                .map(|scope| BlockContextKind::from_scope_kind(scope.kind))
+                .map(|scope| BlockContextKind::from(scope.kind))
                 .unwrap_or(BlockContextKind::Global);
             counts[kind as usize] += 1;
         }
@@ -728,6 +739,7 @@ impl PolicyPipeline {
             match tree_result {
                 Ok(value) => {
                     state.parse.tree = Some(value);
+                    state.parse.compute_changed_ranges();
                     state.parse.prev_tree = None;
                 }
                 Err(err) => {
@@ -784,6 +796,7 @@ impl PolicyPipeline {
                 }
             };
             state.parse.tree = Some(parsed);
+            state.parse.compute_changed_ranges();
             state.parse.prev_tree = None;
         } else if needs_clang {
             let parsed = match self.parser_manager.parse_clang(&state.current, state.path) {
@@ -818,7 +831,7 @@ impl PolicyPipeline {
         }
         if state.parse.comment_lines.is_none() {
             state.parse.comment_lines =
-                Some(Self::comment_lines_from_tree(state.parse.tree.as_ref(), &self.query_cache));
+                Some(Self::comment_lines_from_tree(state.parse.tree.as_ref(), state.current.as_bytes(), &self.query_cache));
         }
         Ok(())
     }
@@ -853,11 +866,11 @@ impl PolicyPipeline {
         let shared = PolicySharedData::new(&state.current, state.parse.semantic.as_ref());
         let mut context = PolicyContext::new(&state.current, state.path)
             .with_tree(state.parse.tree.as_ref())
-            .with_clang(state.parse.clang.as_deref())
             .with_semantic(state.parse.semantic.as_ref())
             .with_graph(state.options.project_graph_snapshot.as_deref())
             .with_query_cache(Some(&self.query_cache))
-            .with_shared(Some(&shared));
+            .with_shared(Some(&shared))
+            .with_changed_ranges(state.parse.changed_ranges.as_deref());
         context.forced_batch_size = state.retry_batch_size.take();
         let semantic_query = context.semantic_query();
         let project_query = context.project_query();
@@ -990,6 +1003,7 @@ impl PolicyPipeline {
                 &settings.touch_contract,
                 result.edits.as_slice(),
                 state.parse.tree.as_ref(),
+                state.current.as_bytes(),
                 Some(&self.query_cache),
                 prepared.capability.structural_safe,
                 &guard_adaptive,
@@ -1093,7 +1107,6 @@ impl PolicyPipeline {
     ) -> CoordinatedPolicyStage {
         let context = PolicyContext::new(&state.current, state.path)
             .with_tree(state.parse.tree.as_ref())
-            .with_clang(state.parse.clang.as_deref())
             .with_semantic(state.parse.semantic.as_ref())
             .with_graph(state.options.project_graph_snapshot.as_deref())
             .with_query_cache(Some(&self.query_cache));
@@ -1470,7 +1483,7 @@ impl PolicyPipeline {
     }
 
     fn build_convergence_profiles(
-        policy_settings: &HashMap<String, PolicyConfig>,
+        policy_settings: &FxHashMap<String, PolicyConfig>,
     ) -> FxHashMap<String, ConvergencePolicyProfile> {
         let mut profiles = FxHashMap::default();
         for (name, settings) in policy_settings {
@@ -1615,11 +1628,15 @@ impl PolicyPipeline {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_semantic_impact_maps(
         result: &PolicyResult,
         semantic: Option<&SemanticFileContext>,
         base_radius: usize,
-    ) -> (SemanticImpactRangesByLine, SemanticImpactSymbolsByLine) {
+    ) -> (
+        BTreeMap<usize, SmallVec<[(usize, usize); 4]>>,
+        BTreeMap<usize, SmallVec<[u64; 4]>>,
+    ) {
         let impact_cap = 256usize;
         let scope_cap = 512usize;
         let symbol_cap = 512usize;
@@ -1652,8 +1669,8 @@ impl PolicyPipeline {
             return (ranges_by_line, symbols_by_line);
         };
 
-        let mut symbol_lines = HashMap::<u64, (usize, usize)>::new();
-        let mut symbol_ids_by_line = HashMap::<usize, SmallVec<[u64; 4]>>::new();
+        let mut symbol_lines: FxHashMap<u64, (usize, usize)> = FxHashMap::default();
+        let mut symbol_ids_by_line: FxHashMap<usize, SmallVec<[u64; 4]>> = FxHashMap::default();
         for declaration in &semantic.declarations {
             if declaration.line == 0 {
                 continue;
@@ -1769,7 +1786,7 @@ impl PolicyPipeline {
     }
 
     fn hash_semantic_stable_id(value: &str) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         value.hash(&mut hasher);
         hasher.finish()
     }
@@ -2353,6 +2370,7 @@ impl PolicyPipeline {
 
     fn comment_lines_from_tree(
         tree: Option<&Tree>,
+        source: &[u8],
         query_cache: &TsQueryCache,
     ) -> BTreeSet<usize> {
         let Some(tree) = tree else {
@@ -2362,7 +2380,7 @@ impl PolicyPipeline {
             return BTreeSet::new();
         };
         let mut cursor = tree_sitter::QueryCursor::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), "".as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source);
         let mut lines = BTreeSet::<usize>::new();
         while let Some(m) = {
             matches.advance();
@@ -2452,7 +2470,7 @@ impl PolicyPipeline {
 #[cfg(test)]
 mod tests {
     use super::{ConvergenceSignalInput, ScopeFilterConfig, SemanticGuidanceConfig};
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use toml::Table;
@@ -2480,13 +2498,12 @@ mod tests {
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
         SemanticScope, SemanticScopeKind,
     };
-    use crate::parser::node_kind;
     #[test]
     fn guideline_drops_unsafe() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
-                node_kind: node_kind::PREPROC_IF,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 16,
                 start_line: 2,
@@ -2546,6 +2563,8 @@ mod tests {
                 line: 4,
                 column: 1,
                 severity: ClangDiagnosticSeverity::Error,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
             declarations: vec![SemanticDeclaration {
                 stable_id: "usr:c:@F@unsafe#".to_string(),
@@ -2556,6 +2575,8 @@ mod tests {
                 column: 1,
                 usr: Some("c:@F@unsafe#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             ..SemanticFileContext::default()
         };
@@ -2600,7 +2621,7 @@ mod tests {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
-                node_kind: node_kind::PREPROC_INCLUDE,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_include,
                 start_offset: 0,
                 end_offset: 20,
                 start_line: 2,
@@ -2814,10 +2835,10 @@ mod tests {
         );
         policy_table.insert("convergence".to_string(), toml::Value::Table(convergence));
         let policy = PolicyConfig::from_policy_table(&policy_table).expect("policy config");
-        let profiles = PolicyPipeline::build_convergence_profiles(&HashMap::from([(
+        let profiles = PolicyPipeline::build_convergence_profiles(&[(
             "policy_a".to_string(),
             policy,
-        )]));
+        )].into_iter().collect());
         let profile = profiles.get("policy_a").expect("profile");
         assert_eq!(profile.domain, "layout");
         assert_eq!(profile.priority, 777);
@@ -2908,6 +2929,8 @@ mod tests {
                 column: 5,
                 usr: Some("c:@F@value#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![SemanticReference {
                 stable_id: "usr:c:@F@value#".to_string(),
@@ -2920,7 +2943,7 @@ mod tests {
             }],
             scopes: vec![SemanticScope {
                 kind: SemanticScopeKind::Function,
-                node_kind: node_kind::FUNCTION_DEFINITION,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
                 start_line: 8,
