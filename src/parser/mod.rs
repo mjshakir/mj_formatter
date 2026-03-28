@@ -1,14 +1,13 @@
 pub mod arg_resolver;
 pub mod clang_result;
 pub mod clang_service;
-pub mod clang_symbol;
 pub mod clang_types;
 pub mod compdb_index;
 pub mod consensus;
 pub mod file_context;
 pub mod manager;
-pub mod node_kind;
 pub mod query_cache;
+pub mod ts_cpp_symbols;
 pub mod semantic_extractor;
 pub mod semantic_region;
 pub mod simd_classify;
