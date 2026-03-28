@@ -10,11 +10,13 @@ use crate::parser::query_cache::TsQueryCache;
 pub struct EditGuard;
 
 impl EditGuard {
+    #[allow(clippy::too_many_arguments)]
     pub fn validate(
         policy_name: &str,
         contract: &TouchContract,
         edits: &[Edit],
         tree: Option<&Tree>,
+        source: &[u8],
         query_cache: Option<&TsQueryCache>,
         structural_safe: bool,
         adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
@@ -47,7 +49,7 @@ impl EditGuard {
             }];
         };
 
-        let (comments, strings, preprocessor) = Self::collect_protected_lines(tree, query_cache);
+        let (comments, strings, preprocessor) = Self::collect_protected_lines(tree, source, query_cache);
         let relax_comment_string = adaptive.relax_comment_string(structural_safe);
         match contract {
             TouchContract::CodeOnly => {
@@ -133,21 +135,28 @@ impl EditGuard {
 
     fn collect_protected_lines(
         tree: &Tree,
+        source: &[u8],
         query_cache: Option<&TsQueryCache>,
     ) -> (BTreeSet<usize>, BTreeSet<usize>, BTreeSet<usize>) {
         let mut comments = BTreeSet::<usize>::new();
         let mut strings = BTreeSet::<usize>::new();
         let mut preprocessor = BTreeSet::<usize>::new();
 
-        let query = query_cache
+        let cached = query_cache
             .and_then(|qc| qc.get_or_compile(Self::PROTECTED_QUERY).ok());
-
-        let Some(query) = query else {
-            return Self::collect_protected_lines_dfs(tree);
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let direct = if cached.is_none() {
+            tree_sitter::Query::new(&language, Self::PROTECTED_QUERY).ok()
+        } else {
+            None
+        };
+        let query: &tree_sitter::Query = match cached.as_deref().or(direct.as_ref()) {
+            Some(q) => q,
+            None => return (comments, strings, preprocessor),
         };
 
         let mut cursor = tree_sitter::QueryCursor::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), "".as_bytes());
+        let mut matches = cursor.matches(query, tree.root_node(), source);
 
         let comment_idx = query.capture_index_for_name("comment");
         let string_idx = query.capture_index_for_name("string");
@@ -171,44 +180,6 @@ impl EditGuard {
                 };
                 for line in start..=end {
                     target.insert(line);
-                }
-            }
-        }
-
-        (comments, strings, preprocessor)
-    }
-
-    fn collect_protected_lines_dfs(
-        tree: &Tree,
-    ) -> (BTreeSet<usize>, BTreeSet<usize>, BTreeSet<usize>) {
-        use crate::parser::node_kind;
-        let mut comments = BTreeSet::<usize>::new();
-        let mut strings = BTreeSet::<usize>::new();
-        let mut preprocessor = BTreeSet::<usize>::new();
-        let mut stack = vec![tree.root_node()];
-
-        while let Some(node) = stack.pop() {
-            let kind = node.kind();
-            let start = node.start_position().row.saturating_add(1);
-            let end = node.end_position().row.saturating_add(1).max(start);
-
-            if kind == node_kind::COMMENT {
-                for line in start..=end {
-                    comments.insert(line);
-                }
-            } else if node_kind::is_string_like(kind) {
-                for line in start..=end {
-                    strings.insert(line);
-                }
-            } else if kind.starts_with("preproc_") && kind != node_kind::PREPROC_CALL {
-                for line in start..=end {
-                    preprocessor.insert(line);
-                }
-            }
-
-            for index in (0..node.child_count()).rev() {
-                if let Some(child) = node.child(index as u32) {
-                    stack.push(child);
                 }
             }
         }
@@ -258,6 +229,7 @@ mod tests {
             &TouchContract::WhitespaceOnly,
             edits.as_slice(),
             None,
+            "".as_bytes(),
             None,
             false,
             &adaptive,
@@ -286,6 +258,7 @@ mod tests {
             &TouchContract::CodeOnly,
             edits.as_slice(),
             Some(&tree),
+            source.as_bytes(),
             None,
             false,
             &adaptive,

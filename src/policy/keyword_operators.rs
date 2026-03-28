@@ -8,10 +8,10 @@ use crate::model::policy_result::PolicyResult;
 use crate::model::context_query::SemanticContextQuery;
 use crate::model::violation::Violation;
 use crate::parser::file_context::SemanticScopeKind;
-use crate::parser::node_kind;
 use crate::parser::query_cache::TsQueryCache;
 use crate::policy::Policy;
 use crate::parser::text_scan;
+use crate::parser::ts_cpp_symbols;
 
 struct Replacement {
     start: usize,
@@ -34,12 +34,6 @@ impl LogicalKeywordOperatorsPolicy {
             replace_or,
             skip_preprocessor,
         }
-    }
-
-    fn is_protected_kind(kind: &str, skip_preprocessor: bool) -> bool {
-        kind == node_kind::COMMENT
-            || node_kind::is_string_like(kind)
-            || (skip_preprocessor && kind.starts_with("preproc_"))
     }
 
     const PROTECTED_QUERY_NO_PREPROC: &str = r#"[
@@ -71,6 +65,7 @@ impl LogicalKeywordOperatorsPolicy {
         root: Node<'_>,
         skip_preprocessor: bool,
         query_cache: Option<&TsQueryCache>,
+        source: &[u8],
     ) -> Vec<Range<usize>> {
         let mut protected = Vec::<Range<usize>>::new();
 
@@ -80,30 +75,23 @@ impl LogicalKeywordOperatorsPolicy {
             Self::PROTECTED_QUERY_NO_PREPROC
         };
 
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(pattern).ok())
-        {
+        let cached = query_cache
+            .and_then(|qc| qc.get_or_compile(pattern).ok());
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let direct = if cached.is_none() {
+            tree_sitter::Query::new(&language, pattern).ok()
+        } else {
+            None
+        };
+        if let Some(query) = cached.as_deref().or(direct.as_ref()) {
             let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
+            let mut matches = cursor.matches(query, root, source);
             while let Some(m) = {
                 matches.advance();
                 matches.get()
             } {
                 for capture in m.captures {
                     protected.push(capture.node.start_byte()..capture.node.end_byte());
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if Self::is_protected_kind(node.kind(), skip_preprocessor) {
-                    protected.push(node.start_byte()..node.end_byte());
-                    continue;
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
                 }
             }
         }
@@ -181,10 +169,6 @@ impl LogicalKeywordOperatorsPolicy {
         false
     }
 
-    fn parent_allows_logical_keyword(node: Node<'_>) -> bool {
-        matches!(node.kind(), node_kind::BINARY_EXPRESSION)
-    }
-
     const LOGICAL_OP_QUERY: &str = r#"(binary_expression ["&&" "||"] @op)"#;
 
     fn collect_replacements_from_tree(
@@ -207,8 +191,10 @@ impl LogicalKeywordOperatorsPolicy {
             |node: Node<'_>,
              replacements: &mut Vec<Replacement>,
              skipped: &mut usize| {
-                let kind = node.kind();
-                if (!self.replace_and || kind != "&&") && (!self.replace_or || kind != "||") {
+                let kid = node.kind_id();
+                if (!self.replace_and || kid != ts_cpp_symbols::anon_sym_AMP_AMP)
+                    && (!self.replace_or || kid != ts_cpp_symbols::anon_sym_PIPE_PIPE)
+                {
                     return;
                 }
                 let start = node.start_byte();
@@ -233,7 +219,7 @@ impl LogicalKeywordOperatorsPolicy {
                     *skipped = skipped.saturating_add(1);
                     return;
                 }
-                let replacement = if kind == "&&" {
+                let replacement = if kid == ts_cpp_symbols::anon_sym_AMP_AMP {
                     Self::build_keyword_replacement(bytes, start, end, "and")
                 } else {
                     Self::build_keyword_replacement(bytes, start, end, "or")
@@ -243,15 +229,21 @@ impl LogicalKeywordOperatorsPolicy {
                     end,
                     replacement,
                     line,
-                    before: if kind == "&&" { "&&" } else { "||" },
+                    before: if kid == ts_cpp_symbols::anon_sym_AMP_AMP { "&&" } else { "||" },
                 });
             };
 
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::LOGICAL_OP_QUERY).ok())
-        {
+        let cached = query_cache
+            .and_then(|qc| qc.get_or_compile(Self::LOGICAL_OP_QUERY).ok());
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let direct = if cached.is_none() {
+            tree_sitter::Query::new(&language, Self::LOGICAL_OP_QUERY).ok()
+        } else {
+            None
+        };
+        if let Some(query) = cached.as_deref().or(direct.as_ref()) {
             let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, root, "".as_bytes());
+            let mut matches = cursor.matches(query, root, text.as_bytes());
             while let Some(m) = {
                 matches.advance();
                 matches.get()
@@ -262,27 +254,6 @@ impl LogicalKeywordOperatorsPolicy {
                         &mut replacements,
                         &mut skipped_semantic_unsafe,
                     );
-                }
-            }
-        } else {
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                let kind = node.kind();
-                if ((self.replace_and && kind == "&&") || (self.replace_or && kind == "||"))
-                    && node
-                        .parent()
-                        .is_some_and(|p| Self::parent_allows_logical_keyword(p))
-                {
-                    process_node(
-                        node,
-                        &mut replacements,
-                        &mut skipped_semantic_unsafe,
-                    );
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
                 }
             }
         }
@@ -324,7 +295,7 @@ impl Policy for LogicalKeywordOperatorsPolicy {
 
         let root = tree.root_node();
         let protected =
-            Self::collect_protected_ranges(root, self.skip_preprocessor, context.query_cache);
+            Self::collect_protected_ranges(root, self.skip_preprocessor, context.query_cache, context.text.as_bytes());
         let (replacements, skipped_semantic_unsafe) = self.collect_replacements_from_tree(
             context.text,
             root,

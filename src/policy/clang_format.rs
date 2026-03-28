@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use tree_sitter::StreamingIterator;
+
 use crate::model::edit::Edit;
 use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
@@ -68,20 +70,29 @@ impl ClangFormatPolicy {
             .collect::<String>()
     }
 
+    const DELETE_DEFAULT_QUERY: &str = r#"[
+        (default_method_clause) @dd
+        (delete_method_clause) @dd
+    ]"#;
+
     fn delete_default_lines_from_tree(tree: &tree_sitter::Tree) -> BTreeSet<usize> {
         let mut lines = BTreeSet::new();
-        let mut stack = vec![tree.root_node()];
-        while let Some(node) = stack.pop() {
-            if node.kind() == "default_method_clause" || node.kind() == "delete_method_clause" {
-                if let Some(parent) = node.parent() {
-                    for line in parent.start_position().row + 1..=parent.end_position().row + 1 {
-                        lines.insert(line);
+        let root = tree.root_node();
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        if let Ok(query) = tree_sitter::Query::new(&language, Self::DELETE_DEFAULT_QUERY) {
+            let mut cursor = tree_sitter::QueryCursor::new();
+            let empty: &[u8] = &[];
+            let mut matches = cursor.matches(&query, root, empty);
+            while let Some(m) = {
+                matches.advance();
+                matches.get()
+            } {
+                for capture in m.captures {
+                    if let Some(parent) = capture.node.parent() {
+                        for line in parent.start_position().row + 1..=parent.end_position().row + 1 {
+                            lines.insert(line);
+                        }
                     }
-                }
-            }
-            for i in (0..node.child_count()).rev() {
-                if let Some(child) = node.child(i as u32) {
-                    stack.push(child);
                 }
             }
         }
@@ -285,12 +296,11 @@ impl Policy for ClangFormatPolicy {
         "clang_format"
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
-        if let Some(parse) = context.clang_parse_result {
-            let summary = parse.diagnostic_summary();
-            if summary.fatal > 0 {
+        if let Some(semantic) = context.semantic_file_context {
+            if semantic.diagnostic_summary.fatal > 0 {
                 return PolicyResult::unchanged_with_warning(format!(
                     "clang_format: skipped due fatal clang diagnostics (fatal={})",
-                    summary.fatal
+                    semantic.diagnostic_summary.fatal
                 ));
             }
         }
@@ -410,7 +420,16 @@ mod tests {
     use crate::parser::clang_result::{
         ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
     };
+    use crate::parser::file_context::SemanticFileContext;
     use crate::policy::Policy;
+
+    fn semantic_from_clang(
+        text: &str,
+        path: &std::path::Path,
+        clang: &ClangParseResult,
+    ) -> SemanticFileContext {
+        SemanticFileContext::from_parses(text, path, None, Some(clang))
+    }
 
     #[test]
     fn preserve_restores_spacing() {
@@ -453,11 +472,15 @@ mod tests {
                 line: 1,
                 column: 1,
                 severity: ClangDiagnosticSeverity::Fatal,
+                warning_option: String::new(),
+                fix_its: Vec::new(),
             }],
         );
         let text = "int x=1;\n";
         let path = PathBuf::from("fatal.cpp");
-        let context = PolicyContext::new(text, &path).with_clang(Some(&parse));
+        let semantic = semantic_from_clang(text, &path, &parse);
+        let context = PolicyContext::new(text, &path)
+            .with_semantic(Some(&semantic));
         let result = policy.apply(&context);
         assert!(!result.changed);
         assert!(result.edits.is_empty());

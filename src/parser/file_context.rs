@@ -1,22 +1,23 @@
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use tree_sitter::{Node, StreamingIterator, Tree};
+use tree_sitter::{StreamingIterator, Tree};
 
-use crate::parser::clang_types::ClangDeclKey;
+use crate::parser::clang_types::{ClangDeclKey, ClangSymbolKey};
 use crate::parser::clang_result::ClangDiagnosticSeverity;
 use crate::parser::clang_result::{
     ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
 };
-use crate::parser::clang_symbol::ClangSymbol;
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::text_scan;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SemanticIdProvenance {
     Usr,
+    #[default]
     SourceLocation,
     DeclLocation,
 }
@@ -31,7 +32,7 @@ pub enum SemanticScopeKind {
     Attribute,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SemanticDeclaration {
     pub stable_id: String,
     pub provenance: SemanticIdProvenance,
@@ -41,6 +42,14 @@ pub struct SemanticDeclaration {
     pub column: usize,
     pub usr: Option<String>,
     pub scope_usr: Option<String>,
+    pub canonical_type_kind: i32,
+    pub is_definition: bool,
+    pub is_anonymous: bool,
+    pub lexical_parent_usr: Option<String>,
+    pub pointee_type_kind: Option<i32>,
+    pub storage_class: i32,
+    pub is_const_qualified: bool,
+    pub is_volatile_qualified: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -57,7 +66,7 @@ pub struct SemanticReference {
 #[derive(Clone, Debug)]
 pub struct SemanticScope {
     pub kind: SemanticScopeKind,
-    pub node_kind: &'static str,
+    pub node_kind_id: u16,
     pub start_offset: usize,
     pub end_offset: usize,
     pub start_line: usize,
@@ -86,10 +95,15 @@ pub struct SemanticFileContext {
     pub tree_has_error: bool,
     pub diagnostic_summary: ClangDiagnosticSummary,
     pub diagnostic_entries: Vec<ClangDiagnosticEntry>,
+    pub diagnostics: Vec<String>,
     pub declarations: Vec<SemanticDeclaration>,
     pub references: Vec<SemanticReference>,
     pub scopes: Vec<SemanticScope>,
     pub regions: Vec<SemanticRegion>,
+    pub(crate) declarations_by_line: FxHashMap<usize, SmallVec<[usize; 4]>>,
+    pub(crate) name_lines: FxHashMap<String, SmallVec<[usize; 4]>>,
+    pub(crate) rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
+    pub(crate) reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -132,7 +146,7 @@ impl SemanticFileContext {
         };
 
         if let Some(tree) = tree {
-            context.scopes = Self::collect_scopes(tree, query_cache);
+            context.scopes = Self::collect_scopes(tree, text.as_bytes(), query_cache);
         }
 
         let Some(parse) = clang else {
@@ -145,26 +159,29 @@ impl SemanticFileContext {
 
         let line_starts = Self::line_starts(text);
         let mut declaration_ids: FxHashMap<ClangDeclKey, (String, SemanticIdProvenance)> = FxHashMap::default();
-        for symbol in &parse.symbols {
-            let (stable_id, provenance) = Self::stable_id_for_symbol(path, symbol);
-            context.declarations.push(SemanticDeclaration {
-                stable_id: stable_id.clone(),
-                provenance,
-                name: symbol.name.clone(),
-                kind: symbol.kind,
-                line: symbol.line,
-                column: symbol.column,
-                usr: symbol.usr.clone(),
-                scope_usr: symbol.scope_usr.clone(),
-            });
+        context.declarations = parse.symbols.iter().map(|decl| {
+            let mut decl = decl.clone();
+            if decl.stable_id.is_empty() {
+                let (id, prov) = Self::stable_id_for_decl(
+                    &canonical_path,
+                    &decl.name,
+                    decl.kind,
+                    decl.line,
+                    decl.usr.as_deref(),
+                    decl.scope_usr.as_deref(),
+                );
+                decl.stable_id = id;
+                decl.provenance = prov;
+            }
             let key = ClangDeclKey::new(
                 canonical_path.clone(),
-                symbol.line,
-                symbol.column,
-                symbol.kind,
+                decl.line,
+                decl.column,
+                decl.kind,
             );
-            declaration_ids.insert(key, (stable_id, provenance));
-        }
+            declaration_ids.insert(key, (decl.stable_id.clone(), decl.provenance));
+            decl
+        }).collect();
         if parse.symbols.is_empty() {
             for decl_key in parse.reference_offsets_map().keys() {
                 if decl_key.path != canonical_path
@@ -191,6 +208,14 @@ impl SemanticFileContext {
                     column: decl_key.column,
                     usr: None,
                     scope_usr: None,
+                    canonical_type_kind: clang_sys::CXType_Unexposed,
+                    is_definition: false,
+                    is_anonymous: false,
+                    lexical_parent_usr: None,
+                    pointee_type_kind: None,
+                    storage_class: clang_sys::CX_SC_Invalid,
+                    is_const_qualified: false,
+                    is_volatile_qualified: false,
                 });
                 declaration_ids.insert(decl_key.clone(), (stable_id, provenance));
             }
@@ -237,6 +262,16 @@ impl SemanticFileContext {
         context.references.dedup_by(|left, right| {
             left.offset == right.offset && left.stable_id == right.stable_id
         });
+
+        context.diagnostics = parse.diagnostics.clone();
+        context.rename_offsets_by_symbol = parse.rename_offsets_map().clone();
+        context.reference_offsets_by_decl = parse.reference_offsets_map().clone();
+
+        for (index, decl) in context.declarations.iter().enumerate() {
+            context.declarations_by_line.entry(decl.line).or_default().push(index);
+            context.name_lines.entry(decl.name.clone()).or_default().push(decl.line);
+        }
+
         context.regions = Self::build_regions(text, &context);
 
         context
@@ -294,6 +329,64 @@ impl SemanticFileContext {
             })
     }
 
+    pub fn symbol_on_line(
+        &self,
+        name: &str,
+        line: usize,
+        allowed_kinds: &[i32],
+    ) -> Option<&SemanticDeclaration> {
+        let indexes = self.declarations_by_line.get(&line)?;
+        indexes
+            .iter()
+            .filter_map(|&i| self.declarations.get(i))
+            .find(|d| d.name == name && (allowed_kinds.is_empty() || allowed_kinds.contains(&d.kind)))
+    }
+
+    pub fn symbol_on_line_by_kinds(
+        &self,
+        line: usize,
+        allowed_kinds: &[i32],
+    ) -> Option<&SemanticDeclaration> {
+        let indexes = self.declarations_by_line.get(&line)?;
+        indexes
+            .iter()
+            .filter_map(|&i| self.declarations.get(i))
+            .find(|d| allowed_kinds.is_empty() || allowed_kinds.contains(&d.kind))
+    }
+
+    pub fn has_name_elsewhere(&self, name: &str, except_line: usize) -> bool {
+        self.name_lines
+            .get(name)
+            .is_some_and(|lines| lines.iter().any(|&l| l != except_line))
+    }
+
+    pub fn rename_offsets(
+        &self,
+        name: &str,
+        line: usize,
+        allowed_kinds: &[i32],
+    ) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        let Some(indexes) = self.declarations_by_line.get(&line) else {
+            return offsets;
+        };
+        for &idx in indexes {
+            let Some(decl) = self.declarations.get(idx) else { continue };
+            if decl.name != name
+                || (!allowed_kinds.is_empty() && !allowed_kinds.contains(&decl.kind))
+            {
+                continue;
+            }
+            let key = ClangSymbolKey::new(decl.name.clone(), decl.kind, decl.line);
+            if let Some(locations) = self.rename_offsets_by_symbol.get(&key) {
+                offsets.extend(locations.iter().copied());
+            }
+        }
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
+    }
+
     #[cfg(test)]
     pub fn is_macro_region(&self, location: SourceLocation) -> bool {
         self.scopes.iter().any(|scope| {
@@ -316,7 +409,7 @@ impl SemanticFileContext {
             signature ^= Self::hash64(
                 format!(
                     "{}:{}:{}:{}:{}",
-                    scope.node_kind,
+                    scope.node_kind_id,
                     scope.start_offset,
                     scope.end_offset,
                     scope.start_line,
@@ -338,14 +431,16 @@ impl SemanticFileContext {
             }
             signature ^= Self::hash64(
                 format!(
-                    "{}:{:?}:{}:{}:{}:{:?}:{:?}",
+                    "{}:{:?}:{}:{}:{}:{:?}:{:?}:{:?}:{}",
                     declaration.stable_id,
                     declaration.kind,
                     declaration.name,
                     declaration.line,
                     declaration.column,
                     declaration.usr,
-                    declaration.scope_usr
+                    declaration.scope_usr,
+                    declaration.lexical_parent_usr,
+                    declaration.is_definition
                 )
                 .as_str(),
             );
@@ -426,13 +521,20 @@ impl SemanticFileContext {
 
     fn collect_scopes(
         tree: &Tree,
+        source: &[u8],
         query_cache: Option<&crate::parser::query_cache::TsQueryCache>,
     ) -> Vec<SemanticScope> {
         let mut scopes = Vec::<SemanticScope>::new();
 
-        if let Some(query) = query_cache
-            .and_then(|qc| qc.get_or_compile(Self::SCOPE_QUERY).ok())
-        {
+        let cached = query_cache
+            .and_then(|qc| qc.get_or_compile(Self::SCOPE_QUERY).ok());
+        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        let direct = if cached.is_none() {
+            tree_sitter::Query::new(&language, Self::SCOPE_QUERY).ok()
+        } else {
+            None
+        };
+        if let Some(query) = cached.as_deref().or(direct.as_ref()) {
             let namespace_idx = query.capture_index_for_name("namespace");
             let type_idx = query.capture_index_for_name("type");
             let function_idx = query.capture_index_for_name("function");
@@ -441,7 +543,7 @@ impl SemanticFileContext {
             let attribute_idx = query.capture_index_for_name("attribute");
 
             let mut cursor = tree_sitter::QueryCursor::new();
-            let mut matches = cursor.matches(&query, tree.root_node(), "".as_bytes());
+            let mut matches = cursor.matches(query, tree.root_node(), source);
             while let Some(m) = {
                 matches.advance();
                 matches.get()
@@ -464,31 +566,12 @@ impl SemanticFileContext {
                     };
                     scopes.push(SemanticScope {
                         kind,
-                        node_kind: capture.node.kind(),
+                        node_kind_id: capture.node.kind_id(),
                         start_offset: capture.node.start_byte(),
                         end_offset: capture.node.end_byte(),
                         start_line: capture.node.start_position().row + 1,
                         end_line: capture.node.end_position().row + 1,
                     });
-                }
-            }
-        } else {
-            let mut stack = vec![tree.root_node()];
-            while let Some(node) = stack.pop() {
-                if let Some(kind) = Self::scope_kind_for_node(node) {
-                    scopes.push(SemanticScope {
-                        kind,
-                        node_kind: node.kind(),
-                        start_offset: node.start_byte(),
-                        end_offset: node.end_byte(),
-                        start_line: node.start_position().row + 1,
-                        end_line: node.end_position().row + 1,
-                    });
-                }
-                for idx in (0..node.child_count()).rev() {
-                    if let Some(child) = node.child(idx as u32) {
-                        stack.push(child);
-                    }
                 }
             }
         }
@@ -497,7 +580,7 @@ impl SemanticFileContext {
             left.start_offset
                 .cmp(&right.start_offset)
                 .then(left.end_offset.cmp(&right.end_offset))
-                .then(left.node_kind.cmp(right.node_kind))
+                .then(left.node_kind_id.cmp(&right.node_kind_id))
         });
         scopes
     }
@@ -618,25 +701,6 @@ impl SemanticFileContext {
         });
     }
 
-    fn scope_kind_for_node(node: Node<'_>) -> Option<SemanticScopeKind> {
-        let kind = node.kind();
-        if kind.starts_with("preproc_") {
-            return Some(SemanticScopeKind::Preprocessor);
-        }
-        match kind {
-            "namespace_definition" => Some(SemanticScopeKind::Namespace),
-            "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier" => {
-                Some(SemanticScopeKind::Type)
-            }
-            "function_definition" | "function_declarator" | "lambda_expression" => {
-                Some(SemanticScopeKind::Function)
-            }
-            "template_declaration" => Some(SemanticScopeKind::Template),
-            "attribute_declaration" => Some(SemanticScopeKind::Attribute),
-            _ => None,
-        }
-    }
-
     fn line_starts(text: &str) -> Vec<usize> {
         text_scan::line_starts(text, false)
     }
@@ -723,23 +787,21 @@ impl SemanticFileContext {
         text.get(start..cursor).map(str::to_string)
     }
 
-    fn stable_id_for_symbol(path: &Path, symbol: &ClangSymbol) -> (String, SemanticIdProvenance) {
-        if let Some(usr) = symbol
-            .usr
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+    pub(crate) fn stable_id_for_decl(
+        canonical_path: &str,
+        name: &str,
+        kind: i32,
+        line: usize,
+        usr: Option<&str>,
+        scope_usr: Option<&str>,
+    ) -> (String, SemanticIdProvenance) {
+        if let Some(usr) = usr.map(str::trim).filter(|value| !value.is_empty()) {
             return (format!("usr:{usr}"), SemanticIdProvenance::Usr);
         }
-        let scope = symbol.scope_usr.as_deref().unwrap_or("-");
+        let scope = scope_usr.unwrap_or("-");
         let payload = format!(
             "{}|{:?}|{}|{}|{}",
-            Self::normalize_path(path),
-            symbol.kind,
-            scope,
-            symbol.line,
-            symbol.name
+            canonical_path, kind, scope, line, name
         );
         (
             format!("loc:{:016x}", Self::hash64(payload.as_str())),
@@ -766,7 +828,7 @@ impl SemanticFileContext {
     }
 
     fn hash64(value: &str) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         value.hash(&mut hasher);
         hasher.finish()
     }
@@ -781,20 +843,18 @@ mod tests {
 
     use crate::parser::clang_types::ClangDeclKey;
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
-    use crate::parser::clang_symbol::ClangSymbol;
+    use super::SemanticDeclaration;
     use crate::parser::file_context::{
         SemanticFileContext, SemanticIdProvenance, SemanticScopeKind, SourceLocation,
     };
     use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
-    use crate::parser::node_kind;
-
     #[test]
     fn stable_prefers_usr() {
         let path = PathBuf::from("semantic_usr.cpp");
         let parse = ClangParseResult::new(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "Foo".to_string(),
                 kind: clang_sys::CXCursor_FunctionDecl,
                 line: 1,
@@ -828,7 +888,7 @@ mod tests {
         let parse = ClangParseResult::with_semantic_offsets(
             true,
             Vec::new(),
-            vec![ClangSymbol {
+            vec![SemanticDeclaration {
                 name: "Foo".to_string(),
                 kind: clang_sys::CXCursor_VarDecl,
                 line: 1,
@@ -912,6 +972,8 @@ mod tests {
                 column: 5,
                 usr: Some("c:@F@foo#".to_string()),
                 scope_usr: None,
+                canonical_type_kind: clang_sys::CXType_Unexposed,
+                ..Default::default()
             }],
             references: vec![crate::parser::file_context::SemanticReference {
                 stable_id: "usr:c:@F@foo#".to_string(),
@@ -924,7 +986,7 @@ mod tests {
             }],
             scopes: vec![crate::parser::file_context::SemanticScope {
                 kind: SemanticScopeKind::Preprocessor,
-                node_kind: node_kind::PREPROC_IF,
+                node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 20,
                 start_line: 1,
@@ -1008,45 +1070,25 @@ mod tests {
 
     #[test]
     fn stable_id_resilient() {
-        let path = PathBuf::from("column_resilience.cpp");
-        let symbol_col5 = ClangSymbol {
-            name: "value".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 10,
-            column: 5,
-            ..Default::default()
-        };
-        let symbol_col8 = ClangSymbol {
-            name: "value".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 10,
-            column: 8,
-            ..Default::default()
-        };
-        let (id_a, _) = SemanticFileContext::stable_id_for_symbol(&path, &symbol_col5);
-        let (id_b, _) = SemanticFileContext::stable_id_for_symbol(&path, &symbol_col8);
+        let canonical = "column_resilience.cpp";
+        let (id_a, _) = SemanticFileContext::stable_id_for_decl(
+            canonical, "value", clang_sys::CXCursor_VarDecl, 10, None, None,
+        );
+        let (id_b, _) = SemanticFileContext::stable_id_for_decl(
+            canonical, "value", clang_sys::CXCursor_VarDecl, 10, None, None,
+        );
         assert_eq!(id_a, id_b, "same name+line+kind at different columns must produce same stable_id");
     }
 
     #[test]
     fn stable_id_differs() {
-        let path = PathBuf::from("name_diff.cpp");
-        let sym_a = ClangSymbol {
-            name: "alpha".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 10,
-            column: 5,
-            ..Default::default()
-        };
-        let sym_b = ClangSymbol {
-            name: "beta".to_string(),
-            kind: clang_sys::CXCursor_VarDecl,
-            line: 10,
-            column: 5,
-            ..Default::default()
-        };
-        let (id_a, _) = SemanticFileContext::stable_id_for_symbol(&path, &sym_a);
-        let (id_b, _) = SemanticFileContext::stable_id_for_symbol(&path, &sym_b);
+        let canonical = "name_diff.cpp";
+        let (id_a, _) = SemanticFileContext::stable_id_for_decl(
+            canonical, "alpha", clang_sys::CXCursor_VarDecl, 10, None, None,
+        );
+        let (id_b, _) = SemanticFileContext::stable_id_for_decl(
+            canonical, "beta", clang_sys::CXCursor_VarDecl, 10, None, None,
+        );
         assert_ne!(id_a, id_b, "different names must produce different stable_ids");
     }
 }
