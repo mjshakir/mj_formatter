@@ -1,16 +1,17 @@
 pub(super) mod checkpoint;
+pub(super) mod confidence;
+pub(super) mod context;
+pub(super) mod edit_utils;
+pub(super) mod semantic_impact;
+pub(super) mod suppression;
 
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{Hash, Hasher};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use smallvec::{smallvec, SmallVec};
 use arc_swap::ArcSwap;
-use tree_sitter::StreamingIterator;
 use tracing::{debug, warn};
 
 use rustc_hash::FxHashMap;
@@ -22,17 +23,14 @@ use crate::engine::gate_decision::{ConfidenceGateDecision, ConfidenceReasonCode}
 use crate::engine::convergence::ConvergenceController;
 use crate::engine::convergence::ConvergencePolicyProfile;
 use crate::engine::convergence::ConvergencePolicySignal;
-use crate::engine::convergence::ConvergenceRiskTier;
 use crate::engine::conflict_solver::GlobalConflictSolver;
 use crate::engine::catalog::PolicyCapabilities;
 use crate::engine::catalog::PolicyCapabilityMatrix;
-use crate::engine::catalog::policy_catalog;
 use crate::engine::conflict_detector::PolicyConflictDetector;
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
 use crate::engine::edit_candidate::PolicyEditCandidate;
 use crate::engine::run_options::PolicyRunOptions;
 use crate::engine::suppression::PolicySuppression;
-use crate::policy::zone::PolicyZone;
 use crate::engine::proposer::ProposerController;
 use crate::engine::semantic_contract::PolicyGuidanceMode;
 use crate::engine::semantic_contract::SemanticContract;
@@ -44,7 +42,6 @@ use crate::model::exec_trace::{
     PolicyCandidateOutcome, PolicyCandidateTrace, PolicyExecutionTrace,
 };
 use crate::model::policy_result::PolicyResult;
-use crate::model::context_query::SemanticContextQuery;
 use crate::model::violation::Violation;
 use crate::parser::clang_result::ClangParseResult;
 use crate::parser::manager::ParserManager;
@@ -52,9 +49,9 @@ use crate::parser::query_cache::TsQueryCache;
 use crate::parser::manager::SemanticCompdbContextKind;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::file_context::SemanticSummary;
+use crate::engine::catalog::policy_catalog;
 use crate::policy::Policy;
 use crate::runtime::adaptive_telemetry::AdaptiveTelemetry;
-use crate::runtime::cluster_telemetry::ClusterEnforcementBias;
 use crate::runtime::cluster_telemetry::PolicyClusterTelemetry;
 use crate::runtime::telemetry::{
     PolicyConfidenceSample, PolicyExecutionSample, PolicyTelemetry,
@@ -62,9 +59,8 @@ use crate::runtime::telemetry::{
 use crate::parser::text_scan;
 use tree_sitter::Tree;
 use crate::engine::context_tracker::{
-    BlockContextKind, FileContextKind, PolicyContextTracker,
+    PolicyContextTracker,
 };
-use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::ts_traversal;
 use crate::policy::shared_data::PolicySharedData;
 
@@ -295,21 +291,6 @@ impl PolicyPipeline {
         self.context_tracker.store(Arc::new(tracker));
     }
 
-    fn context_modifier_for_policy(&self, state: &PipelineState<'_>, policy_name: &str, block_kind: Option<BlockContextKind>) -> f64 {
-        let policy_idx = crate::engine::context_tracker::policy_index(policy_name)
-            .unwrap_or(u8::MAX);
-        if (policy_idx as usize) < 22 {
-            let file_mod = state.telem.context_mods[policy_idx as usize] as f64;
-            let block_mod = match block_kind {
-                Some(bk) => state.telem.block_mods[bk as usize][policy_idx as usize] as f64,
-                None => 1.0,
-            };
-            file_mod * block_mod
-        } else {
-            1.0
-        }
-    }
-
 
 
     pub fn save_context_tracker(&self, path: &Path) -> anyhow::Result<()> {
@@ -436,90 +417,6 @@ impl PolicyPipeline {
             convergence_controller,
             retry_batch_size: None,
         }
-    }
-
-    fn dominant_block_kind(
-        state: &PipelineState<'_>,
-        edits: &[Edit],
-    ) -> BlockContextKind {
-        if edits.is_empty() {
-            return BlockContextKind::Global;
-        }
-        let semantic = match &state.parse.semantic {
-            Some(ctx) => ctx,
-            None => return BlockContextKind::Global,
-        };
-        let mut counts = [0u32; 6];
-        for edit in edits {
-            if edit.line == 0 {
-                counts[BlockContextKind::Global as usize] += 1;
-                continue;
-            }
-            let kind = semantic
-                .scope_at_location(crate::parser::file_context::SourceLocation::new(edit.line, 1))
-                .map(|scope| BlockContextKind::from(scope.kind))
-                .unwrap_or(BlockContextKind::Global);
-            counts[kind as usize] += 1;
-        }
-        let max_idx = counts
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, &c)| c)
-            .map(|(i, _)| i)
-            .unwrap_or(4);
-        match max_idx {
-            0 => BlockContextKind::Namespace,
-            1 => BlockContextKind::Type,
-            2 => BlockContextKind::Function,
-            3 => BlockContextKind::Preprocessor,
-            5 => BlockContextKind::Template,
-            _ => BlockContextKind::Global,
-        }
-    }
-
-    fn batch_context_modifiers(&self, path: &Path) -> [f32; 24] {
-        let file_kind = FileContextKind::from_path(path);
-        self.context_tracker.load().batch_file_modifiers(file_kind)
-    }
-
-    fn batch_block_mods(&self) -> [[f32; 24]; 6] {
-        let guard = self.context_tracker.load();
-        let mut result = [[1.0f32; 24]; 6];
-        result[0] = guard.batch_block_modifiers(BlockContextKind::Namespace);
-        result[1] = guard.batch_block_modifiers(BlockContextKind::Type);
-        result[2] = guard.batch_block_modifiers(BlockContextKind::Function);
-        result[3] = guard.batch_block_modifiers(BlockContextKind::Preprocessor);
-        result[4] = guard.batch_block_modifiers(BlockContextKind::Global);
-        result[5] = guard.batch_block_modifiers(BlockContextKind::Template);
-        result
-    }
-
-    fn record_initial_fidelity_warnings(&self, state: &mut PipelineState<'_>) {
-        debug!(
-            fidelity = state.parse.fidelity_score,
-            path = %state.path.display(),
-            "semantic fidelity"
-        );
-        if state.parse.exact_compdb {
-            return;
-        }
-        let detail = match state.parse.semantic_kind {
-            SemanticCompdbContextKind::PairedSourceHeuristic => {
-                "using paired-source heuristic semantic context"
-            }
-            SemanticCompdbContextKind::HeaderConsensus => "using multi-TU header consensus context",
-            SemanticCompdbContextKind::SourceConsensus => {
-                "using compdb-derived source consensus context"
-            }
-            SemanticCompdbContextKind::Exact | SemanticCompdbContextKind::None => {
-                "using compdb-derived semantic context"
-            }
-        };
-        debug!(
-            path = %state.path.display(),
-            context = detail,
-            "semantic fidelity lock: no exact compile_commands entry"
-        );
     }
 
     fn run_policy_stage(
@@ -1088,19 +985,21 @@ impl PolicyPipeline {
             .with_graph(state.options.project_graph_snapshot.as_deref())
             .with_query_cache(Some(&self.query_cache));
         let project_query = context.project_query();
-        let edit_block_kind = Self::dominant_block_kind(state, &executed.result.edits);
-        let context_mod = self.context_modifier_for_policy(state, policy_name, Some(edit_block_kind));
+        let edit_block_index = Self::dominant_block_index(state, &executed.result.edits);
+        let context_mod = self.context_modifier_for_policy(state, policy_name, Some(edit_block_index));
         let candidate_confidence = executed.confidence_score.unwrap_or(1.0) * context_mod;
         let adaptive_snap = self.adaptive_state.load();
         let proposed_candidates = state.cand.proposer.propose(
             policy_name,
             &executed.result,
-            &project_query,
-            state.parse.comment_lines.as_ref(),
-            &executed.convergence_signal,
-            &executed.capability,
-            candidate_confidence,
-            &adaptive_snap,
+            &crate::engine::proposer::ProposalContext {
+                project_query: &project_query,
+                comment_lines: state.parse.comment_lines.as_ref(),
+                convergence_signal: &executed.convergence_signal,
+                capability: &executed.capability,
+                confidence: candidate_confidence,
+                adaptive: &adaptive_snap,
+            },
         );
         let guardian_assessment = ProposerController::assess(
             proposed_candidates.as_slice(), &executed.capability);
@@ -1349,1037 +1248,6 @@ impl PolicyPipeline {
         }
     }
 
-    fn stabilize_output_text(
-        input_text: &str,
-        output_text: Arc<str>,
-        edits: &[Edit],
-        warnings: &mut Vec<String>,
-    ) -> String {
-        if edits.is_empty() && !text_scan::TEXT_SCAN.strings_equal(&output_text, input_text) {
-            warnings.push(
-                "pipeline guard: reverted untracked text delta because no final edits survived"
-                    .to_string(),
-            );
-            return input_text.to_string();
-        }
-        output_text.to_string()
-    }
-
-    fn normalize_edit_coverage(
-        policy_name: &str,
-        before_text: &str,
-        mut result: PolicyResult,
-    ) -> PolicyResult {
-        if !result.changed && result.text.is_empty() {
-            return result;
-        }
-        if text_scan::TEXT_SCAN.strings_equal(&result.text, before_text) {
-            if !result.edits.is_empty() {
-                result.edits.clear();
-                result.warnings.push(format!(
-                    "policy output guard: cleared stale edit records for '{}'",
-                    policy_name
-                ));
-            }
-            return result;
-        }
-        if !result.edits.is_empty()
-            && Self::apply_synthesized_edits(before_text, result.edits.as_slice()).as_deref()
-                == Some(result.text.as_str())
-        {
-            return result;
-        }
-
-        let synthesized =
-            Self::synthesize_line_edits(before_text, result.text.as_str(), policy_name);
-        if synthesized.is_empty() {
-            return result;
-        }
-        let declared_lines = Self::edit_lines(result.edits.as_slice());
-        let actual_lines = Self::edit_lines(synthesized.as_slice());
-        if result.edits.is_empty()
-            || !actual_lines
-                .iter()
-                .all(|line| declared_lines.contains(line))
-            || declared_lines.len() != actual_lines.len()
-        {
-            result.warnings.push(format!(
-                "policy output guard: normalized edit coverage for '{}' (declared_lines={}, actual_lines={})",
-                policy_name,
-                declared_lines.len(),
-                actual_lines.len()
-            ));
-            result.edits = synthesized;
-        }
-        result
-    }
-
-    fn synthesize_line_edits(before: &str, after: &str, policy_name: &str) -> Vec<Edit> {
-        let before_lines = text_scan::split_lines_as_slices(before, true);
-        let after_lines = text_scan::split_lines_as_slices(after, true);
-        let common_len = before_lines.len().min(after_lines.len());
-        let mut prefix = 0usize;
-        while prefix < common_len
-            && text_scan::TEXT_SCAN
-                .slices_equal(before_lines[prefix].as_bytes(), after_lines[prefix].as_bytes())
-        {
-            prefix = prefix.saturating_add(1);
-        }
-
-        let mut before_tail = before_lines.len();
-        let mut after_tail = after_lines.len();
-        while before_tail > prefix
-            && after_tail > prefix
-            && text_scan::TEXT_SCAN.slices_equal(
-                before_lines[before_tail - 1].as_bytes(),
-                after_lines[after_tail - 1].as_bytes(),
-            )
-        {
-            before_tail = before_tail.saturating_sub(1);
-            after_tail = after_tail.saturating_sub(1);
-        }
-
-        let before_diff = &before_lines[prefix..before_tail];
-        let after_diff = &after_lines[prefix..after_tail];
-        let max_lines = before_diff.len().max(after_diff.len());
-        let mut edits = Vec::<Edit>::new();
-        for index in 0..max_lines {
-            let left = before_diff.get(index).copied().unwrap_or("");
-            let right = after_diff.get(index).copied().unwrap_or("");
-            if left == right {
-                continue;
-            }
-            edits.push(Edit {
-                policy: policy_name.into(),
-                line: prefix + index + 1,
-                before: left.to_string(),
-                after: right.to_string(),
-            });
-        }
-        edits
-    }
-
-    fn build_convergence_profiles(
-        policy_settings: &FxHashMap<String, PolicyConfig>,
-    ) -> FxHashMap<String, ConvergencePolicyProfile> {
-        let mut profiles = FxHashMap::default();
-        for (name, settings) in policy_settings {
-            let mut domain = name.clone();
-            let mut priority = ConvergenceController::default_priority_for(name.as_str());
-            let mut impact_radius = ConvergenceController::default_impact_radius_for(name.as_str());
-            let mut priority_weight_bp =
-                ConvergenceController::default_priority_weight_bp_for(name.as_str());
-            let mut risk_tier = ConvergenceController::default_risk_tier_for(name.as_str());
-            if let Some(table) = settings.table_value("convergence") {
-                if let Some(value) = table.get("domain").and_then(|item| item.as_str()) {
-                    let trimmed = value.trim();
-                    if !trimmed.is_empty() {
-                        domain = trimmed.to_string();
-                    }
-                }
-                if let Some(value) = table.get("priority").and_then(|item| item.as_integer()) {
-                    if value >= 0 {
-                        priority = value.min(u16::MAX as i64) as u16;
-                    }
-                }
-                if let Some(value) = table
-                    .get("impact_radius")
-                    .and_then(|item| item.as_integer())
-                {
-                    if value >= 0 {
-                        impact_radius = value as usize;
-                    }
-                }
-                if let Some(value) = table
-                    .get("priority_weight_bp")
-                    .and_then(|item| item.as_integer())
-                {
-                    if value >= 0 {
-                        priority_weight_bp = value.min(1_000) as u16;
-                    }
-                } else if let Some(value) = table
-                    .get("semantic_priority_weight")
-                    .and_then(|item| item.as_float())
-                    .or_else(|| {
-                        table
-                            .get("semantic_priority_weight")
-                            .and_then(|item| item.as_integer())
-                            .map(|item| item as f64)
-                    })
-                {
-                    priority_weight_bp = (value.clamp(0.0, 1.0) * 1_000.0).round() as u16;
-                }
-                if let Some(value) = table.get("risk_tier").and_then(|item| item.as_str()) {
-                    let normalized = value.trim().to_ascii_lowercase();
-                    risk_tier = match normalized.as_str() {
-                        "stabilizer" | "stabilize" | "low" => ConvergenceRiskTier::Stabilizer,
-                        "rewrite" | "high" => ConvergenceRiskTier::Rewrite,
-                        "balanced" | "medium" => ConvergenceRiskTier::Balanced,
-                        _ => risk_tier,
-                    };
-                }
-            }
-            profiles.insert(
-                name.clone(),
-                ConvergencePolicyProfile::with_risk_tier(
-                    domain,
-                    priority,
-                    impact_radius,
-                    priority_weight_bp,
-                    risk_tier,
-                ),
-            );
-        }
-        profiles
-    }
-
-    fn build_convergence_signal(input: ConvergenceSignalInput<'_>) -> ConvergencePolicySignal {
-        let ConvergenceSignalInput {
-            result,
-            semantic,
-            summary,
-            previous_contract_failures,
-            capability,
-            cluster_radius_cap,
-            adaptive,
-        } = input;
-        let mut semantic_confidence_bp = adaptive.semantic_confidence_bp_base();
-        let mut impact_radius = 0usize;
-        if let Some(context) = semantic {
-            if context.clang_success {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(200);
-            }
-            if !context.tree_has_error {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(150);
-            }
-            if context.diagnostic_summary.error_total() == 0 {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(150);
-            } else {
-                let penalty = context.diagnostic_summary.error_total().min(10) as u16 * 20;
-                semantic_confidence_bp = semantic_confidence_bp.saturating_sub(penalty);
-            }
-            if summary.usr_backed_declaration_count > 0 {
-                semantic_confidence_bp = semantic_confidence_bp.saturating_add(100);
-            }
-            let ref_radius = if summary.reference_count > 2000 { 3 }
-                else if summary.reference_count > 500 { 2 }
-                else { 1 };
-            impact_radius = impact_radius.max(ref_radius);
-        } else {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(100);
-        }
-        if previous_contract_failures.contains(&SemanticInvariantClause::SymbolIdentity)
-            || previous_contract_failures
-                .contains(&SemanticInvariantClause::DeclarationReferenceIntegrity)
-        {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(80);
-            impact_radius = impact_radius.max(2);
-        }
-        if previous_contract_failures.contains(&SemanticInvariantClause::ScopeIntegrity) {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(60);
-            impact_radius = impact_radius.max(2);
-        }
-        if previous_contract_failures.contains(&SemanticInvariantClause::EditSafety) {
-            semantic_confidence_bp = semantic_confidence_bp.saturating_sub(40);
-        }
-        let edit_radius = if result.edits.len() > 40 { 3 }
-            else if result.edits.len() > 10 { 2 }
-            else { 1 };
-        impact_radius = impact_radius.max(edit_radius);
-        let mut resolved_radius = impact_radius.min(8);
-        if let Some(cap) = cluster_radius_cap {
-            resolved_radius = resolved_radius.min(cap.max(1));
-        }
-        let (impact_ranges, symbol_ids) =
-            Self::build_semantic_impact_maps(result, semantic, resolved_radius);
-        ConvergencePolicySignal {
-            semantic_confidence_bp: semantic_confidence_bp.min(1_000),
-            impact_radius: resolved_radius,
-            capability_semantic_rewrite: capability.semantic_rewrite,
-            capability_macro_sensitive: capability.macro_sensitive,
-            capability_whitespace_safe: capability.whitespace_safe,
-            solver_dropped_lines: 0,
-            hard_blocked_lines: 0,
-            impact_ranges,
-            symbol_ids,
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn build_semantic_impact_maps(
-        result: &PolicyResult,
-        semantic: Option<&SemanticFileContext>,
-        base_radius: usize,
-    ) -> (
-        BTreeMap<usize, SmallVec<[(usize, usize); 4]>>,
-        BTreeMap<usize, SmallVec<[u64; 4]>>,
-    ) {
-        let impact_cap = 256usize;
-        let scope_cap = 512usize;
-        let symbol_cap = 512usize;
-        let fallback_radius = base_radius.max(1);
-        let mut edit_lines = result
-            .edits
-            .iter()
-            .filter_map(|edit| (edit.line > 0 && edit.before != edit.after).then_some(edit.line))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .take(impact_cap)
-            .collect::<Vec<_>>();
-        edit_lines.sort_unstable();
-        if edit_lines.is_empty() {
-            return (BTreeMap::new(), BTreeMap::new());
-        }
-
-        let mut ranges_by_line = BTreeMap::<usize, SmallVec<[(usize, usize); 4]>>::new();
-        let mut symbols_by_line = BTreeMap::<usize, SmallVec<[u64; 4]>>::new();
-        let Some(semantic) = semantic else {
-            for line in edit_lines {
-                ranges_by_line.insert(
-                    line,
-                    smallvec![(
-                        line.saturating_sub(fallback_radius).max(1),
-                        line.saturating_add(fallback_radius).max(1),
-                    )],
-                );
-            }
-            return (ranges_by_line, symbols_by_line);
-        };
-
-        let mut symbol_lines: FxHashMap<u64, (usize, usize)> = FxHashMap::default();
-        let mut symbol_ids_by_line: FxHashMap<usize, SmallVec<[u64; 4]>> = FxHashMap::default();
-        for declaration in &semantic.declarations {
-            if declaration.line == 0 {
-                continue;
-            }
-            let stable = Self::hash_semantic_stable_id(declaration.stable_id.as_str());
-            symbol_ids_by_line
-                .entry(declaration.line)
-                .or_default()
-                .push(stable);
-            symbol_lines
-                .entry(stable)
-                .and_modify(|bounds| {
-                    bounds.0 = bounds.0.min(declaration.line);
-                    bounds.1 = bounds.1.max(declaration.line);
-                })
-                .or_insert((declaration.line, declaration.line));
-        }
-        for reference in &semantic.references {
-            if reference.line == 0 {
-                continue;
-            }
-            let stable = Self::hash_semantic_stable_id(reference.stable_id.as_str());
-            symbol_ids_by_line
-                .entry(reference.line)
-                .or_default()
-                .push(stable);
-            symbol_lines
-                .entry(stable)
-                .and_modify(|bounds| {
-                    bounds.0 = bounds.0.min(reference.line);
-                    bounds.1 = bounds.1.max(reference.line);
-                })
-                .or_insert((reference.line, reference.line));
-        }
-
-        let mut scopes_by_width: Vec<(usize, usize, usize)> = semantic
-            .scopes
-            .iter()
-            .map(|s| {
-                let start = s.start_line.max(1);
-                let end = s.end_line.max(1);
-                (end.saturating_sub(start), start, end)
-            })
-            .filter(|(_, start, end)| start <= end)
-            .collect();
-        scopes_by_width.sort_unstable();
-
-        for line in edit_lines {
-            let mut ranges = SmallVec::<[(usize, usize); 4]>::new();
-            for &(width, start, end) in &scopes_by_width {
-                if width.saturating_add(1) > scope_cap {
-                    break;
-                }
-                if start > line || end < line {
-                    continue;
-                }
-                ranges.push((start, end));
-                if ranges.len() >= CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE {
-                    break;
-                }
-            }
-
-            let mut symbol_ids = symbol_ids_by_line.remove(&line).unwrap_or_default();
-            symbol_ids.sort_unstable();
-            symbol_ids.dedup();
-            for stable in &symbol_ids {
-                if let Some((start, end)) = symbol_lines.get(stable).copied() {
-                    let width = end.saturating_sub(start).saturating_add(1);
-                    if width <= symbol_cap {
-                        ranges.push((start.max(1), end.max(1)));
-                    }
-                }
-            }
-
-            if ranges.is_empty() {
-                ranges.push((
-                    line.saturating_sub(fallback_radius).max(1),
-                    line.saturating_add(fallback_radius).max(1),
-                ));
-            }
-            Self::normalize_impact_ranges(&mut ranges);
-            if ranges.len() > CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE {
-                ranges.truncate(CONVERGENCE_MAX_IMPACT_RANGES_PER_LINE);
-            }
-
-            if !symbol_ids.is_empty() {
-                symbols_by_line.insert(line, symbol_ids);
-            }
-            ranges_by_line.insert(line, ranges);
-        }
-
-        (ranges_by_line, symbols_by_line)
-    }
-
-    fn normalize_impact_ranges(ranges: &mut SmallVec<[(usize, usize); 4]>) {
-        if ranges.is_empty() {
-            return;
-        }
-        ranges.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-        let mut merged = SmallVec::<[(usize, usize); 4]>::with_capacity(ranges.len());
-        for &(start, end) in ranges.iter() {
-            let start: usize = start.max(1);
-            let end: usize = end.max(start);
-            if let Some(last) = merged.last_mut() {
-                if start <= last.1.saturating_add(1) {
-                    last.1 = last.1.max(end);
-                    continue;
-                }
-            }
-            merged.push((start, end));
-        }
-        *ranges = merged;
-    }
-
-    fn hash_semantic_stable_id(value: &str) -> u64 {
-        let mut hasher = rustc_hash::FxHasher::default();
-        value.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn apply_confidence_decision(
-        policy_name: &str,
-        before_text: &str,
-        result: PolicyResult,
-        decision: ConfidenceGateDecision,
-    ) -> PolicyResult {
-        let message_line = result.edits.first().map(|item| item.line).unwrap_or(1);
-        let reason_text = decision.rendered_reason_summary();
-
-        match decision.outcome {
-            PolicyDecisionOutcome::Apply => {
-                if decision.base_enforcement != decision.effective_enforcement {
-                    let mut violations = result.violations;
-                    violations.push(Violation {
-                        policy: "confidence_guard".into(),
-                        message: format!(
-                            "Adaptive tier for '{}': {:?}->{:?} ({})",
-                            policy_name,
-                            decision.base_enforcement,
-                            decision.effective_enforcement,
-                            reason_text
-                        ),
-                        line: message_line,
-                        column: Some(1),
-                    });
-                    PolicyResult {
-                        text: result.text,
-                        violations,
-                        edits: result.edits,
-                        warnings: result.warnings,
-                        changed: result.changed,
-                    }
-                } else {
-                    result
-                }
-            }
-            PolicyDecisionOutcome::ApplyPartial => {
-                let dropped_count = decision.dropped_lines.len();
-                let mut suppressed =
-                    Self::apply_line_suppression(before_text, result, &decision.dropped_lines);
-                suppressed.violations.push(Violation {
-                    policy: "confidence_guard".into(),
-                    message: format!(
-                        "Adaptive partial apply for '{}' (dropped_lines={}, score={:.2}, threshold={:.2}, reasons={})",
-                        policy_name, dropped_count, decision.score, decision.threshold, reason_text
-                    ),
-                    line: message_line,
-                    column: Some(1),
-                });
-                suppressed
-            }
-            PolicyDecisionOutcome::Block => {
-                let mode_label = "blocked";
-                let mut violations = result.violations;
-                violations.push(Violation {
-                    policy: "confidence_guard".into(),
-                    message: format!(
-                        "Adaptive decision {} for '{}' (score={:.2}, threshold={:.2}, effective={:?}, reasons={})",
-                        mode_label,
-                        policy_name,
-                        decision.score,
-                        decision.threshold,
-                        decision.effective_enforcement,
-                        reason_text
-                    ),
-                    line: message_line,
-                    column: Some(1),
-                });
-                PolicyResult {
-                    text: before_text.to_string(),
-                    violations,
-                    edits: Vec::new(),
-                    warnings: result.warnings,
-                    changed: false,
-                }
-            }
-        }
-    }
-
-    fn apply_cluster_bias(
-        mut decision: ConfidenceGateDecision,
-        bias: ClusterEnforcementBias,
-    ) -> ConfidenceGateDecision {
-        match bias {
-            ClusterEnforcementBias::Neutral => decision,
-            ClusterEnforcementBias::Relax => {
-                if decision.base_enforcement != Enforcement::Must
-                    && decision.outcome == PolicyDecisionOutcome::Block
-                {
-                    decision.outcome = PolicyDecisionOutcome::Apply;
-                    Self::push_reason_code(
-                        &mut decision.reason_codes,
-                        ConfidenceReasonCode::ClusterAdaptiveRelaxed,
-                    );
-                }
-                if decision.effective_enforcement != Enforcement::Must {
-                    decision.effective_enforcement =
-                        Self::relax_enforcement(decision.effective_enforcement);
-                }
-                Self::push_reason_code(
-                    &mut decision.reason_codes,
-                    ConfidenceReasonCode::ClusterAdaptiveRelaxed,
-                );
-                decision
-            }
-            ClusterEnforcementBias::Harden => {
-                decision.effective_enforcement =
-                    Self::harden_enforcement(decision.effective_enforcement);
-                Self::push_reason_code(
-                    &mut decision.reason_codes,
-                    ConfidenceReasonCode::ClusterAdaptiveHardened,
-                );
-                decision
-            }
-        }
-    }
-
-    fn push_reason_code(codes: &mut Vec<ConfidenceReasonCode>, code: ConfidenceReasonCode) {
-        if !codes.contains(&code) {
-            codes.push(code);
-        }
-    }
-
-    fn relax_enforcement(value: Enforcement) -> Enforcement {
-        match value {
-            Enforcement::Must => Enforcement::Must,
-            Enforcement::Hard => Enforcement::Soft,
-            Enforcement::Soft => Enforcement::Advisory,
-            Enforcement::Advisory => Enforcement::Advisory,
-        }
-    }
-
-    fn harden_enforcement(value: Enforcement) -> Enforcement {
-        match value {
-            Enforcement::Must => Enforcement::Must,
-            Enforcement::Hard => Enforcement::Must,
-            Enforcement::Soft => Enforcement::Hard,
-            Enforcement::Advisory => Enforcement::Soft,
-        }
-    }
-
-    fn apply_semantic_mode(
-        before_text: &str,
-        result: PolicyResult,
-        semantic_query: &SemanticContextQuery<'_>,
-        capability: &PolicyCapabilities,
-        config: SemanticGuidanceConfig<'_>,
-    ) -> PolicyResult {
-        if result.edits.is_empty() || !semantic_query.is_available() {
-            return result;
-        }
-        let unsafe_lines = result
-            .edits
-            .iter()
-            .filter_map(|edit| {
-                if edit.line == 0 || edit.before == edit.after {
-                    return None;
-                }
-                let line = edit.line;
-                let safe_line = if semantic_query.is_safe_edit(line, 1) {
-                    true
-                } else if !capability.semantic_rewrite {
-                    let profile = semantic_query.line_profile(line);
-                    let consensus_diag_relax = !config.exact_compdb_for_file
-                        && matches!(
-                            config.semantic_context_kind,
-                            SemanticCompdbContextKind::PairedSourceHeuristic
-                                | SemanticCompdbContextKind::HeaderConsensus
-                                | SemanticCompdbContextKind::SourceConsensus
-                        )
-                        && profile.has_diagnostic_error
-                        && !profile.in_macro_region
-                        && profile.declaration_count == 0
-                        && profile.reference_count == 0
-                        && capability.structural_safe;
-                    (capability.allows_zone(PolicyZone::Preprocessor)
-                        && semantic_query.is_safe_global(line, 1))
-                        || (capability.allows_zone(PolicyZone::Comments)
-                            && !semantic_query.has_diag_error(line))
-                        || consensus_diag_relax
-                } else {
-                    false
-                };
-                (!safe_line).then_some(line)
-            })
-            .collect::<BTreeSet<_>>();
-        if unsafe_lines.is_empty() {
-            return result;
-        }
-
-        let lines_hint = Self::line_hint(unsafe_lines.iter().copied(), unsafe_lines.len(), 8);
-        match config.guidance_mode {
-            PolicyGuidanceMode::SoftGuideline => {
-                let dropped_count = unsafe_lines.len();
-                let mut suppressed = if capability.structural_safe {
-                    Self::suppress_structural(before_text, result, &unsafe_lines)
-                } else {
-                    Self::apply_line_suppression(before_text, result, &unsafe_lines)
-                };
-                suppressed.warnings.push(format!(
-                    "semantic guideline dropped {} unsafe edit line(s) for '{}' (mode={}, lines={})",
-                    dropped_count,
-                    config.policy_name,
-                    config.guidance_mode.as_str(),
-                    lines_hint
-                ));
-                suppressed
-            }
-            PolicyGuidanceMode::HardInvariant => {
-                let line = unsafe_lines.iter().next().copied().unwrap_or(1);
-                let mut violations = result.violations;
-                violations.push(Violation {
-                    policy: "semantic_contract".into(),
-                    message: format!(
-                        "semantic hard invariant blocked '{}' in unsafe region(s) (lines={})",
-                        config.policy_name, lines_hint
-                    ),
-                    line,
-                    column: Some(1),
-                });
-                PolicyResult {
-                    text: before_text.to_string(),
-                    violations,
-                    edits: Vec::new(),
-                    warnings: result.warnings,
-                    changed: false,
-                }
-            }
-        }
-    }
-
-    fn apply_scope_filter(
-        before_text: &str,
-        result: PolicyResult,
-        allowed_lines: Option<&BTreeSet<usize>>,
-        config: ScopeFilterConfig<'_>,
-    ) -> PolicyResult {
-        let Some(allowed_lines) = allowed_lines else {
-            return result;
-        };
-        if allowed_lines.is_empty() || result.edits.is_empty() {
-            return result;
-        }
-        let blocked_lines = result
-            .edits
-            .iter()
-            .filter_map(|edit| {
-                (edit.line > 0 && edit.before != edit.after && !allowed_lines.contains(&edit.line))
-                    .then_some(edit.line)
-            })
-            .collect::<BTreeSet<_>>();
-        if blocked_lines.is_empty() {
-            return result;
-        }
-        let dropped = blocked_lines.len();
-        if config.capability.semantic_rewrite {
-            let mut reverted = result;
-            reverted.text = before_text.to_string();
-            reverted.edits.clear();
-            reverted.warnings.push(format!(
-                "retry_scope({scope_stage}) reverted semantic rewrite for '{}' because {} out-of-scope line(s) were required",
-                config.policy_name,
-                dropped,
-                scope_stage = config.scope_stage
-            ));
-            return reverted;
-        }
-        let mut filtered = if config.capability.structural_safe {
-            Self::suppress_structural(before_text, result, &blocked_lines)
-        } else {
-            Self::apply_line_suppression(before_text, result, &blocked_lines)
-        };
-        filtered.warnings.push(format!(
-            "retry_scope({scope_stage}) dropped {} out-of-scope line(s) for '{}'",
-            dropped,
-            config.policy_name,
-            scope_stage = config.scope_stage
-        ));
-        filtered
-    }
-
-    fn apply_line_suppression(
-        before_text: &str,
-        result: PolicyResult,
-        disabled_lines: &std::collections::BTreeSet<usize>,
-    ) -> PolicyResult {
-        Self::suppress_lines_impl(before_text, result, disabled_lines)
-    }
-
-    fn suppress_structural(
-        before_text: &str,
-        result: PolicyResult,
-        disabled_lines: &std::collections::BTreeSet<usize>,
-    ) -> PolicyResult {
-        Self::suppress_lines_impl(before_text, result, disabled_lines)
-    }
-
-    fn suppress_lines_impl(
-        before_text: &str,
-        result: PolicyResult,
-        disabled_lines: &std::collections::BTreeSet<usize>,
-    ) -> PolicyResult {
-        if disabled_lines.is_empty() {
-            return result;
-        }
-        let PolicyResult {
-            text: result_text,
-            violations: result_violations,
-            edits: result_edits,
-            mut warnings,
-            changed: _,
-        } = result;
-        let kept_violations = result_violations
-            .into_iter()
-            .filter(|item| !disabled_lines.contains(&item.line))
-            .collect::<Vec<_>>();
-        let kept_edits = result_edits
-            .into_iter()
-            .filter(|item| !disabled_lines.contains(&item.line))
-            .collect::<Vec<_>>();
-
-        let before_lines = text_scan::split_lines_as_slices(before_text, true);
-        let after_lines = text_scan::split_lines_as_slices(result_text.as_str(), true);
-        let before_line_count = before_lines.len();
-        let after_line_count = after_lines.len();
-        let max_count = before_line_count.min(after_line_count);
-        let suppressed_line_touched = disabled_lines.iter().any(|line_no| {
-            let index = line_no.saturating_sub(1);
-            if index < max_count {
-                return !text_scan::TEXT_SCAN.slices_equal(
-                    before_lines[index].as_bytes(),
-                    after_lines[index].as_bytes(),
-                );
-            }
-            if index < before_line_count {
-                return true;
-            }
-            index < after_line_count
-        });
-        if !suppressed_line_touched {
-            return PolicyResult {
-                text: result_text,
-                violations: kept_violations,
-                edits: kept_edits,
-                warnings,
-                changed: true,
-            };
-        }
-        let has_non_local_line_edits = before_line_count != after_line_count;
-        if has_non_local_line_edits {
-            let synthesized_policy = kept_edits
-                .first()
-                .map(|edit| edit.policy.as_str())
-                .unwrap_or("line_suppression_guard");
-            let synthesized =
-                Self::synthesize_line_edits(before_text, result_text.as_str(), synthesized_policy);
-            let filtered = synthesized
-                .into_iter()
-                .filter(|edit| !disabled_lines.contains(&edit.line))
-                .collect::<Vec<_>>();
-            let adjusted_text = Self::apply_synthesized_edits(before_text, &filtered)
-                .or_else(|| Self::apply_edits_lenient(before_text, &filtered));
-            let Some(adjusted_text) = adjusted_text else {
-                warnings.push(
-                    "line suppression escalated to full rollback due non-local line edits"
-                        .to_string(),
-                );
-                return PolicyResult {
-                    text: before_text.to_string(),
-                    violations: kept_violations,
-                    edits: Vec::new(),
-                    warnings,
-                    changed: false,
-                };
-            };
-            let synthesized = Self::synthesize_line_edits(
-                before_text,
-                adjusted_text.as_str(),
-                synthesized_policy,
-            );
-            let leaked_disabled_lines = synthesized
-                .iter()
-                .any(|edit| disabled_lines.contains(&edit.line));
-            if !leaked_disabled_lines {
-                warnings.push(format!(
-                    "line suppression applied best-effort non-local rollback for {} blocked line(s)",
-                    disabled_lines.len()
-                ));
-                return PolicyResult {
-                    text: adjusted_text,
-                    violations: kept_violations,
-                    edits: synthesized,
-                    warnings,
-                    changed: true,
-                };
-            }
-            warnings.push(
-                "line suppression escalated to full rollback due non-local line edits".to_string(),
-            );
-            return PolicyResult {
-                text: before_text.to_string(),
-                violations: kept_violations,
-                edits: Vec::new(),
-                warnings,
-                changed: false,
-            };
-        }
-
-        if kept_edits.is_empty() {
-            return PolicyResult {
-                text: before_text.to_string(),
-                violations: kept_violations,
-                edits: kept_edits,
-                warnings,
-                changed: false,
-            };
-        }
-
-        let mut before_lines = before_lines;
-        let mut after_lines = after_lines;
-        for line_no in disabled_lines {
-            let index = line_no.saturating_sub(1);
-            if index < max_count {
-                after_lines[index] = before_lines[index];
-            }
-        }
-        before_lines.clear();
-        let text = after_lines.concat();
-        PolicyResult {
-            text,
-            violations: kept_violations,
-            edits: kept_edits,
-            warnings,
-            changed: true,
-        }
-    }
-
-    fn has_nonlocal_change(before_text: &str, after_text: &str) -> bool {
-        text_scan::TEXT_SCAN.has_line_count_changed(before_text, after_text)
-    }
-
-    fn edit_lines(edits: &[Edit]) -> BTreeSet<usize> {
-        edits
-            .iter()
-            .filter_map(|edit| (edit.line > 0 && edit.before != edit.after).then_some(edit.line))
-            .collect::<BTreeSet<_>>()
-    }
-
-    fn line_hint<I>(lines: I, line_count: usize, max_lines: usize) -> String
-    where
-        I: Iterator<Item = usize>,
-    {
-        let mut sample = lines
-            .take(max_lines)
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>();
-        if line_count > sample.len() {
-            sample.push(format!("+{}", line_count - sample.len()));
-        }
-        sample.join(",")
-    }
-
-    fn apply_synthesized_edits(before_text: &str, edits: &[Edit]) -> Option<String> {
-        if edits.is_empty() {
-            return Some(before_text.to_string());
-        }
-        let lines = text_scan::TEXT_SCAN.split_lines_as_slices(before_text, true);
-        let mut ordered = edits
-            .iter()
-            .filter(|edit| edit.line > 0)
-            .collect::<Vec<_>>();
-        ordered.sort_by_key(|edit| edit.line);
-        let mut result = String::with_capacity(before_text.len());
-        let mut src = 0usize;
-        for edit in ordered {
-            let idx = edit.line.saturating_sub(1);
-            if idx < src {
-                return None;
-            }
-            while src < idx {
-                if src >= lines.len() {
-                    return None;
-                }
-                result.push_str(lines[src]);
-                src += 1;
-            }
-            let insertion = edit.before.is_empty() && !edit.after.is_empty();
-            let deletion = !edit.before.is_empty() && edit.after.is_empty();
-            if insertion {
-                if idx > lines.len() {
-                    return None;
-                }
-                result.push_str(&edit.after);
-            } else {
-                if src >= lines.len() {
-                    return None;
-                }
-                if lines[src] != edit.before {
-                    return None;
-                }
-                if deletion {
-                    src += 1;
-                } else {
-                    result.push_str(&edit.after);
-                    src += 1;
-                }
-            }
-        }
-        while src < lines.len() {
-            result.push_str(lines[src]);
-            src += 1;
-        }
-        Some(result)
-    }
-
-    fn semantic_error_lines(regions: &[SemanticRegion]) -> BTreeSet<usize> {
-        let mut error_lines = BTreeSet::new();
-        for region in regions {
-            if region.has_diagnostic_error && region.kind == SemanticRegionKind::Diagnostic {
-                for line in region.start_line..=region.end_line {
-                    error_lines.insert(line);
-                }
-            }
-        }
-        error_lines
-    }
-
-    fn apply_edits_lenient(before_text: &str, edits: &[Edit]) -> Option<String> {
-        if edits.is_empty() {
-            return Some(before_text.to_string());
-        }
-        let mut lines: Vec<Cow<'_, str>> = text_scan::TEXT_SCAN
-            .split_lines_as_slices(before_text, true)
-            .into_iter()
-            .map(Cow::Borrowed)
-            .collect();
-        let mut ordered = edits
-            .iter()
-            .filter(|edit| edit.line > 0)
-            .collect::<Vec<_>>();
-        ordered.sort_by_key(|edit| edit.line);
-        let mut offset = 0isize;
-        for edit in ordered {
-            let base_index = edit.line.saturating_sub(1) as isize + offset;
-            if base_index < 0 {
-                continue;
-            }
-            let index = base_index as usize;
-            let insertion = edit.before.is_empty() && !edit.after.is_empty();
-            let deletion = !edit.before.is_empty() && edit.after.is_empty();
-            if insertion {
-                if index > lines.len() {
-                    continue;
-                }
-                lines.insert(index, Cow::Owned(edit.after.clone()));
-                offset = offset.saturating_add(1);
-                continue;
-            }
-            if index >= lines.len() {
-                continue;
-            }
-            if deletion {
-                if lines[index] == edit.before {
-                    lines.remove(index);
-                    offset = offset.saturating_sub(1);
-                }
-            } else if lines[index] == edit.before {
-                lines[index] = Cow::Owned(edit.after.clone());
-            }
-        }
-        let mut result = String::with_capacity(before_text.len());
-        for line in &lines {
-            result.push_str(line);
-        }
-        Some(result)
-    }
-
-    fn comment_lines_from_tree(
-        tree: Option<&Tree>,
-        source: &[u8],
-        query_cache: &TsQueryCache,
-    ) -> BTreeSet<usize> {
-        let Some(tree) = tree else {
-            return BTreeSet::new();
-        };
-        let Ok(query) = query_cache.get_or_compile("(comment) @c") else {
-            return BTreeSet::new();
-        };
-        let mut cursor = tree_sitter::QueryCursor::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), source);
-        let mut lines = BTreeSet::<usize>::new();
-        while let Some(m) = {
-            matches.advance();
-            matches.get()
-        } {
-            for capture in m.captures {
-                let start = capture.node.start_position().row.saturating_add(1);
-                let end = capture.node.end_position().row.saturating_add(1).max(start);
-                for line in start..=end {
-                    lines.insert(line);
-                }
-            }
-        }
-        lines
-    }
-
-    #[cfg(test)]
-    fn needs_exact_compdb(policy_name: &str) -> bool {
-        policy_catalog()
-            .behavior(policy_name)
-            .needs_exact_compdb
-    }
 
     fn append_selected_candidates(
         selected: &mut Vec<PolicyEditCandidate>,
@@ -2468,18 +1336,16 @@ mod tests {
     use crate::model::context_query::SemanticContextQuery;
     use crate::model::violation::Violation;
     use crate::parser::clang_result::ClangDiagnosticEntry;
-    use crate::parser::clang_result::ClangDiagnosticSeverity;
     use crate::parser::clang_result::ClangDiagnosticSummary;
     use crate::parser::manager::SemanticCompdbContextKind;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
-        SemanticScope, SemanticScopeKind,
+        SemanticScope,
     };
     #[test]
     fn guideline_drops_unsafe() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Preprocessor,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 16,
@@ -2539,7 +1405,7 @@ mod tests {
             diagnostic_entries: vec![ClangDiagnosticEntry {
                 line: 4,
                 column: 1,
-                severity: ClangDiagnosticSeverity::Error,
+                severity: clang_sys::CXDiagnostic_Error as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             }],
@@ -2597,7 +1463,6 @@ mod tests {
     fn guideline_allows_structural() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Preprocessor,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_include,
                 start_offset: 0,
                 end_offset: 20,
@@ -2919,7 +1784,6 @@ mod tests {
                 column: 3,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
