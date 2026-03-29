@@ -384,7 +384,7 @@ mod tests {
     use crate::graph::types::GraphEdge;
     use crate::graph::types::GraphEdgeKind;
     use crate::graph::types::GraphNode;
-    use crate::graph::types::GraphNodeKind;
+    use crate::graph::types::GRAPH_NODE_KIND_FILE;
     use crate::graph::types::NodeMetrics;
     use crate::graph::state::ProjectGraphState;
     use crate::graph::store::{ProjectGraphStore, ProjectGraphStoreOptions};
@@ -407,7 +407,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             SymbolId::new("usr:demo"),
             "demo",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/demo.cpp",
             12,
             3,
@@ -432,7 +432,7 @@ mod tests {
                 state.upsert_node(GraphNode::new(
                     SymbolId::new("usr:update"),
                     "updated",
-                    GraphNodeKind::Variable,
+                    clang_sys::CXCursor_VarDecl,
                     "src/update.cpp",
                     9,
                     1,
@@ -476,7 +476,7 @@ mod tests {
         let mut file = GraphNode::new(
             file_id.clone(),
             "src/demo.cpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             "src/demo.cpp",
             0,
             0,
@@ -487,7 +487,7 @@ mod tests {
         let mut left_node = GraphNode::new(
             left.clone(),
             "left",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/demo.cpp",
             1,
             1,
@@ -497,7 +497,7 @@ mod tests {
         let mut right_node = GraphNode::new(
             right.clone(),
             "right",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/demo.cpp",
             2,
             1,

@@ -2,7 +2,6 @@ use std::path::Path;
 
 use crate::parser::clang_types::{self, ClangDeclKey};
 use crate::parser::file_context::SemanticDeclaration;
-use crate::graph::types::GraphNodeKind;
 use crate::graph::symbol_id::SymbolId;
 
 fn sanitize_id_component(raw: &str) -> String {
@@ -70,12 +69,6 @@ pub fn id_candidates(decl: &SemanticDeclaration) -> Vec<SymbolId> {
         vec![canonical]
     } else {
         vec![canonical, legacy]
-    }
-}
-
-impl From<i32> for GraphNodeKind {
-    fn from(kind: i32) -> Self {
-        clang_types::graph_node_kind(kind)
     }
 }
 

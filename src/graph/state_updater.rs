@@ -7,8 +7,8 @@ use crate::parser::clang_result::ClangParseResult;
 use crate::graph::types::GraphEdge;
 use crate::graph::types::GraphEdgeKind;
 use crate::graph::types::GraphNode;
-use crate::graph::types::GraphNodeKind;
 use crate::graph::types::NodeMetrics;
+use crate::graph::types::GRAPH_NODE_KIND_FILE;
 use crate::graph::state::ProjectGraphState;
 use crate::graph::symbol_bucket::{file_symbol_id, legacy_id, ToSymbolId};
 use crate::graph::symbol_id::SymbolId;
@@ -28,7 +28,7 @@ impl GraphUpdater {
         let mut file_node = GraphNode::new(
             file_id.clone(),
             path_string.clone(),
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             path_string.clone(),
             0,
             0,
@@ -68,13 +68,13 @@ impl GraphUpdater {
                 GraphNode::new(
                     symbol_id.clone(),
                     symbol.name.clone(),
-                    GraphNodeKind::from(symbol.kind),
+                    symbol.kind,
                     path_string.clone(),
                     symbol.line,
                     symbol.column,
                 )
             });
-            node.kind = GraphNodeKind::from(symbol.kind);
+            node.kind = symbol.kind;
             node.name = symbol.name.clone();
             node.file_path = path_string.clone();
             node.line = symbol.line;
@@ -246,7 +246,7 @@ impl GraphUpdater {
         let mut node = GraphNode::new(
             symbol_id.clone(),
             format!("{:?}@{}:{}", decl_key.kind, decl_key.line, decl_key.column),
-            crate::parser::clang_types::graph_node_kind(decl_key.kind),
+            decl_key.kind,
             decl_key.path.clone(),
             decl_key.line,
             decl_key.column,

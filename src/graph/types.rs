@@ -41,25 +41,13 @@ impl GraphEdge {
 
 // ── Node ─────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum GraphNodeKind {
-    File,
-    Namespace,
-    Type,
-    Function,
-    Method,
-    Variable,
-    Field,
-    Parameter,
-    Macro,
-    Unknown,
-}
+pub const GRAPH_NODE_KIND_FILE: i32 = -1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub symbol_id: SymbolId,
     pub name: String,
-    pub kind: GraphNodeKind,
+    pub kind: i32,
     pub file_path: String,
     pub line: usize,
     pub column: usize,
@@ -72,7 +60,7 @@ impl GraphNode {
     pub fn new(
         symbol_id: SymbolId,
         name: impl Into<String>,
-        kind: GraphNodeKind,
+        kind: i32,
         file_path: impl Into<String>,
         line: usize,
         column: usize,

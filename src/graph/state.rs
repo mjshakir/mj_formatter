@@ -7,7 +7,7 @@ use crate::model::policy_name::PolicyName;
 use crate::graph::types::GraphEdge;
 use crate::graph::types::GraphEdgeKind;
 use crate::graph::types::GraphNode;
-use crate::graph::types::GraphNodeKind;
+use crate::graph::types::GRAPH_NODE_KIND_FILE;
 use crate::graph::types::NodeMetrics;
 #[cfg(test)]
 use crate::graph::types::ProjectSignal;
@@ -485,7 +485,7 @@ impl ProjectGraphState {
             let mut non_file_oldest = self
                 .nodes
                 .iter()
-                .filter(|(_, node)| node.kind != GraphNodeKind::File)
+                .filter(|(_, node)| node.kind != GRAPH_NODE_KIND_FILE)
                 .map(|(symbol_id, node)| (node.last_seen_unix_ms, symbol_id.clone()))
                 .collect::<Vec<_>>();
             non_file_oldest.sort();
@@ -736,7 +736,7 @@ mod tests {
     use crate::graph::types::GraphEdge;
     use crate::graph::types::GraphEdgeKind;
     use crate::graph::types::GraphNode;
-    use crate::graph::types::GraphNodeKind;
+    use crate::graph::types::GRAPH_NODE_KIND_FILE;
     use crate::graph::types::NodeMetrics;
     use crate::graph::state::ProjectGraphState;
     use crate::graph::symbol_id::SymbolId;
@@ -750,7 +750,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             id_a.clone(),
             "a",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/a.cpp",
             1,
             1,
@@ -758,7 +758,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             id_b.clone(),
             "b",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/b.cpp",
             1,
             1,
@@ -785,7 +785,7 @@ mod tests {
         let mut file_node = GraphNode::new(
             file_id.clone(),
             "src/demo.cpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             "src/demo.cpp",
             0,
             0,
@@ -796,7 +796,7 @@ mod tests {
         let mut fresh_node = GraphNode::new(
             fresh.clone(),
             "Fresh",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/demo.cpp",
             10,
             1,
@@ -807,7 +807,7 @@ mod tests {
         let mut stale_node = GraphNode::new(
             stale.clone(),
             "Stale",
-            GraphNodeKind::Function,
+            clang_sys::CXCursor_FunctionDecl,
             "src/demo.cpp",
             20,
             1,
@@ -860,7 +860,7 @@ mod tests {
         let mut file_node = GraphNode::new(
             file_id.clone(),
             "src/demo.cpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             "src/demo.cpp",
             0,
             0,
@@ -873,7 +873,7 @@ mod tests {
             let mut node = GraphNode::new(
                 symbol.clone(),
                 format!("Sym{index}"),
-                GraphNodeKind::Function,
+                clang_sys::CXCursor_FunctionDecl,
                 "src/demo.cpp",
                 10 + index,
                 1,
