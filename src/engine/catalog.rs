@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
+use crate::engine::convergence::ConvergenceRiskTier;
 use crate::engine::edit_candidate::CandidateRiskTier;
 use crate::policy::zone::PolicyZone;
 use crate::policy::id::PolicyId;
@@ -33,20 +34,13 @@ impl PolicyCapabilities {
 
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CatalogConvergenceRiskTier {
-    Stabilizer,
-    Balanced,
-    Rewrite,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyConvergenceDefaults {
     pub domain: String,
     pub priority: u16,
     pub impact_radius: usize,
     pub priority_weight_bp: u16,
-    pub risk_tier: CatalogConvergenceRiskTier,
+    pub risk_tier: ConvergenceRiskTier,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,7 +58,7 @@ struct PolicyConvergenceTemplate {
     priority: u16,
     impact_radius: usize,
     priority_weight_bp: u16,
-    risk_tier: CatalogConvergenceRiskTier,
+    risk_tier: ConvergenceRiskTier,
 }
 
 impl Default for PolicyConvergenceTemplate {
@@ -73,7 +67,7 @@ impl Default for PolicyConvergenceTemplate {
             priority: 700,
             impact_radius: 0,
             priority_weight_bp: 240,
-            risk_tier: CatalogConvergenceRiskTier::Balanced,
+            risk_tier: ConvergenceRiskTier::Balanced,
         }
     }
 }
@@ -317,12 +311,12 @@ impl PolicyCatalog {
             | PolicyId::SectionTitleNormalizer
             | PolicyId::PragmaOnceSpacing
             | PolicyId::NamespaceEndComments
-            | PolicyId::DashCommentNormalizer => CatalogConvergenceRiskTier::Stabilizer,
+            | PolicyId::DashCommentNormalizer => ConvergenceRiskTier::Stabilizer,
             PolicyId::NamingConventions
             | PolicyId::SnakeCase
             | PolicyId::FunctionVoidParams
-            | PolicyId::LogicalKeywordOperators => CatalogConvergenceRiskTier::Rewrite,
-            _ => CatalogConvergenceRiskTier::Balanced,
+            | PolicyId::LogicalKeywordOperators => ConvergenceRiskTier::Rewrite,
+            _ => ConvergenceRiskTier::Balanced,
         };
 
         let convergence = PolicyConvergenceTemplate {
@@ -407,7 +401,7 @@ impl PolicyCapabilityMatrix {
 #[cfg(test)]
 mod tests {
     use crate::engine::catalog::{
-        policy_catalog, CatalogConvergenceRiskTier, PolicyCatalog,
+        policy_catalog, ConvergenceRiskTier, PolicyCatalog,
     };
     use crate::engine::edit_candidate::CandidateRiskTier;
     use crate::policy::id::PolicyId;
@@ -498,15 +492,15 @@ mod tests {
         let clang = catalog.convergence("clang_format");
         assert_eq!(clang.priority, 1_000);
         assert_eq!(clang.impact_radius, 2);
-        assert_eq!(clang.risk_tier, CatalogConvergenceRiskTier::Stabilizer);
+        assert_eq!(clang.risk_tier, ConvergenceRiskTier::Stabilizer);
 
         let naming = catalog.convergence("naming_conventions");
         assert_eq!(naming.priority_weight_bp, 420);
-        assert_eq!(naming.risk_tier, CatalogConvergenceRiskTier::Rewrite);
+        assert_eq!(naming.risk_tier, ConvergenceRiskTier::Rewrite);
 
         let unknown = catalog.convergence("custom_policy");
         assert_eq!(unknown.priority, 700);
-        assert_eq!(unknown.risk_tier, CatalogConvergenceRiskTier::Balanced);
+        assert_eq!(unknown.risk_tier, ConvergenceRiskTier::Balanced);
     }
 
 }

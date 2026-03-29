@@ -228,15 +228,9 @@ impl ConvergenceController {
     }
 
     pub fn default_risk_tier_for(policy_name: &str) -> ConvergenceRiskTier {
-        use crate::engine::catalog::CatalogConvergenceRiskTier;
-        match policy_catalog()
+        policy_catalog()
             .convergence(policy_name)
             .risk_tier
-        {
-            CatalogConvergenceRiskTier::Stabilizer => ConvergenceRiskTier::Stabilizer,
-            CatalogConvergenceRiskTier::Balanced => ConvergenceRiskTier::Balanced,
-            CatalogConvergenceRiskTier::Rewrite => ConvergenceRiskTier::Rewrite,
-        }
     }
 
     pub fn default_impact_radius_for(policy_name: &str) -> usize {
@@ -270,17 +264,7 @@ impl ConvergenceController {
                     defaults.priority,
                     defaults.impact_radius,
                     defaults.priority_weight_bp,
-                    match defaults.risk_tier {
-                        crate::engine::catalog::CatalogConvergenceRiskTier::Stabilizer => {
-                            ConvergenceRiskTier::Stabilizer
-                        }
-                        crate::engine::catalog::CatalogConvergenceRiskTier::Balanced => {
-                            ConvergenceRiskTier::Balanced
-                        }
-                        crate::engine::catalog::CatalogConvergenceRiskTier::Rewrite => {
-                            ConvergenceRiskTier::Rewrite
-                        }
-                    },
+                    defaults.risk_tier,
                 )
             })
     }
