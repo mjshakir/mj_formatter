@@ -464,10 +464,7 @@ impl PolicyContextTracker {
 
             let mod_v = interp_modifier_x86(ema_v);
 
-            let mask = _mm_or_si128(
-                _mm_cmpgt_epi32(cnt_v, _mm_sub_epi32(min_obs, _mm_set1_epi32(1))),
-                _mm_cmpeq_epi32(cnt_v, min_obs),
-            );
+            let mask = _mm_cmpgt_epi32(cnt_v, _mm_sub_epi32(min_obs, _mm_set1_epi32(1)));
             let mask_ps = _mm_castsi128_ps(mask);
             let masked = _mm_or_ps(_mm_and_ps(mask_ps, mod_v), _mm_andnot_ps(mask_ps, one));
 
