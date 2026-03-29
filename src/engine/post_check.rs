@@ -351,8 +351,6 @@ impl PostEditChecker {
 
     fn semantic_transition_tolerances_for_context(
         context_kind: SemanticCompdbContextKind,
-        _exact_compdb: bool,
-        edited_lines: Option<&BTreeSet<usize>>,
     ) -> (usize, usize) {
         let base_reference_drop_tolerance: usize = match context_kind {
             SemanticCompdbContextKind::Exact => 2,
@@ -376,7 +374,6 @@ impl PostEditChecker {
             SemanticCompdbContextKind::SourceConsensus => 2,
             SemanticCompdbContextKind::None => 0,
         };
-        let _ = edited_lines;
         (
             base_reference_drop_tolerance.saturating_add(context_extra_ref),
             base_scope_drift_tolerance.saturating_add(context_extra_scope),
@@ -777,22 +774,17 @@ mod tests {
 
     #[test]
     fn tolerances_fidelity_order() {
-        let lines = BTreeSet::from([1usize, 2, 3, 4, 5, 6, 7, 8]);
         let exact = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::Exact,
-            false, Some(&lines),
         );
         let paired = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::PairedSourceHeuristic,
-            false, Some(&lines),
         );
         let source = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::SourceConsensus,
-            false, Some(&lines),
         );
         let header = PostEditChecker::semantic_transition_tolerances_for_context(
             crate::parser::manager::SemanticCompdbContextKind::HeaderConsensus,
-            false, Some(&lines),
         );
 
         assert!(paired.0 > exact.0 && paired.1 > exact.1,

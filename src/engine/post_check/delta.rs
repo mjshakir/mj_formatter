@@ -205,15 +205,12 @@ pub(super) fn validate(
                 after_readiness.summary()
             ));
         } else if let Some(before_semantic) = baseline.before_semantic_snapshot.as_ref() {
-            let exact_compdb = checker.parser_manager.has_exact_compdb(path);
             let context_kind = checker
                 .parser_manager
                 .semantic_compdb_kind(path);
             let (reference_drop_tolerance, scope_drift_tolerance) =
                 PostEditChecker::semantic_transition_tolerances_for_context(
                     context_kind,
-                    exact_compdb,
-                    edited_lines,
                 );
             let identity_shift_tol = adaptive.identity_shift_tolerance();
             let transition = checker.semantic_contract.evaluate_transition(
