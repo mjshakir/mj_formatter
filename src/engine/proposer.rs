@@ -42,6 +42,9 @@ impl ProposerController {
         adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
     ) -> Vec<PolicyEditCandidate> {
         let mut candidates = Vec::<PolicyEditCandidate>::with_capacity(result.edits.len());
+        let trust_deficit_penalty = adaptive.trust_deficit_penalty();
+        let confidence_penalty = adaptive.confidence_penalty();
+        let richness_radius = adaptive.richness_multiplier().round().clamp(1.0, 3.0) as usize;
         for edit in &result.edits {
             if edit.line == 0 || edit.before == edit.after {
                 continue;
@@ -57,7 +60,6 @@ impl ProposerController {
             if !project_query.is_available() {
                 hard_constraints_touched |= SemanticInvariantClause::ParserAvailability.bit();
             }
-            let trust_deficit_penalty = adaptive.trust_deficit_penalty();
             let mut symbol_footprint: SmallVec<[u64; 8]> = convergence_signal
                 .symbol_ids
                 .get(&edit.line)
@@ -87,20 +89,9 @@ impl ProposerController {
                 .get(&edit.line)
                 .cloned()
                 .unwrap_or_else(|| smallvec::smallvec![(edit.line, edit.line)]);
-            let confidence_penalty = adaptive.confidence_penalty();
             let resolved_confidence =
                 (confidence - confidence_penalty - trust_deficit_penalty).clamp(0.0, 1.0);
-            let mut impact_radius = convergence_signal.impact_radius.max(1);
-            let project_signal = project_query
-                .symbol_at(edit.line, 1, &[])
-                .and_then(|symbol| {
-                    project_query.signal(symbol.stable_id.as_str())
-                })
-                .or_else(|| project_query.signal((edit.line, 1)));
-            let richness_multiplier = adaptive.richness_multiplier();
-            let richness_radius = richness_multiplier.round().clamp(1.0, 3.0) as usize;
-            impact_radius = impact_radius.max(richness_radius);
-            let _ = project_signal;
+            let impact_radius = convergence_signal.impact_radius.max(1).max(richness_radius);
             candidates.push(PolicyEditCandidate {
                 policy: Arc::from(policy_name),
                 line: edit.line,
