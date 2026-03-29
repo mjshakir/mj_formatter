@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use crate::config::types::RetryConfig;
 use crate::engine::accuracy_gate::{
     AccuracyGate, AccuracyGateFailure, AccuracyGateInput, AccuracyGateStatus,
 };
-use crate::engine::catalog::PolicyCapabilityMatrix;
+use crate::engine::catalog::{PolicyCapabilities, PolicyCapabilityMatrix};
 use crate::engine::pipeline::PolicyPipeline;
 use crate::engine::run_options::PolicyRunOptions;
 use crate::engine::post_check::CheckBaseline;
@@ -144,7 +144,6 @@ impl FormatterEngine {
             .project_graph
             .as_ref()
             .map(|runtime| runtime.snapshot());
-        // Pass 1: full pipeline run
         let obs_only = self.observation_only.load(Ordering::Relaxed);
         let options_1 = PolicyRunOptions {
             project_graph_snapshot: project_graph_snapshot.clone(),
@@ -154,107 +153,44 @@ impl FormatterEngine {
         let mut pass_result = self.pipeline.run_with_options(text, path, &options_1)?;
         Self::normalize_untracked_text_delta(text, &mut pass_result);
 
-        // Quick accept: no edits were produced
+        let gate_eval = |edits: &[Edit], violations: &[Violation]| AccuracyGateEvaluation {
+            semantic_ready,
+            attempted_edits: edits.len(),
+            attempted_violations: violations.len(),
+            accepted_edits: edits.len(),
+            semantic_context_kind,
+        };
+
         if crate::parser::text_scan::TEXT_SCAN.strings_equal(&pass_result.policy_result.text, text) {
             pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
                 pass_result.policy_result.warnings.as_slice(),
             ]);
-            let attempted_edits = pass_result.policy_result.edits.len();
-            let attempted_violations = pass_result.policy_result.violations.len();
-            self.apply_gate(
-                &mut pass_result,
-                path,
-                AccuracyGateEvaluation {
-                    semantic_ready,
-                    attempted_edits,
-                    attempted_violations,
-                    accepted_edits: attempted_edits,
-                    semantic_context_kind,
-                },
-            )?;
-            PolicyClusterTelemetry::record_outcome(
-                pass_result.policy_traces.as_slice(),
-                ClusterOutcome::Accepted,
-            );
+            let ev = gate_eval(&pass_result.policy_result.edits, &pass_result.policy_result.violations);
+            self.apply_gate(&mut pass_result, path, ev)?;
+            PolicyClusterTelemetry::record_outcome(pass_result.policy_traces.as_slice(), ClusterOutcome::Accepted);
             self.record_success(0);
             self.observe_adaptive(post_edit_baseline.as_ref(), 1.0);
             return Ok(pass_result);
         }
 
-        // If post-edit checking is disabled, accept the edits as-is
         if !self.retry.post_edit_check_enabled {
             pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
                 pass_result.policy_result.warnings.as_slice(),
             ]);
-            let attempted_edits = pass_result.policy_result.edits.len();
-            let attempted_violations = pass_result.policy_result.violations.len();
-            self.apply_gate(
-                &mut pass_result,
-                path,
-                AccuracyGateEvaluation {
-                    semantic_ready,
-                    attempted_edits,
-                    attempted_violations,
-                    accepted_edits: attempted_edits,
-                    semantic_context_kind,
-                },
-            )?;
-            PolicyClusterTelemetry::record_outcome(
-                pass_result.policy_traces.as_slice(),
-                ClusterOutcome::Accepted,
-            );
+            let ev = gate_eval(&pass_result.policy_result.edits, &pass_result.policy_result.violations);
+            self.apply_gate(&mut pass_result, path, ev)?;
+            PolicyClusterTelemetry::record_outcome(pass_result.policy_traces.as_slice(), ClusterOutcome::Accepted);
             self.record_success(0);
             self.observe_adaptive(post_edit_baseline.as_ref(), 1.0);
             return Ok(pass_result);
         }
 
-        // Validate Pass 1 result with PostEditChecker
-        let edited_lines_1 = pass_result
-            .policy_result
-            .edits
-            .iter()
-            .map(|edit| edit.line)
-            .collect::<BTreeSet<_>>();
-        let all_structural_safe = !pass_result.policy_result.edits.is_empty()
-            && pass_result.policy_result.edits.iter().all(|edit| {
-                let cap = PolicyCapabilityMatrix::for_policy(edit.policy.as_str());
-                cap.structural_safe && !cap.semantic_rewrite
-            });
-        let check_1 = if all_structural_safe {
-            if let Some(baseline) = post_edit_baseline.as_ref() {
-                self.post_edit_checker.validate_structural_only(
-                    path,
-                    pass_result.policy_result.text.as_str(),
-                    baseline,
-                )
-            } else {
-                self.post_edit_checker.validate_for_edits(
-                    path,
-                    text,
-                    pass_result.policy_result.text.as_str(),
-                    Some(&edited_lines_1),
-                    &adaptive_snap,
-                )
-            }
-        } else if let Some(baseline) = post_edit_baseline.as_ref() {
-            self.post_edit_checker.validate_with_baseline_for_edits(
-                path,
-                pass_result.policy_result.text.as_str(),
-                baseline,
-                Some(&edited_lines_1),
-                &adaptive_snap,
-            )
-        } else {
-            self.post_edit_checker.validate_for_edits(
-                path,
-                text,
-                pass_result.policy_result.text.as_str(),
-                Some(&edited_lines_1),
-                &adaptive_snap,
-            )
-        };
+        let mut cap_cache: FxHashMap<&str, PolicyCapabilities> = FxHashMap::default();
+        let edited_lines_1 = pass_result.policy_result.edits.iter().map(|e| e.line).collect::<BTreeSet<_>>();
+        let all_structural_safe = Self::all_structural_safe(&pass_result.policy_result.edits, &mut cap_cache);
+        let check_1 = self.validate_pass(path, text, &pass_result, post_edit_baseline.as_ref(), all_structural_safe, &adaptive_snap, &edited_lines_1);
 
         let scope_ranges = post_edit_baseline
             .as_ref()
@@ -262,46 +198,88 @@ impl FormatterEngine {
             .map(|s| &s.scopes.ranges_by_kind);
 
         if let Some((_acceptance_score_1, _)) = self.accept_pass_result(
-            &pass_result,
-            &edited_lines_1,
-            &check_1,
-            &mut warnings,
-            scope_ranges,
-            semantic_context_kind,
+            &pass_result, &edited_lines_1, &check_1, &mut warnings, scope_ranges, semantic_context_kind,
         ) {
             pass_result.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
                 pass_result.policy_result.warnings.as_slice(),
             ]);
-            let attempted_edits = pass_result.policy_result.edits.len();
-            let attempted_violations = pass_result.policy_result.violations.len();
-            self.apply_gate(
-                &mut pass_result,
-                path,
-                AccuracyGateEvaluation {
-                    semantic_ready,
-                    attempted_edits,
-                    attempted_violations,
-                    accepted_edits: attempted_edits,
-                    semantic_context_kind,
-                },
-            )?;
-            let outcome = if check_1.accepted {
-                ClusterOutcome::Accepted
-            } else {
-                ClusterOutcome::Regressed
-            };
-            PolicyClusterTelemetry::record_outcome(
-                pass_result.policy_traces.as_slice(),
-                outcome,
-            );
+            let ev = gate_eval(&pass_result.policy_result.edits, &pass_result.policy_result.violations);
+            self.apply_gate(&mut pass_result, path, ev)?;
+            let outcome = if check_1.accepted { ClusterOutcome::Accepted } else { ClusterOutcome::Regressed };
+            PolicyClusterTelemetry::record_outcome(pass_result.policy_traces.as_slice(), outcome);
             self.record_success(0);
             let obs_score = if check_1.accepted { 1.0 } else { 0.50 };
             self.observe_adaptive(post_edit_baseline.as_ref(), obs_score);
             return Ok(pass_result);
         }
 
-        // Identify which policies caused culprit lines (direct match + declaration backtrack)
+        self.run_retry_pass(
+            text, path, &adaptive_snap,
+            pass_result, &check_1,
+            post_edit_baseline.as_ref(),
+            project_graph_snapshot,
+            scope_ranges, semantic_context_kind,
+            semantic_ready, warnings,
+        )
+    }
+
+    fn validate_pass(
+        &self,
+        path: &Path,
+        original_text: &str,
+        pass_result: &FormatPassResult,
+        baseline: Option<&CheckBaseline>,
+        all_structural_safe: bool,
+        adaptive_snap: &crate::engine::certainty_filter::CertaintyFilterState,
+        edited_lines: &BTreeSet<usize>,
+    ) -> PostEditCheckResult {
+        if all_structural_safe {
+            if let Some(bl) = baseline {
+                return self.post_edit_checker.validate_structural_only(
+                    path, pass_result.policy_result.text.as_str(), bl,
+                );
+            }
+        } else if let Some(bl) = baseline {
+            return self.post_edit_checker.validate_with_baseline_for_edits(
+                path, pass_result.policy_result.text.as_str(), bl,
+                Some(edited_lines), adaptive_snap,
+            );
+        }
+        self.post_edit_checker.validate_for_edits(
+            path, original_text, pass_result.policy_result.text.as_str(),
+            Some(edited_lines), adaptive_snap,
+        )
+    }
+
+    fn all_structural_safe<'a>(
+        edits: &'a [Edit],
+        cap_cache: &mut FxHashMap<&'a str, PolicyCapabilities>,
+    ) -> bool {
+        !edits.is_empty()
+            && edits.iter().all(|edit| {
+                let cap = *cap_cache
+                    .entry(edit.policy.as_str())
+                    .or_insert_with(|| PolicyCapabilityMatrix::for_policy(edit.policy.as_str()));
+                cap.structural_safe && !cap.semantic_rewrite
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_retry_pass(
+        &self,
+        text: &str,
+        path: &Path,
+        adaptive_snap: &crate::engine::certainty_filter::CertaintyFilterState,
+        pass_result: FormatPassResult,
+        check_1: &PostEditCheckResult,
+        post_edit_baseline: Option<&CheckBaseline>,
+        project_graph_snapshot: Option<Arc<crate::graph::snapshot::ProjectGraphSnapshot>>,
+        scope_ranges: Option<&FxHashMap<u16, BTreeSet<(usize, usize)>>>,
+        semantic_context_kind: SemanticCompdbContextKind,
+        semantic_ready: bool,
+        mut warnings: Vec<String>,
+    ) -> Result<FormatPassResult> {
         tracing::debug!(
             path = %path.display(),
             failure_kinds = ?check_1.failure_kinds,
@@ -312,17 +290,14 @@ impl FormatterEngine {
         );
         let culprit_policies = Self::causal_culprit_policies(
             &pass_result.policy_result.edits,
-            &check_1,
-            post_edit_baseline
-                .as_ref()
-                .and_then(|b| b.before_semantic_snapshot()),
+            check_1,
+            post_edit_baseline.and_then(|b| b.before_semantic_snapshot()),
         );
         if culprit_policies.is_empty() {
-            self.observe_adaptive(post_edit_baseline.as_ref(), 0.25);
+            self.observe_adaptive(post_edit_baseline, 0.25);
             return self.reverted_result(path, text, pass_result, warnings, 1);
         }
 
-        // Pass 2: block culprit policies and skip policies that produced zero edits in Pass 1
         let zero_edit_policies: FxHashSet<String> = pass_result.policy_traces.iter()
             .filter(|t| t.candidate_line_count == 0 && !culprit_policies.contains(t.policy.as_str()))
             .map(|t| t.policy.as_str().to_string())
@@ -336,58 +311,13 @@ impl FormatterEngine {
         let mut pass_2 = self.pipeline.run_with_options(text, path, &options_2)?;
         Self::normalize_untracked_text_delta(text, &mut pass_2);
 
-        let edited_lines_2 = pass_2
-            .policy_result
-            .edits
-            .iter()
-            .map(|edit| edit.line)
-            .collect::<BTreeSet<_>>();
-        let all_structural_safe_2 = !pass_2.policy_result.edits.is_empty()
-            && pass_2.policy_result.edits.iter().all(|edit| {
-                let cap = PolicyCapabilityMatrix::for_policy(edit.policy.as_str());
-                cap.structural_safe && !cap.semantic_rewrite
-            });
-        let check_2 = if all_structural_safe_2 {
-            if let Some(baseline) = post_edit_baseline.as_ref() {
-                self.post_edit_checker.validate_structural_only(
-                    path,
-                    pass_2.policy_result.text.as_str(),
-                    baseline,
-                )
-            } else {
-                self.post_edit_checker.validate_for_edits(
-                    path,
-                    text,
-                    pass_2.policy_result.text.as_str(),
-                    Some(&edited_lines_2),
-                    &adaptive_snap,
-                )
-            }
-        } else if let Some(baseline) = post_edit_baseline.as_ref() {
-            self.post_edit_checker.validate_with_baseline_for_edits(
-                path,
-                pass_2.policy_result.text.as_str(),
-                baseline,
-                Some(&edited_lines_2),
-                &adaptive_snap,
-            )
-        } else {
-            self.post_edit_checker.validate_for_edits(
-                path,
-                text,
-                pass_2.policy_result.text.as_str(),
-                Some(&edited_lines_2),
-                &adaptive_snap,
-            )
-        };
+        let mut cap_cache: FxHashMap<&str, PolicyCapabilities> = FxHashMap::default();
+        let edited_lines_2 = pass_2.policy_result.edits.iter().map(|e| e.line).collect::<BTreeSet<_>>();
+        let all_structural_safe_2 = Self::all_structural_safe(&pass_2.policy_result.edits, &mut cap_cache);
+        let check_2 = self.validate_pass(path, text, &pass_2, post_edit_baseline, all_structural_safe_2, adaptive_snap, &edited_lines_2);
 
         if let Some((_acceptance_score_2, _)) = self.accept_pass_result(
-            &pass_2,
-            &edited_lines_2,
-            &check_2,
-            &mut warnings,
-            scope_ranges,
-            semantic_context_kind,
+            &pass_2, &edited_lines_2, &check_2, &mut warnings, scope_ranges, semantic_context_kind,
         ) {
             pass_2.policy_result.warnings = Self::dedup_warning_slices(&[
                 warnings.as_slice(),
@@ -396,8 +326,7 @@ impl FormatterEngine {
             let attempted_edits = pass_2.policy_result.edits.len();
             let attempted_violations = pass_2.policy_result.violations.len();
             self.apply_gate(
-                &mut pass_2,
-                path,
+                &mut pass_2, path,
                 AccuracyGateEvaluation {
                     semantic_ready,
                     attempted_edits,
@@ -406,18 +335,14 @@ impl FormatterEngine {
                     semantic_context_kind,
                 },
             )?;
-            PolicyClusterTelemetry::record_outcome(
-                pass_2.policy_traces.as_slice(),
-                ClusterOutcome::Accepted,
-            );
+            PolicyClusterTelemetry::record_outcome(pass_2.policy_traces.as_slice(), ClusterOutcome::Accepted);
             self.record_success(1);
             let obs_score = if check_2.accepted { 0.85 } else { 0.40 };
-            self.observe_adaptive(post_edit_baseline.as_ref(), obs_score);
+            self.observe_adaptive(post_edit_baseline, obs_score);
             return Ok(pass_2);
         }
 
-        // Both passes failed → revert all edits
-        self.observe_adaptive(post_edit_baseline.as_ref(), 0.25);
+        self.observe_adaptive(post_edit_baseline, 0.25);
         self.reverted_result(path, text, pass_2, warnings, 2)
     }
 
@@ -429,7 +354,7 @@ impl FormatterEngine {
         _edited_lines: &BTreeSet<usize>,
         check: &PostEditCheckResult,
         warnings: &mut Vec<String>,
-        _scope_ranges: Option<&BTreeMap<String, BTreeSet<(usize, usize)>>>,
+        _scope_ranges: Option<&FxHashMap<u16, BTreeSet<(usize, usize)>>>,
         _context_kind: SemanticCompdbContextKind,
     ) -> Option<(f64, Option<()>)> {
         let has_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
@@ -604,17 +529,17 @@ impl FormatterEngine {
         check: &PostEditCheckResult,
         edited_lines: &BTreeSet<usize>,
         numeric_radius: usize,
-        scope_ranges: &BTreeMap<String, BTreeSet<(usize, usize)>>,
+        scope_ranges: &BTreeMap<u16, BTreeSet<(usize, usize)>>,
     ) -> (usize, usize) {
         if check.culprit_lines.is_empty() {
             return (0, 0);
         }
-        let edited_scopes: Vec<(&str, usize, usize)> = scope_ranges
+        let edited_scopes: Vec<(u16, usize, usize)> = scope_ranges
             .iter()
-            .flat_map(|(kind, ranges)| {
+            .flat_map(|(&kind, ranges)| {
                 ranges.iter().filter_map(move |&(start, end)| {
                     if edited_lines.iter().any(|&el| el >= start && el <= end) {
-                        Some((kind.as_str(), start, end))
+                        Some((kind, start, end))
                     } else {
                         None
                     }
@@ -966,9 +891,9 @@ mod tests {
             culprit_lines: BTreeSet::from([150]),
         };
         let edited_lines = BTreeSet::from([100]);
-        let mut scope_ranges: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+        let mut scope_ranges: BTreeMap<u16, BTreeSet<(usize, usize)>> = BTreeMap::new();
         scope_ranges.insert(
-            "function".to_string(),
+            crate::parser::ts_cpp_symbols::sym_function_definition,
             BTreeSet::from([(80, 200)]),
         );
         let (local, total) = FormatterEngine::scope_aware_culprit_locality(
@@ -995,9 +920,9 @@ mod tests {
             culprit_lines: BTreeSet::from([50]),
         };
         let edited_lines = BTreeSet::from([100]);
-        let mut scope_ranges: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+        let mut scope_ranges: BTreeMap<u16, BTreeSet<(usize, usize)>> = BTreeMap::new();
         scope_ranges.insert(
-            "function".to_string(),
+            crate::parser::ts_cpp_symbols::sym_function_definition,
             BTreeSet::from([(10, 60), (80, 120)]),
         );
         let (local, total) = FormatterEngine::scope_aware_culprit_locality(
@@ -1024,7 +949,7 @@ mod tests {
             culprit_lines: BTreeSet::from([102]),
         };
         let edited_lines = BTreeSet::from([100]);
-        let scope_ranges: BTreeMap<String, BTreeSet<(usize, usize)>> = BTreeMap::new();
+        let scope_ranges: BTreeMap<u16, BTreeSet<(usize, usize)>> = BTreeMap::new();
         let (local, total) = FormatterEngine::scope_aware_culprit_locality(
             &check,
             &edited_lines,
