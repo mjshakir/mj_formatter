@@ -1,7 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::parser::file_context::{
-    SemanticFileContext, SemanticIdProvenance, SemanticScopeKind,
+    SemanticFileContext, SemanticIdProvenance,
+    is_function_scope, is_namespace_scope, is_preprocessor_scope, is_type_scope,
 };
 
 use super::{
@@ -9,35 +12,37 @@ use super::{
 };
 
 pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
-    let mut usr_ref_counts = BTreeMap::<String, usize>::new();
-    let mut usr_decl_lines = BTreeMap::<String, usize>::new();
-    let mut decl_ids_by_line = BTreeMap::<usize, BTreeSet<String>>::new();
-    let mut kind_by_decl_id = BTreeMap::new();
-    let mut decl_ids = BTreeSet::<String>::new();
-    let mut id_decl_lines = BTreeMap::<String, usize>::new();
-    let mut ref_id_counts = BTreeMap::<String, usize>::new();
-    let mut ref_first_line = BTreeMap::<String, usize>::new();
+    let mut usr_ref_counts = FxHashMap::<String, usize>::default();
+    let mut usr_decl_lines = FxHashMap::<String, usize>::default();
+    let mut decl_ids_by_line = FxHashMap::<usize, BTreeSet<String>>::default();
+    let mut kind_by_decl_id = FxHashMap::default();
+    let mut decl_ids = FxHashSet::<String>::default();
+    let mut id_decl_lines = FxHashMap::<String, usize>::default();
+    let mut ref_id_counts = FxHashMap::<String, usize>::default();
+    let mut ref_first_line = FxHashMap::<String, usize>::default();
     let mut counts = SemanticScopeCounts::default();
-    let mut ranges_by_kind = BTreeMap::<String, BTreeSet<(usize, usize)>>::new();
+    let mut ranges_by_kind = FxHashMap::<u16, BTreeSet<(usize, usize)>>::default();
     let mut identity_count = 0usize;
-    let mut identity_lines = BTreeSet::<usize>::new();
+    let mut identity_lines = FxHashSet::<usize>::default();
     let mut mismatch_count = 0usize;
-    let mut mismatch_lines = BTreeSet::<usize>::new();
+    let mut mismatch_lines = FxHashSet::<usize>::default();
     let mut preprocessor_ranges = Vec::<(usize, usize)>::new();
 
     for declaration in &context.declarations {
         if declaration.kind == clang_sys::CXCursor_FunctionTemplate {
             continue;
         }
-        decl_ids.insert(declaration.stable_id.clone());
+        let id = declaration.stable_id.clone();
+        let line = declaration.line.max(1);
+        decl_ids.insert(id.clone());
         decl_ids_by_line
-            .entry(declaration.line.max(1))
+            .entry(line)
             .or_default()
-            .insert(declaration.stable_id.clone());
-        kind_by_decl_id.insert(declaration.stable_id.clone(), declaration.kind);
-        id_decl_lines.insert(declaration.stable_id.clone(), declaration.line.max(1));
+            .insert(id.clone());
+        kind_by_decl_id.insert(id.clone(), declaration.kind);
+        id_decl_lines.insert(id.clone(), line);
 
-        let stable_id_looks_usr = declaration.stable_id.starts_with("usr:");
+        let stable_id_looks_usr = id.starts_with("usr:");
         let is_usr_backed = declaration.provenance == SemanticIdProvenance::Usr
             || stable_id_looks_usr
             || declaration
@@ -47,26 +52,27 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
                 .is_some_and(|value| !value.is_empty());
         if is_usr_backed {
             usr_ref_counts
-                .entry(declaration.stable_id.clone())
+                .entry(id.clone())
                 .or_insert(0);
-            usr_decl_lines.insert(declaration.stable_id.clone(), declaration.line.max(1));
+            usr_decl_lines.insert(id, line);
         }
 
         if (declaration.provenance == SemanticIdProvenance::Usr && !stable_id_looks_usr)
             || (declaration.provenance != SemanticIdProvenance::Usr && stable_id_looks_usr)
         {
             identity_count = identity_count.saturating_add(1);
-            identity_lines.insert(declaration.line.max(1));
+            identity_lines.insert(line);
         }
     }
 
     for reference in &context.references {
+        let ref_id = reference.stable_id.clone();
         ref_id_counts
-            .entry(reference.stable_id.clone())
+            .entry(ref_id.clone())
             .and_modify(|count| *count = count.saturating_add(1))
             .or_insert(1);
         ref_first_line
-            .entry(reference.stable_id.clone())
+            .entry(ref_id)
             .or_insert(reference.line.max(1));
 
         if let Some(count) = usr_ref_counts.get_mut(reference.stable_id.as_str()) {
@@ -86,49 +92,20 @@ pub(super) fn build(context: &SemanticFileContext) -> SemanticContractSnapshot {
             scope.start_line.max(1),
             scope.end_line.max(scope.start_line).max(1),
         );
-        match scope.kind {
-            SemanticScopeKind::Namespace => {
-                counts.namespace = counts.namespace.saturating_add(1);
-                ranges_by_kind
-                    .entry("namespace".to_string())
-                    .or_default()
-                    .insert(range);
-            }
-            SemanticScopeKind::Type => {
-                counts.type_scope = counts.type_scope.saturating_add(1);
-                ranges_by_kind
-                    .entry("type".to_string())
-                    .or_default()
-                    .insert(range);
-            }
-            SemanticScopeKind::Function => {
-                counts.function = counts.function.saturating_add(1);
-                ranges_by_kind
-                    .entry("function".to_string())
-                    .or_default()
-                    .insert(range);
-            }
-            SemanticScopeKind::Preprocessor => {
-                counts.preprocessor = counts.preprocessor.saturating_add(1);
-                ranges_by_kind
-                    .entry("preprocessor".to_string())
-                    .or_default()
-                    .insert(range);
-                preprocessor_ranges.push(range);
-            }
-            SemanticScopeKind::Template => {
-                ranges_by_kind
-                    .entry("template".to_string())
-                    .or_default()
-                    .insert(range);
-            }
-            SemanticScopeKind::Attribute => {
-                ranges_by_kind
-                    .entry("attribute".to_string())
-                    .or_default()
-                    .insert(range);
-            }
+        if is_namespace_scope(scope.node_kind_id) {
+            counts.namespace = counts.namespace.saturating_add(1);
+        } else if is_type_scope(scope.node_kind_id) {
+            counts.type_scope = counts.type_scope.saturating_add(1);
+        } else if is_function_scope(scope.node_kind_id) {
+            counts.function = counts.function.saturating_add(1);
+        } else if is_preprocessor_scope(scope.node_kind_id) {
+            counts.preprocessor = counts.preprocessor.saturating_add(1);
+            preprocessor_ranges.push(range);
         }
+        ranges_by_kind
+            .entry(scope.node_kind_id)
+            .or_default()
+            .insert(range);
     }
 
     preprocessor_ranges.sort_unstable();

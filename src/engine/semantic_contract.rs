@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::policy_config::PolicyConfig;
@@ -201,29 +202,29 @@ pub struct SemanticContractSnapshot {
 
 #[derive(Clone, Debug, Default)]
 pub struct SymbolIdentity {
-    pub usr_ref_counts: BTreeMap<String, usize>,
-    pub usr_decl_lines: BTreeMap<String, usize>,
-    pub decl_ids_by_line: BTreeMap<usize, BTreeSet<String>>,
-    pub kind_by_decl_id: BTreeMap<String, i32>,
-    pub decl_ids: BTreeSet<String>,
-    pub id_decl_lines: BTreeMap<String, usize>,
-    pub ref_id_counts: BTreeMap<String, usize>,
-    pub ref_first_line: BTreeMap<String, usize>,
+    pub usr_ref_counts: FxHashMap<String, usize>,
+    pub usr_decl_lines: FxHashMap<String, usize>,
+    pub decl_ids_by_line: FxHashMap<usize, BTreeSet<String>>,
+    pub kind_by_decl_id: FxHashMap<String, i32>,
+    pub decl_ids: FxHashSet<String>,
+    pub id_decl_lines: FxHashMap<String, usize>,
+    pub ref_id_counts: FxHashMap<String, usize>,
+    pub ref_first_line: FxHashMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ScopeStructure {
     pub counts: SemanticScopeCounts,
-    pub ranges_by_kind: BTreeMap<String, BTreeSet<(usize, usize)>>,
+    pub ranges_by_kind: FxHashMap<u16, BTreeSet<(usize, usize)>>,
     pub preprocessor_ranges: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SemanticIssues {
     pub identity_count: usize,
-    pub identity_lines: BTreeSet<usize>,
+    pub identity_lines: FxHashSet<usize>,
     pub mismatch_count: usize,
-    pub mismatch_lines: BTreeSet<usize>,
+    pub mismatch_lines: FxHashSet<usize>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -427,7 +428,7 @@ mod tests {
     use crate::config::policy_config::PolicyConfig;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
-        SemanticScope, SemanticScopeKind,
+        SemanticScope,
     };
 
     use crate::engine::certainty_filter::CertaintyFilterState;
@@ -552,7 +553,6 @@ mod tests {
                 column: 1,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 20,
@@ -578,7 +578,6 @@ mod tests {
         let before = SemanticFileContext::default();
         let after = SemanticFileContext {
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Preprocessor,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 12,
@@ -662,7 +661,6 @@ mod tests {
         let contract = SemanticContract::new();
         let before = SemanticFileContext {
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 40,
@@ -673,7 +671,6 @@ mod tests {
         };
         let after = SemanticFileContext {
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 100,
                 end_offset: 200,
@@ -728,7 +725,6 @@ mod tests {
                 column: 1,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
@@ -761,7 +757,6 @@ mod tests {
                 column: 1,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
@@ -813,7 +808,6 @@ mod tests {
                 column: 1,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,
@@ -846,7 +840,6 @@ mod tests {
                 column: 1,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 100,

@@ -23,13 +23,36 @@ struct BlockCandidate {
 }
 
 pub struct NsCommentsPolicy {
-    blocks_filter: FxHashSet<String>,
-    control_block_kinds: FxHashSet<String>,
+    blocks_filter: FxHashSet<u16>,
+    control_block_kinds: FxHashSet<u16>,
     max_named_lines: usize,
     max_label_length: usize,
 }
 
 impl NsCommentsPolicy {
+    fn config_name_to_kind_id(name: &str) -> Option<u16> {
+        match name {
+            "namespace" => Some(ts_cpp_symbols::sym_namespace_definition),
+            "class" => Some(ts_cpp_symbols::sym_class_specifier),
+            "struct" => Some(ts_cpp_symbols::sym_struct_specifier),
+            "function" => Some(ts_cpp_symbols::sym_function_definition),
+            "if" => Some(ts_cpp_symbols::sym_if_statement),
+            "for" => Some(ts_cpp_symbols::sym_for_statement),
+            "while" => Some(ts_cpp_symbols::sym_while_statement),
+            "switch" => Some(ts_cpp_symbols::sym_switch_statement),
+            "catch" => Some(ts_cpp_symbols::sym_catch_clause),
+            _ => None,
+        }
+    }
+
+    const CONTROL_FLOW_KINDS: &[u16] = &[
+        ts_cpp_symbols::sym_if_statement,
+        ts_cpp_symbols::sym_for_statement,
+        ts_cpp_symbols::sym_while_statement,
+        ts_cpp_symbols::sym_switch_statement,
+        ts_cpp_symbols::sym_catch_clause,
+    ];
+
     pub fn new(
         blocks: Vec<String>,
         control_block_kinds: Vec<String>,
@@ -41,13 +64,11 @@ impl NsCommentsPolicy {
         Self {
             blocks_filter: blocks
                 .into_iter()
-                .map(|item| item.trim().to_lowercase())
-                .filter(|item| !item.is_empty())
+                .filter_map(|item| Self::config_name_to_kind_id(item.trim().to_lowercase().as_str()))
                 .collect(),
             control_block_kinds: control_block_kinds
                 .into_iter()
-                .map(|item| item.trim().to_lowercase())
-                .filter(|item| !item.is_empty())
+                .filter_map(|item| Self::config_name_to_kind_id(item.trim().to_lowercase().as_str()))
                 .collect(),
             max_named_lines: max_named_lines.max(1),
             max_label_length: max_label_length.max(8),
@@ -171,18 +192,16 @@ impl NsCommentsPolicy {
         named
     }
 
-    fn include_block_kind(&self, canonical_kind: &str) -> bool {
+    fn include_block_kind(&self, kind_id: u16) -> bool {
         if self.blocks_filter.is_empty() {
-            // Keep default behavior scoped to namespace blocks only.
-            // Additional block kinds can be enabled explicitly via config.
-            return canonical_kind == "namespace";
+            return kind_id == ts_cpp_symbols::sym_namespace_definition;
         }
-        if !self.blocks_filter.contains(canonical_kind) {
+        if !self.blocks_filter.contains(&kind_id) {
             return false;
         }
-        if matches!(canonical_kind, "if" | "for" | "while" | "switch" | "catch")
+        if Self::CONTROL_FLOW_KINDS.contains(&kind_id)
             && !self.control_block_kinds.is_empty()
-            && !self.control_block_kinds.contains(canonical_kind)
+            && !self.control_block_kinds.contains(&kind_id)
         {
             return false;
         }
@@ -211,7 +230,7 @@ impl NsCommentsPolicy {
 
         let process_node = |node: Node<'_>, blocks: &mut Vec<BlockCandidate>| {
             if let Some(canonical_kind) = Self::canonical_kind(node.kind_id()) {
-                if self.include_block_kind(canonical_kind) {
+                if self.include_block_kind(node.kind_id()) {
                     if let Some(body) = Self::body_node(node) {
                         let open_line = node.start_position().row + 1;
                         let close_line = body.end_position().row + 1;

@@ -336,9 +336,25 @@ fn scope_range_drift(
     let mut local = 0usize;
     let mut remote = 0usize;
     let mut culprit_lines = BTreeSet::<usize>::new();
-    for kind in ["namespace", "type", "function", "preprocessor"] {
-        let before_ranges = before.scopes.ranges_by_kind.get(kind).unwrap_or(&empty);
-        let after_ranges = after.scopes.ranges_by_kind.get(kind).unwrap_or(&empty);
+    use crate::parser::ts_cpp_symbols;
+    for kind in [
+        ts_cpp_symbols::sym_namespace_definition,
+        ts_cpp_symbols::sym_class_specifier,
+        ts_cpp_symbols::sym_struct_specifier,
+        ts_cpp_symbols::sym_union_specifier,
+        ts_cpp_symbols::sym_enum_specifier,
+        ts_cpp_symbols::sym_function_definition,
+        ts_cpp_symbols::sym_function_declarator,
+        ts_cpp_symbols::sym_lambda_expression,
+        ts_cpp_symbols::sym_preproc_if,
+        ts_cpp_symbols::sym_preproc_ifdef,
+        ts_cpp_symbols::sym_preproc_elif,
+        ts_cpp_symbols::sym_preproc_else,
+        ts_cpp_symbols::sym_preproc_def,
+        ts_cpp_symbols::sym_preproc_function_def,
+    ] {
+        let before_ranges = before.scopes.ranges_by_kind.get(&kind).unwrap_or(&empty);
+        let after_ranges = after.scopes.ranges_by_kind.get(&kind).unwrap_or(&empty);
 
         for range in before_ranges.difference(after_ranges) {
             classify_range(*range, edited_lines, radius, &mut local, &mut remote);
