@@ -74,34 +74,6 @@ pub fn is_preprocessing_kind(kind: i32) -> bool {
     unsafe { clang_sys::clang_isPreprocessing(kind) != 0 }
 }
 
-pub fn graph_node_kind(kind: i32) -> crate::graph::types::GraphNodeKind {
-    use crate::graph::types::GraphNodeKind;
-    match kind {
-        clang_sys::CXCursor_FunctionDecl
-        | clang_sys::CXCursor_FunctionTemplate
-        | clang_sys::CXCursor_Constructor
-        | clang_sys::CXCursor_Destructor
-        | clang_sys::CXCursor_ConversionFunction => GraphNodeKind::Function,
-        clang_sys::CXCursor_CXXMethod => GraphNodeKind::Method,
-        clang_sys::CXCursor_FieldDecl => GraphNodeKind::Field,
-        clang_sys::CXCursor_ParmDecl => GraphNodeKind::Parameter,
-        clang_sys::CXCursor_StructDecl
-        | clang_sys::CXCursor_ClassDecl
-        | clang_sys::CXCursor_UnionDecl
-        | clang_sys::CXCursor_EnumDecl
-        | clang_sys::CXCursor_TypedefDecl
-        | clang_sys::CXCursor_TypeAliasDecl
-        | clang_sys::CXCursor_TypeAliasTemplateDecl
-        | clang_sys::CXCursor_ClassTemplate => GraphNodeKind::Type,
-        clang_sys::CXCursor_Namespace
-        | clang_sys::CXCursor_NamespaceAlias => GraphNodeKind::Namespace,
-        clang_sys::CXCursor_MacroDefinition
-        | clang_sys::CXCursor_MacroExpansion => GraphNodeKind::Macro,
-        clang_sys::CXCursor_VarDecl => GraphNodeKind::Variable,
-        _ => GraphNodeKind::Variable,
-    }
-}
-
 pub fn is_function_like_kind(kind: i32) -> bool {
     matches!(
         kind,
@@ -119,5 +91,19 @@ pub fn is_variable_like_kind(kind: i32) -> bool {
         kind,
         clang_sys::CXCursor_VarDecl | clang_sys::CXCursor_FieldDecl | clang_sys::CXCursor_ParmDecl
     )
+}
+
+pub(crate) fn type_declaration_name(cursor: clang_sys::CXCursor) -> Option<String> {
+    let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
+    let decl_cursor = unsafe { clang_sys::clang_getTypeDeclaration(ty) };
+    if unsafe { clang_sys::clang_Cursor_isNull(decl_cursor) } != 0 {
+        return None;
+    }
+    cxstring_to_option(unsafe { clang_sys::clang_getCursorSpelling(decl_cursor) })
+}
+
+pub(crate) fn num_template_arguments(cursor: clang_sys::CXCursor) -> i32 {
+    let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
+    unsafe { clang_sys::clang_Type_getNumTemplateArguments(ty) }
 }
 

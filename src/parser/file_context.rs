@@ -7,12 +7,12 @@ use std::path::Path;
 use tree_sitter::{StreamingIterator, Tree};
 
 use crate::parser::clang_types::{ClangDeclKey, ClangSymbolKey};
-use crate::parser::clang_result::ClangDiagnosticSeverity;
 use crate::parser::clang_result::{
     ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
 };
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 use crate::parser::text_scan;
+use crate::parser::ts_cpp_symbols;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SemanticIdProvenance {
@@ -22,14 +22,36 @@ pub enum SemanticIdProvenance {
     DeclLocation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SemanticScopeKind {
-    Namespace,
-    Type,
-    Function,
-    Preprocessor,
-    Template,
-    Attribute,
+pub(crate) fn is_preprocessor_scope(node_kind_id: u16) -> bool {
+    matches!(node_kind_id,
+        ts_cpp_symbols::sym_preproc_if | ts_cpp_symbols::sym_preproc_ifdef |
+        ts_cpp_symbols::sym_preproc_elif | ts_cpp_symbols::sym_preproc_else |
+        ts_cpp_symbols::sym_preproc_def | ts_cpp_symbols::sym_preproc_function_def)
+}
+
+pub(crate) fn is_namespace_scope(node_kind_id: u16) -> bool {
+    node_kind_id == ts_cpp_symbols::sym_namespace_definition
+}
+
+pub(crate) fn is_type_scope(node_kind_id: u16) -> bool {
+    matches!(node_kind_id,
+        ts_cpp_symbols::sym_class_specifier | ts_cpp_symbols::sym_struct_specifier |
+        ts_cpp_symbols::sym_union_specifier | ts_cpp_symbols::sym_enum_specifier)
+}
+
+pub(crate) fn is_function_scope(node_kind_id: u16) -> bool {
+    matches!(node_kind_id,
+        ts_cpp_symbols::sym_function_definition | ts_cpp_symbols::sym_function_declarator |
+        ts_cpp_symbols::sym_lambda_expression)
+}
+
+pub(crate) fn is_template_scope(node_kind_id: u16) -> bool {
+    node_kind_id == ts_cpp_symbols::sym_template_declaration
+}
+
+#[allow(dead_code)]
+pub(crate) fn is_attribute_scope(node_kind_id: u16) -> bool {
+    node_kind_id == ts_cpp_symbols::sym_attribute_declaration
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,6 +72,8 @@ pub struct SemanticDeclaration {
     pub storage_class: i32,
     pub is_const_qualified: bool,
     pub is_volatile_qualified: bool,
+    pub template_base_name: Option<String>,
+    pub num_template_args: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -65,7 +89,6 @@ pub struct SemanticReference {
 
 #[derive(Clone, Debug)]
 pub struct SemanticScope {
-    pub kind: SemanticScopeKind,
     pub node_kind_id: u16,
     pub start_offset: usize,
     pub end_offset: usize,
@@ -157,13 +180,24 @@ impl SemanticFileContext {
         context.diagnostic_summary = parse.diagnostic_summary();
         context.diagnostic_entries = parse.diagnostic_entries().to_vec();
 
+        Self::build_scopes_and_regions(text, &canonical_path, parse, &mut context);
+
+        context
+    }
+
+    fn build_scopes_and_regions(
+        text: &str,
+        canonical_path: &str,
+        parse: &ClangParseResult,
+        context: &mut SemanticFileContext,
+    ) {
         let line_starts = Self::line_starts(text);
         let mut declaration_ids: FxHashMap<ClangDeclKey, (String, SemanticIdProvenance)> = FxHashMap::default();
         context.declarations = parse.symbols.iter().map(|decl| {
             let mut decl = decl.clone();
             if decl.stable_id.is_empty() {
                 let (id, prov) = Self::stable_id_for_decl(
-                    &canonical_path,
+                    canonical_path,
                     &decl.name,
                     decl.kind,
                     decl.line,
@@ -174,7 +208,7 @@ impl SemanticFileContext {
                 decl.provenance = prov;
             }
             let key = ClangDeclKey::new(
-                canonical_path.clone(),
+                canonical_path.to_string(),
                 decl.line,
                 decl.column,
                 decl.kind,
@@ -216,6 +250,8 @@ impl SemanticFileContext {
                     storage_class: clang_sys::CX_SC_Invalid,
                     is_const_qualified: false,
                     is_volatile_qualified: false,
+                    template_base_name: None,
+                    num_template_args: 0,
                 });
                 declaration_ids.insert(decl_key.clone(), (stable_id, provenance));
             }
@@ -272,9 +308,7 @@ impl SemanticFileContext {
             context.name_lines.entry(decl.name.clone()).or_default().push(decl.line);
         }
 
-        context.regions = Self::build_regions(text, &context);
-
-        context
+        context.regions = Self::build_regions(text, context);
     }
 
     pub fn declaration_at_location(
@@ -390,7 +424,7 @@ impl SemanticFileContext {
     #[cfg(test)]
     pub fn is_macro_region(&self, location: SourceLocation) -> bool {
         self.scopes.iter().any(|scope| {
-            scope.kind == SemanticScopeKind::Preprocessor
+            is_preprocessor_scope(scope.node_kind_id)
                 && location.line >= scope.start_line
                 && location.line <= scope.end_line
         })
@@ -403,7 +437,7 @@ impl SemanticFileContext {
 
         let mut preprocessor_scope_count = 0usize;
         for scope in &self.scopes {
-            if scope.kind == SemanticScopeKind::Preprocessor {
+            if is_preprocessor_scope(scope.node_kind_id) {
                 preprocessor_scope_count = preprocessor_scope_count.saturating_add(1);
             }
             signature ^= Self::hash64(
@@ -549,23 +583,16 @@ impl SemanticFileContext {
                 matches.get()
             } {
                 for capture in m.captures {
-                    let kind = if Some(capture.index) == namespace_idx {
-                        SemanticScopeKind::Namespace
-                    } else if Some(capture.index) == type_idx {
-                        SemanticScopeKind::Type
-                    } else if Some(capture.index) == function_idx {
-                        SemanticScopeKind::Function
-                    } else if Some(capture.index) == preproc_idx {
-                        SemanticScopeKind::Preprocessor
-                    } else if Some(capture.index) == template_idx {
-                        SemanticScopeKind::Template
-                    } else if Some(capture.index) == attribute_idx {
-                        SemanticScopeKind::Attribute
-                    } else {
+                    if Some(capture.index) != namespace_idx
+                        && Some(capture.index) != type_idx
+                        && Some(capture.index) != function_idx
+                        && Some(capture.index) != preproc_idx
+                        && Some(capture.index) != template_idx
+                        && Some(capture.index) != attribute_idx
+                    {
                         continue;
-                    };
+                    }
                     scopes.push(SemanticScope {
-                        kind,
                         node_kind_id: capture.node.kind_id(),
                         start_offset: capture.node.start_byte(),
                         end_offset: capture.node.end_byte(),
@@ -604,7 +631,7 @@ impl SemanticFileContext {
         for scope in &context.scopes {
             regions.push(SemanticRegion::new(
                 context.canonical_path.as_str(),
-                Self::region_kind_for_scope(scope.kind),
+                Self::region_kind_for_scope(scope.node_kind_id),
                 scope.start_line,
                 scope.end_line.max(scope.start_line),
                 scope.start_offset,
@@ -650,10 +677,8 @@ impl SemanticFileContext {
             }
             let (start_offset, end_offset) =
                 Self::line_bounds_for_line(line_starts.as_slice(), text_len, diagnostic.line);
-            let has_error = matches!(
-                diagnostic.severity,
-                ClangDiagnosticSeverity::Error | ClangDiagnosticSeverity::Fatal
-            );
+            let has_error = diagnostic.severity == clang_sys::CXDiagnostic_Error as u32
+                || diagnostic.severity == clang_sys::CXDiagnostic_Fatal as u32;
             regions.push(SemanticRegion::new(
                 context.canonical_path.as_str(),
                 SemanticRegionKind::Diagnostic,
@@ -670,15 +695,13 @@ impl SemanticFileContext {
         regions
     }
 
-    fn region_kind_for_scope(scope_kind: SemanticScopeKind) -> SemanticRegionKind {
-        match scope_kind {
-            SemanticScopeKind::Preprocessor => SemanticRegionKind::Preprocessor,
-            SemanticScopeKind::Namespace => SemanticRegionKind::Namespace,
-            SemanticScopeKind::Type => SemanticRegionKind::Type,
-            SemanticScopeKind::Function => SemanticRegionKind::Function,
-            SemanticScopeKind::Template => SemanticRegionKind::Template,
-            SemanticScopeKind::Attribute => SemanticRegionKind::Attribute,
-        }
+    fn region_kind_for_scope(node_kind_id: u16) -> SemanticRegionKind {
+        if is_preprocessor_scope(node_kind_id) { SemanticRegionKind::Preprocessor }
+        else if is_namespace_scope(node_kind_id) { SemanticRegionKind::Namespace }
+        else if is_type_scope(node_kind_id) { SemanticRegionKind::Type }
+        else if is_function_scope(node_kind_id) { SemanticRegionKind::Function }
+        else if is_template_scope(node_kind_id) { SemanticRegionKind::Template }
+        else { SemanticRegionKind::Attribute }
     }
 
     fn dedup_and_sort_regions(regions: &mut Vec<SemanticRegion>) {
@@ -845,7 +868,7 @@ mod tests {
     use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
     use super::SemanticDeclaration;
     use crate::parser::file_context::{
-        SemanticFileContext, SemanticIdProvenance, SemanticScopeKind, SourceLocation,
+        is_preprocessor_scope, SemanticFileContext, SemanticIdProvenance, SourceLocation,
     };
     use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
     #[test]
@@ -957,7 +980,7 @@ mod tests {
         assert!(context
             .scopes
             .iter()
-            .any(|scope| scope.kind == SemanticScopeKind::Preprocessor));
+            .any(|scope| is_preprocessor_scope(scope.node_kind_id)));
     }
 
     #[test]
@@ -985,7 +1008,6 @@ mod tests {
                 column: 9,
             }],
             scopes: vec![crate::parser::file_context::SemanticScope {
-                kind: SemanticScopeKind::Preprocessor,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 20,

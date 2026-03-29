@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::parser::clang_types;
 use crate::parser::clang_types::{cxstring_to_option, cxstring_to_string, ClangDeclKey};
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary,
+    ClangDiagnosticEntry, ClangDiagnosticSummary,
 };
 use crate::parser::clang_types::ClangSymbolKey;
 use crate::parser::file_context::{SemanticDeclaration, SemanticFileContext};
@@ -120,23 +120,23 @@ impl SemanticExtractor {
             let mapped_severity = match severity {
                 clang_sys::CXDiagnostic_Ignored => {
                     diagnostic_summary.ignored = diagnostic_summary.ignored.saturating_add(1);
-                    ClangDiagnosticSeverity::Ignored
+                    clang_sys::CXDiagnostic_Ignored as u32
                 }
                 clang_sys::CXDiagnostic_Note => {
                     diagnostic_summary.note = diagnostic_summary.note.saturating_add(1);
-                    ClangDiagnosticSeverity::Note
+                    clang_sys::CXDiagnostic_Note as u32
                 }
                 clang_sys::CXDiagnostic_Warning => {
                     diagnostic_summary.warning = diagnostic_summary.warning.saturating_add(1);
-                    ClangDiagnosticSeverity::Warning
+                    clang_sys::CXDiagnostic_Warning as u32
                 }
                 clang_sys::CXDiagnostic_Error => {
                     diagnostic_summary.error = diagnostic_summary.error.saturating_add(1);
-                    ClangDiagnosticSeverity::Error
+                    clang_sys::CXDiagnostic_Error as u32
                 }
                 _ => {
                     diagnostic_summary.fatal = diagnostic_summary.fatal.saturating_add(1);
-                    ClangDiagnosticSeverity::Fatal
+                    clang_sys::CXDiagnostic_Fatal as u32
                 }
             };
 
@@ -494,6 +494,13 @@ impl SemanticExtractor {
             (false, false)
         };
 
+        let num_template_args = clang_types::num_template_arguments(cursor);
+        let template_base_name = if num_template_args > 0 {
+            clang_types::type_declaration_name(cursor)
+        } else {
+            None
+        };
+
         let (stable_id, provenance) = SemanticFileContext::stable_id_for_decl(
             canonical_path,
             &name,
@@ -520,6 +527,8 @@ impl SemanticExtractor {
             storage_class,
             is_const_qualified,
             is_volatile_qualified,
+            template_base_name,
+            num_template_args,
         })
     }
 
