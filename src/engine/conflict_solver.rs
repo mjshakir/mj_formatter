@@ -58,26 +58,9 @@ impl GlobalConflictSolver {
 
         let accepted = Self::select_conflict_optimal(admissible.as_slice(), scope_stage, adaptive);
         for candidate in &admissible {
-            let conflicts = accepted
-                .iter()
-                .filter(|winner| Self::conflicts(candidate, winner, adaptive))
-                .collect::<Vec<_>>();
-            if conflicts.is_empty() {
-                if accepted.iter().any(|winner| {
-                    winner.line == candidate.line && winner.policy == candidate.policy
-                }) {
-                    continue;
-                }
+            if !accepted.iter().any(|w| w.line == candidate.line && w.policy == candidate.policy) {
                 dropped_lines.insert(candidate.line);
-                continue;
             }
-            if accepted
-                .iter()
-                .any(|winner| winner.line == candidate.line && winner.policy == candidate.policy)
-            {
-                continue;
-            }
-            dropped_lines.insert(candidate.line);
         }
 
         ConflictResult {
@@ -198,7 +181,7 @@ impl GlobalConflictSolver {
             let fuzzy_min = if semantic_sensitive {
                 adaptive.fuzzy_min_semantic()
             } else {
-                adaptive.fuzzy_min_other()
+                1
             };
             let neighborhood = left.impact_radius.max(right.impact_radius).max(fuzzy_min);
             if line_gap <= neighborhood {
@@ -237,7 +220,7 @@ impl GlobalConflictSolver {
         } else {
             (right, left)
         };
-        small.iter().any(|symbol| large.contains(symbol))
+        small.iter().any(|symbol| large.binary_search(symbol).is_ok())
     }
 
     fn select_conflict_optimal(
