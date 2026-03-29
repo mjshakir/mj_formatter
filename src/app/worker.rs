@@ -525,10 +525,6 @@ impl App {
         if let Err(err) = feature_cache.persist() {
             warn!(error = %err, "failed to persist dispatch feature cache");
         }
-        let _total_estimated_batch_cost = batches
-            .iter()
-            .map(|batch| batch.estimated_cost)
-            .sum::<u64>();
         if batches.len() <= 1 {
             return Self::run_processing_pass(
                 config,
@@ -572,7 +568,6 @@ impl App {
             costs.sort_unstable();
             costs.get(costs.len() / 2).copied().unwrap_or(1).max(1) as u128
         };
-        let pop_ctx_path: Option<PathBuf> = None;
         let next_batch = AtomicUsize::new(0);
         let thread_results = thread::scope(|scope| -> Result<Vec<WorkerControllerOutput>> {
             let mut handles = Vec::with_capacity(worker_job_plan.len());
@@ -581,7 +576,7 @@ impl App {
                 let temp_root = temp_root.as_path();
                 let tasks = tasks.as_slice();
                 let next_batch = &next_batch;
-                let pop_path = pop_ctx_path.as_deref();
+                let pop_path: Option<&Path> = None;
                 handles.push(scope.spawn(move || -> Result<WorkerControllerOutput> {
                     let mut output = WorkerControllerOutput::default();
                     let adaptive_state_path =
