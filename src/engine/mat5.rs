@@ -136,19 +136,23 @@ pub fn mat5_zeros() -> [[f64; N]; N] {
 }
 
 #[inline]
-pub fn mat5_identity() -> [[f64; N]; N] {
+pub const fn mat5_identity() -> [[f64; N]; N] {
     let mut m = [[0.0; N]; N];
-    for i in 0..N {
+    let mut i = 0;
+    while i < N {
         m[i][i] = 1.0;
+        i += 1;
     }
     m
 }
 
 #[inline]
-pub fn mat5_diagonal(diag: &[f64; N]) -> [[f64; N]; N] {
+pub const fn mat5_diagonal(diag: &[f64; N]) -> [[f64; N]; N] {
     let mut m = [[0.0; N]; N];
-    for i in 0..N {
+    let mut i = 0;
+    while i < N {
         m[i][i] = diag[i];
+        i += 1;
     }
     m
 }
@@ -156,6 +160,7 @@ pub fn mat5_diagonal(diag: &[f64; N]) -> [[f64; N]; N] {
 // ── Element-wise arithmetic ────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
+#[inline]
 pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
@@ -170,6 +175,7 @@ pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
@@ -184,6 +190,7 @@ pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
 pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
@@ -193,6 +200,7 @@ pub fn mat5_add(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(target_arch = "aarch64")]
+#[inline]
 pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
@@ -207,6 +215,7 @@ pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
@@ -221,6 +230,7 @@ pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
 pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
@@ -229,37 +239,7 @@ pub fn mat5_sub(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     r
 }
 
-#[cfg(target_arch = "aarch64")]
-pub fn mat5_scale(a: &[[f64; N]; N], s: f64) -> [[f64; N]; N] {
-    unsafe {
-        use core::arch::aarch64::*;
-        let vs = vdupq_n_f64(s);
-        let mut r = [[0.0f64; N]; N];
-        for i in 0..N {
-            vst1q_f64(r[i].as_mut_ptr(),       vmulq_f64(vld1q_f64(a[i].as_ptr()),       vs));
-            vst1q_f64(r[i].as_mut_ptr().add(2), vmulq_f64(vld1q_f64(a[i].as_ptr().add(2)), vs));
-            r[i][4] = a[i][4] * s;
-        }
-        r
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-pub fn mat5_scale(a: &[[f64; N]; N], s: f64) -> [[f64; N]; N] {
-    unsafe {
-        use core::arch::x86_64::*;
-        let vs = _mm_set1_pd(s);
-        let mut r = [[0.0f64; N]; N];
-        for i in 0..N {
-            _mm_storeu_pd(r[i].as_mut_ptr(),       _mm_mul_pd(_mm_loadu_pd(a[i].as_ptr()),       vs));
-            _mm_storeu_pd(r[i].as_mut_ptr().add(2), _mm_mul_pd(_mm_loadu_pd(a[i].as_ptr().add(2)), vs));
-            r[i][4] = a[i][4] * s;
-        }
-        r
-    }
-}
-
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(test)]
 pub fn mat5_scale(a: &[[f64; N]; N], s: f64) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
@@ -326,6 +306,7 @@ pub fn mat5_mul(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     r
 }
 
+#[inline]
 pub fn mat5_transpose(a: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
@@ -352,6 +333,7 @@ pub fn mat5_matvec(a: &[[f64; N]; N], v: &[f64; N]) -> [f64; N] {
 // ── Outer product ──────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
+#[inline]
 pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::aarch64::*;
@@ -369,6 +351,7 @@ pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
     unsafe {
         use core::arch::x86_64::*;
@@ -386,11 +369,165 @@ pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
 pub fn mat5_outer(v: &[f64; N]) -> [[f64; N]; N] {
     let mut r = [[0.0; N]; N];
     for i in 0..N {
+        for j in i..N {
+            let val = v[i] * v[j];
+            r[i][j] = val;
+            r[j][i] = val;
+        }
+    }
+    r
+}
+
+// ── Lerp: a + t * (b - a) — fused weighted blend ──────────────────────────
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn mat5_lerp(a: &[[f64; N]; N], b: &[[f64; N]; N], t: f64) -> [[f64; N]; N] {
+    unsafe {
+        use core::arch::aarch64::*;
+        let vt = vdupq_n_f64(t);
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            let a01 = vld1q_f64(a[i].as_ptr());
+            let b01 = vld1q_f64(b[i].as_ptr());
+            vst1q_f64(r[i].as_mut_ptr(), vfmaq_f64(a01, vsubq_f64(b01, a01), vt));
+            let a23 = vld1q_f64(a[i].as_ptr().add(2));
+            let b23 = vld1q_f64(b[i].as_ptr().add(2));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vfmaq_f64(a23, vsubq_f64(b23, a23), vt));
+            r[i][4] = a[i][4] + t * (b[i][4] - a[i][4]);
+        }
+        r
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn mat5_lerp(a: &[[f64; N]; N], b: &[[f64; N]; N], t: f64) -> [[f64; N]; N] {
+    unsafe {
+        use core::arch::x86_64::*;
+        let vt = _mm_set1_pd(t);
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            let a01 = _mm_loadu_pd(a[i].as_ptr());
+            let b01 = _mm_loadu_pd(b[i].as_ptr());
+            _mm_storeu_pd(r[i].as_mut_ptr(), _mm_add_pd(a01, _mm_mul_pd(_mm_sub_pd(b01, a01), vt)));
+            let a23 = _mm_loadu_pd(a[i].as_ptr().add(2));
+            let b23 = _mm_loadu_pd(b[i].as_ptr().add(2));
+            _mm_storeu_pd(r[i].as_mut_ptr().add(2), _mm_add_pd(a23, _mm_mul_pd(_mm_sub_pd(b23, a23), vt)));
+            r[i][4] = a[i][4] + t * (b[i][4] - a[i][4]);
+        }
+        r
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+pub fn mat5_lerp(a: &[[f64; N]; N], b: &[[f64; N]; N], t: f64) -> [[f64; N]; N] {
+    let mut r = [[0.0; N]; N];
+    for i in 0..N {
         for j in 0..N {
-            r[i][j] = v[i] * v[j];
+            r[i][j] = a[i][j] + t * (b[i][j] - a[i][j]);
+        }
+    }
+    r
+}
+
+// ── Negate and add identity: I - M ─────────────────────────────────────────
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn mat5_neg_add_identity(m: &[[f64; N]; N]) -> [[f64; N]; N] {
+    unsafe {
+        use core::arch::aarch64::*;
+        let zero = vdupq_n_f64(0.0);
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            vst1q_f64(r[i].as_mut_ptr(), vsubq_f64(zero, vld1q_f64(m[i].as_ptr())));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vsubq_f64(zero, vld1q_f64(m[i].as_ptr().add(2))));
+            r[i][4] = -m[i][4];
+            r[i][i] += 1.0;
+        }
+        r
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn mat5_neg_add_identity(m: &[[f64; N]; N]) -> [[f64; N]; N] {
+    unsafe {
+        use core::arch::x86_64::*;
+        let zero = _mm_setzero_pd();
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            _mm_storeu_pd(r[i].as_mut_ptr(), _mm_sub_pd(zero, _mm_loadu_pd(m[i].as_ptr())));
+            _mm_storeu_pd(r[i].as_mut_ptr().add(2), _mm_sub_pd(zero, _mm_loadu_pd(m[i].as_ptr().add(2))));
+            r[i][4] = -m[i][4];
+            r[i][i] += 1.0;
+        }
+        r
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+pub fn mat5_neg_add_identity(m: &[[f64; N]; N]) -> [[f64; N]; N] {
+    let mut r = [[0.0; N]; N];
+    for i in 0..N {
+        for j in 0..N {
+            r[i][j] = -m[i][j];
+        }
+        r[i][i] += 1.0;
+    }
+    r
+}
+
+// ── Fused add-sub: a + b - c ──────────────────────────────────────────────
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn mat5_add_sub(a: &[[f64; N]; N], b: &[[f64; N]; N], c: &[[f64; N]; N]) -> [[f64; N]; N] {
+    unsafe {
+        use core::arch::aarch64::*;
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            let ab01 = vaddq_f64(vld1q_f64(a[i].as_ptr()), vld1q_f64(b[i].as_ptr()));
+            vst1q_f64(r[i].as_mut_ptr(), vsubq_f64(ab01, vld1q_f64(c[i].as_ptr())));
+            let ab23 = vaddq_f64(vld1q_f64(a[i].as_ptr().add(2)), vld1q_f64(b[i].as_ptr().add(2)));
+            vst1q_f64(r[i].as_mut_ptr().add(2), vsubq_f64(ab23, vld1q_f64(c[i].as_ptr().add(2))));
+            r[i][4] = a[i][4] + b[i][4] - c[i][4];
+        }
+        r
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn mat5_add_sub(a: &[[f64; N]; N], b: &[[f64; N]; N], c: &[[f64; N]; N]) -> [[f64; N]; N] {
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut r = [[0.0f64; N]; N];
+        for i in 0..N {
+            let ab01 = _mm_add_pd(_mm_loadu_pd(a[i].as_ptr()), _mm_loadu_pd(b[i].as_ptr()));
+            _mm_storeu_pd(r[i].as_mut_ptr(), _mm_sub_pd(ab01, _mm_loadu_pd(c[i].as_ptr())));
+            let ab23 = _mm_add_pd(_mm_loadu_pd(a[i].as_ptr().add(2)), _mm_loadu_pd(b[i].as_ptr().add(2)));
+            _mm_storeu_pd(r[i].as_mut_ptr().add(2), _mm_sub_pd(ab23, _mm_loadu_pd(c[i].as_ptr().add(2))));
+            r[i][4] = a[i][4] + b[i][4] - c[i][4];
+        }
+        r
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+pub fn mat5_add_sub(a: &[[f64; N]; N], b: &[[f64; N]; N], c: &[[f64; N]; N]) -> [[f64; N]; N] {
+    let mut r = [[0.0; N]; N];
+    for i in 0..N {
+        for j in 0..N {
+            r[i][j] = a[i][j] + b[i][j] - c[i][j];
         }
     }
     r
@@ -462,26 +599,39 @@ pub fn mat5_determinant_spd(a: &[[f64; N]; N]) -> f64 {
 pub fn mat5_inverse_spd(a: &[[f64; N]; N]) -> Option<[[f64; N]; N]> {
     let l = mat5_cholesky(a)?;
 
-    // Forward solve: L * Y = I → Y = L^{-1}
+    // Forward solve: L * Y = I → Y = L^{-1} (lower triangular)
     let mut l_inv = [[0.0; N]; N];
     for i in 0..N {
-        l_inv[i][i] = 1.0 / l[i][i];
+        let recip = 1.0 / l[i][i];
+        l_inv[i][i] = recip;
         for j in (0..i).rev() {
             let mut sum = 0.0;
             for k in j..i {
                 sum += l[i][k] * l_inv[k][j];
             }
-            l_inv[i][j] = -sum / l[i][i];
+            l_inv[i][j] = -sum * recip;
         }
     }
 
-    // A^{-1} = L^{-T} * L^{-1} = (L^{-1})^T * L^{-1}
-    let l_inv_t = mat5_transpose(&l_inv);
-    Some(mat5_mul(&l_inv_t, &l_inv))
+    // A^{-1} = L^{-T} * L^{-1}: symmetric, l_inv is lower-triangular
+    // For i <= j: result[i][j] = sum(k=j..N) l_inv[k][i] * l_inv[k][j]
+    let mut result = [[0.0; N]; N];
+    for i in 0..N {
+        for j in i..N {
+            let mut sum = 0.0;
+            for k in j..N {
+                sum += l_inv[k][i] * l_inv[k][j];
+            }
+            result[i][j] = sum;
+            result[j][i] = sum;
+        }
+    }
+    Some(result)
 }
 
 // ── Symmetrize (average upper and lower triangles) ─────────────────────────
 
+#[inline]
 pub fn mat5_symmetrize(a: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut r = *a;
     for i in 0..N {
@@ -496,28 +646,34 @@ pub fn mat5_symmetrize(a: &[[f64; N]; N]) -> [[f64; N]; N] {
 
 // ── Enforce SPD: if Cholesky fails, fall back to diagonal + regularization ─
 
+#[inline]
 pub fn enforce_spd(m: &mut [[f64; N]; N]) {
+    if mat5_cholesky(m).is_some() {
+        return;
+    }
     *m = mat5_symmetrize(m);
     if mat5_cholesky(m).is_some() {
         return;
     }
-    // Add increasing regularization until SPD
-    for reg in &[1e-6, 1e-5, 1e-4, 1e-3, 1e-2] {
+    let diag_norm = (0..N).fold(0.0f64, |mx, i| mx.max(m[i][i].abs())).max(1e-15);
+    let mut reg = diag_norm * 1e-6;
+    for _ in 0..10 {
         for i in 0..N {
             m[i][i] += reg;
         }
         if mat5_cholesky(m).is_some() {
             return;
         }
+        reg *= 10.0;
     }
-    // Last resort: replace with diagonal
+    let floor = diag_norm * 1e-4;
     let diag = mat5_diag(m);
     *m = mat5_diagonal(&[
-        diag[0].max(1e-4),
-        diag[1].max(1e-4),
-        diag[2].max(1e-4),
-        diag[3].max(1e-4),
-        diag[4].max(1e-4),
+        diag[0].max(floor),
+        diag[1].max(floor),
+        diag[2].max(floor),
+        diag[3].max(floor),
+        diag[4].max(floor),
     ]);
 }
 
