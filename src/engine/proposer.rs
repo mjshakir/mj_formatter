@@ -11,7 +11,7 @@ use crate::policy::zone::PolicyZone;
 use crate::engine::semantic_contract::{SemanticContract, SemanticInvariantClause, ALL_CLAUSES};
 use crate::model::policy_result::PolicyResult;
 use crate::model::project_query::ProjectContextQuery;
-use crate::parser::file_context::SemanticScopeKind;
+use crate::parser::file_context::is_preprocessor_scope;
 use crate::parser::semantic_region::SemanticRegionKind;
 
 #[derive(Clone, Debug, Default)]
@@ -19,6 +19,15 @@ pub struct GuardianAssessment {
     pub allowed: Vec<PolicyEditCandidate>,
     pub blocked_zone_lines: BTreeSet<usize>,
     pub hard_blocked_lines: BTreeSet<usize>,
+}
+
+pub(crate) struct ProposalContext<'a> {
+    pub project_query: &'a ProjectContextQuery<'a>,
+    pub comment_lines: Option<&'a BTreeSet<usize>>,
+    pub convergence_signal: &'a ConvergencePolicySignal,
+    pub capability: &'a PolicyCapabilities,
+    pub confidence: f64,
+    pub adaptive: &'a crate::engine::certainty_filter::CertaintyFilterState,
 }
 
 #[derive(Default)]
@@ -29,44 +38,38 @@ impl ProposerController {
         Self
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn propose(
         &self,
         policy_name: &str,
         result: &PolicyResult,
-        project_query: &ProjectContextQuery<'_>,
-        comment_lines: Option<&BTreeSet<usize>>,
-        convergence_signal: &ConvergencePolicySignal,
-        capability: &PolicyCapabilities,
-        confidence: f64,
-        adaptive: &crate::engine::certainty_filter::CertaintyFilterState,
+        ctx: &ProposalContext<'_>,
     ) -> Vec<PolicyEditCandidate> {
         let mut candidates = Vec::<PolicyEditCandidate>::with_capacity(result.edits.len());
-        let trust_deficit_penalty = adaptive.trust_deficit_penalty();
-        let confidence_penalty = adaptive.confidence_penalty();
-        let richness_radius = adaptive.richness_multiplier().round().clamp(1.0, 3.0) as usize;
+        let trust_deficit_penalty = ctx.adaptive.trust_deficit_penalty();
+        let confidence_penalty = ctx.adaptive.confidence_penalty();
+        let richness_radius = ctx.adaptive.richness_multiplier().round().clamp(1.0, 3.0) as usize;
         for edit in &result.edits {
             if edit.line == 0 || edit.before == edit.after {
                 continue;
             }
-            let zone = Self::zone_for_line(edit.line, project_query, comment_lines);
+            let zone = Self::zone_for_line(edit.line, ctx.project_query, ctx.comment_lines);
             let mut hard_constraints_touched: u16 = 0;
-            if project_query.is_macro_region(edit.line, 1) {
+            if ctx.project_query.is_macro_region(edit.line, 1) {
                 hard_constraints_touched |= SemanticInvariantClause::MacroRegionSafety.bit();
             }
-            if !project_query.is_safe_edit(edit.line, 1) {
+            if !ctx.project_query.is_safe_edit(edit.line, 1) {
                 hard_constraints_touched |= SemanticInvariantClause::EditSafety.bit();
             }
-            if !project_query.is_available() {
+            if !ctx.project_query.is_available() {
                 hard_constraints_touched |= SemanticInvariantClause::ParserAvailability.bit();
             }
-            let mut symbol_footprint: SmallVec<[u64; 8]> = convergence_signal
+            let mut symbol_footprint: SmallVec<[u64; 8]> = ctx.convergence_signal
                 .symbol_ids
                 .get(&edit.line)
                 .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
-            if let Some(symbol) = project_query.symbol_at(edit.line, 1, &[]) {
-                if project_query
+            if let Some(symbol) = ctx.project_query.symbol_at(edit.line, 1, &[]) {
+                if ctx.project_query
                     .decl_by_id(symbol.stable_id.as_str())
                     .is_some()
                 {
@@ -75,7 +78,7 @@ impl ProposerController {
                 // No hard constraint for unresolved symbols: without exact compile_commands.json,
                 // headers commonly have symbols that can't be resolved to declarations in the
                 // current parse context. Blocking based on non-information prevents valid edits.
-                for reference in project_query.references_of(symbol.stable_id.as_str()) {
+                for reference in ctx.project_query.references_of(symbol.stable_id.as_str()) {
                     symbol_footprint.push(Self::line_column_fingerprint(
                         reference.line,
                         reference.column,
@@ -84,26 +87,26 @@ impl ProposerController {
             }
             symbol_footprint.sort_unstable();
             symbol_footprint.dedup();
-            let range_footprint: SmallVec<[(usize, usize); 4]> = convergence_signal
+            let range_footprint: SmallVec<[(usize, usize); 4]> = ctx.convergence_signal
                 .impact_ranges
                 .get(&edit.line)
                 .cloned()
                 .unwrap_or_else(|| smallvec::smallvec![(edit.line, edit.line)]);
             let resolved_confidence =
-                (confidence - confidence_penalty - trust_deficit_penalty).clamp(0.0, 1.0);
-            let impact_radius = convergence_signal.impact_radius.max(1).max(richness_radius);
+                (ctx.confidence - confidence_penalty - trust_deficit_penalty).clamp(0.0, 1.0);
+            let impact_radius = ctx.convergence_signal.impact_radius.max(1).max(richness_radius);
             candidates.push(PolicyEditCandidate {
                 policy: Arc::from(policy_name),
                 line: edit.line,
                 confidence: resolved_confidence,
-                risk_tier: capability.risk_tier,
+                risk_tier: ctx.capability.risk_tier,
                 impact_radius,
                 symbol_footprint: symbol_footprint.into_vec().into(),
                 range_footprint: range_footprint.into_vec().into(),
                 hard_constraints_touched,
                 zone,
                 after_fingerprint: Self::text_fingerprint(edit.after.as_str()),
-                style_gain: Self::style_gain(edit.before.as_str(), edit.after.as_str(), adaptive),
+                style_gain: Self::style_gain(edit.before.as_str(), edit.after.as_str(), ctx.adaptive),
             });
         }
         candidates
@@ -170,7 +173,7 @@ impl ProposerController {
         }
         if project_query
             .scope_at(line, 1)
-            .is_some_and(|scope| scope.kind == SemanticScopeKind::Preprocessor)
+            .is_some_and(|scope| is_preprocessor_scope(scope.node_kind_id))
         {
             return PolicyZone::Preprocessor;
         }
@@ -219,13 +222,12 @@ mod tests {
     use crate::model::project_query::ProjectContextQuery;
     use crate::model::context_query::SemanticContextQuery;
     use crate::parser::file_context::{
-        SemanticFileContext, SemanticScope, SemanticScopeKind,
+        SemanticFileContext, SemanticScope,
     };
     #[test]
     fn marks_protected_zone() {
         let semantic = SemanticFileContext {
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Preprocessor,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 40,
@@ -253,12 +255,14 @@ mod tests {
         let candidates = ProposerController::new().propose(
             "compact_declarations",
             &result,
-            &project_query,
-            Some(&BTreeSet::new()),
-            &ConvergencePolicySignal::default(),
-            &capability,
-            0.9,
-            &adaptive,
+            &super::ProposalContext {
+                project_query: &project_query,
+                comment_lines: Some(&BTreeSet::new()),
+                convergence_signal: &ConvergencePolicySignal::default(),
+                capability: &capability,
+                confidence: 0.9,
+                adaptive: &adaptive,
+            },
         );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].zone.as_str(), "preprocessor");

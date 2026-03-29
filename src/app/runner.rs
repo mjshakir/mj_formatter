@@ -52,6 +52,24 @@ use crate::runtime::toolchain::ToolchainRequirements;
 
 pub struct App;
 
+pub(crate) struct RunContext {
+    pub(crate) args: CliArgs,
+    pub(crate) config: AppConfig,
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) parser_manager: ParserManager,
+    pub(crate) project_graph_runtime: Option<std::sync::Arc<crate::runtime::graph_runtime::ProjectGraphRuntime>>,
+    pub(crate) file_io: FileIo,
+    pub(crate) effective_jobs: usize,
+    pub(crate) effective_processes: usize,
+    pub(crate) multi_process_enabled: bool,
+    pub(crate) adaptive_state: std::sync::Arc<arc_swap::ArcSwap<CertaintyFilterState>>,
+    pub(crate) adaptive_state_path: PathBuf,
+    pub(crate) accuracy_rollout_state: AccuracyRolloutState,
+    pub(crate) requested_rollout_profile: crate::config::rollout_profile::AccuracyRolloutProfile,
+    pub(crate) requested_fail_closed: bool,
+    pub(crate) run_journal: Option<RunJournal>,
+}
+
 pub(crate) trait HasPath {
     fn as_path(&self) -> &Path;
 }
@@ -225,6 +243,14 @@ impl Drop for TempDirCleanupGuard {
     }
 }
 
+pub(crate) struct PhaseTiming {
+    pub observation_ms: f64,
+    pub engine_wall_ms: f64,
+    pub write_ms: f64,
+    pub graph_ms: f64,
+    pub engine_wall_started: Instant,
+}
+
 impl App {
     pub fn run() -> Result<()> {
         let args = CliArgs::parse();
@@ -240,14 +266,73 @@ impl App {
                 std::path::Path::new(report_path),
             );
         }
+        let mut ctx = match Self::initialize_run(args)? {
+            Some(ctx) => ctx,
+            None => return Ok(()),
+        };
+        let _log_guard = RuntimeLogging::init(ctx.config.verbose);
+
+        if ctx.args.benchmark_only {
+            return Self::run_benchmark(
+                &mut ctx.config,
+                &mut ctx.accuracy_rollout_state,
+                ctx.requested_rollout_profile,
+                ctx.requested_fail_closed,
+            );
+        }
+        if ctx.args.worker_pool {
+            return Self::run_pool_entry(&ctx.args, &ctx.config);
+        }
+        if ctx.args.worker_manifest.is_some() || ctx.args.worker_result.is_some() {
+            return Self::run_worker_entry(&ctx.args, &ctx.config);
+        }
+        let policies = PolicyRegistry::build_enabled(&ctx.config);
+        if ctx.args.list_policies {
+            println!("style: {}", ctx.config.style_name);
+            for policy in &policies {
+                println!(
+                    "policy: {:30} parse={}",
+                    policy.name(),
+                    if PolicyCapabilityMatrix::for_policy(policy.name()).semantic_rewrite { "hybrid" } else { "tree-sitter" }
+                );
+            }
+            return Ok(());
+        }
+
+        let (mut results, observation_ms, engine_wall_started) =
+            Self::run_observation_and_engine(&mut ctx)?;
+        let engine_wall_ms = engine_wall_started.elapsed().as_secs_f64() * 1000.0;
+
+        let (write_ms, graph_ms, project_graph_stats) =
+            Self::run_write_and_graph_phase(&ctx, &mut results)?;
+
+        let (summary, _total_edits, contract_violation_count) =
+            Self::build_and_print_summary(
+                &ctx.config,
+                &results,
+                &PhaseTiming {
+                    observation_ms,
+                    engine_wall_ms,
+                    write_ms,
+                    graph_ms,
+                    engine_wall_started,
+                },
+                project_graph_stats,
+            );
+
+        Self::finalize_run(&mut ctx, &results, &summary, contract_violation_count)?;
+
+        Ok(())
+    }
+
+    fn initialize_run(args: CliArgs) -> Result<Option<RunContext>> {
         let loader = ConfigLoader;
         let mut config = loader.load(&args)?;
-        let _log_guard = RuntimeLogging::init(config.verbose);
         PolicyTelemetry::reset();
         AdaptiveTelemetry::reset();
         PolicyClusterTelemetry::reset();
         RetryLearningTelemetry::reset();
-        let mut accuracy_rollout_state =
+        let accuracy_rollout_state =
             AccuracyRolloutState::open(config.accuracy_gate.rollout_state_path.as_path());
         let requested_rollout_profile = config.accuracy_gate.profile;
         let effective_rollout_profile =
@@ -275,40 +360,10 @@ impl App {
                 config.backup_dir.as_path(),
                 args.undo_run.as_deref(),
             )?;
-            return Ok(());
+            return Ok(None);
         }
 
         ToolchainRequirements::verify(&config.clang_binary, &config.clang_format_binary)?;
-
-        if args.benchmark_only {
-            return Self::run_benchmark(
-                &mut config,
-                &mut accuracy_rollout_state,
-                requested_rollout_profile,
-                requested_fail_closed,
-            );
-        }
-
-        if args.worker_pool {
-            return Self::run_pool_entry(&args, &config);
-        }
-
-        if args.worker_manifest.is_some() || args.worker_result.is_some() {
-            return Self::run_worker_entry(&args, &config);
-        }
-
-        let policies = PolicyRegistry::build_enabled(&config);
-        if args.list_policies {
-            println!("style: {}", config.style_name);
-            for policy in &policies {
-                println!(
-                    "policy: {:30} parse={}",
-                    policy.name(),
-                    if PolicyCapabilityMatrix::for_policy(policy.name()).semantic_rewrite { "hybrid" } else { "tree-sitter" }
-                );
-            }
-            return Ok(());
-        }
 
         let mut run_journal = RunJournal::start(&config);
 
@@ -323,7 +378,7 @@ impl App {
             if let Some(journal) = run_journal.as_mut() {
                 journal.finish_success(&RunSummary::default());
             }
-            return Ok(());
+            return Ok(None);
         }
         files.sort();
 
@@ -361,7 +416,6 @@ impl App {
             );
         }
 
-        let observation_started = Instant::now();
         let adaptive_state_path = config
             .retry_strategy_optimizer
             .path
@@ -380,79 +434,121 @@ impl App {
         let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
             loaded_state,
         )));
+
+        Ok(Some(RunContext {
+            args,
+            config,
+            files,
+            parser_manager,
+            project_graph_runtime,
+            file_io,
+            effective_jobs,
+            effective_processes,
+            multi_process_enabled,
+            adaptive_state,
+            adaptive_state_path,
+            accuracy_rollout_state,
+            requested_rollout_profile,
+            requested_fail_closed,
+            run_journal,
+        }))
+    }
+
+    fn run_observation_and_engine(
+        ctx: &mut RunContext,
+    ) -> Result<(Vec<FileResult>, f64, Instant)> {
+        let observation_started = Instant::now();
         {
-            if config.verbose {
+            if ctx.config.verbose {
                 info!("dry-run: building observations (cold start)");
             }
-            let mut obs_config = config.clone();
+            let mut obs_config = ctx.config.clone();
             obs_config.check = true;
             obs_config.observation_only = true;
 
-            let _obs_results = if multi_process_enabled {
+            let _obs_results = if ctx.multi_process_enabled {
                 Self::run_multiprocess_pass(
-                    &args,
+                    &ctx.args,
                     &obs_config,
-                    files.clone(),
-                    effective_processes,
+                    ctx.files.clone(),
+                    ctx.effective_processes,
                     false,
-                    adaptive_state.clone(),
+                    ctx.adaptive_state.clone(),
                 )?
             } else {
                 Self::run_processing_pass(
                     &obs_config,
-                    files.clone(),
-                    project_graph_runtime.clone(),
+                    ctx.files.clone(),
+                    ctx.project_graph_runtime.clone(),
                     false,
                     true,
-                    adaptive_state.clone(),
+                    ctx.adaptive_state.clone(),
                 )?
             };
         }
-        let adaptive_snapshot = adaptive_state.load();
-        if config.verbose {
+        let adaptive_snapshot = ctx.adaptive_state.load();
+        if ctx.config.verbose {
             info!(
-                files = files.len(),
+                files = ctx.files.len(),
                 observation_count = adaptive_snapshot.observation_count,
                 elapsed_ms = observation_started.elapsed().as_millis() as u64,
                 "observation phase complete"
             );
         }
-
-        let population_edit_success = adaptive_snapshot.edit_success();
-        let population_observation_count = adaptive_snapshot.observation_count;
         let observation_ms = observation_started.elapsed().as_secs_f64() * 1000.0;
+
         let engine_wall_started = Instant::now();
-        let mut results = if multi_process_enabled {
-            Self::run_multiprocess_pass(&args, &config, files, effective_processes, false, adaptive_state.clone())?
+        let mut results = if ctx.multi_process_enabled {
+            Self::run_multiprocess_pass(
+                &ctx.args,
+                &ctx.config,
+                ctx.files.clone(),
+                ctx.effective_processes,
+                false,
+                ctx.adaptive_state.clone(),
+            )?
         } else {
-            Self::run_processing_pass(&config, files, project_graph_runtime.clone(), true, true, adaptive_state.clone())?
+            Self::run_processing_pass(
+                &ctx.config,
+                ctx.files.clone(),
+                ctx.project_graph_runtime.clone(),
+                true,
+                true,
+                ctx.adaptive_state.clone(),
+            )?
         };
 
         results.sort_by(|left, right| left.meta.path.cmp(&right.meta.path));
+        Ok((results, observation_ms, engine_wall_started))
+    }
 
-        let parallel_pool = if effective_jobs > 1 {
+    fn run_write_and_graph_phase(
+        ctx: &RunContext,
+        results: &mut Vec<FileResult>,
+    ) -> Result<(f64, f64, Option<crate::graph::store::PersistStats>)> {
+        let parallel_pool = if ctx.effective_jobs > 1 {
             rayon::ThreadPoolBuilder::new()
-                .num_threads(effective_jobs)
+                .num_threads(ctx.effective_jobs)
                 .build()
                 .ok()
         } else {
             None
         };
 
-        let engine_wall_ms = engine_wall_started.elapsed().as_secs_f64() * 1000.0;
         let write_started = Instant::now();
+        let adaptive_snapshot = ctx.adaptive_state.load();
+        let population_edit_success = adaptive_snapshot.edit_success();
+        let population_observation_count = adaptive_snapshot.observation_count;
 
-        // Extract graph refresh input from results BEFORE write phase (read-only).
-        // This allows graph refresh to run in parallel with backup manifest writing.
-        let include_parse_updates = !config.check;
-        let should_graph_refresh = project_graph_runtime.is_some()
-            && (include_parse_updates || config.convergence_learn_on_check);
+        let include_parse_updates = !ctx.config.check;
+        let should_graph_refresh = ctx.project_graph_runtime.is_some()
+            && (include_parse_updates || ctx.config.convergence_learn_on_check);
         let (graph_input, graph_input_warnings) = if should_graph_refresh {
-            let pg = project_graph_runtime.as_ref().unwrap();
+            let pg = ctx.project_graph_runtime.as_ref().unwrap();
             let (input, warnings) = Self::extract_graph_refresh_input(
-                &results,
+                results,
                 pg,
-                &config.project_graph,
+                &ctx.config.project_graph,
                 include_parse_updates,
                 population_observation_count,
             );
@@ -461,18 +557,17 @@ impl App {
             (None, Vec::new())
         };
 
-        if !config.check {
+        if !ctx.config.check {
             Self::apply_project_wide_semantic_renames(
-                &file_io,
-                &parser_manager,
-                &mut results,
+                &ctx.file_io,
+                &ctx.parser_manager,
+                results,
                 parallel_pool.as_ref(),
                 population_edit_success,
             );
-            Self::apply_write_phase(&file_io, &mut results, parallel_pool.as_ref());
+            Self::apply_write_phase(&ctx.file_io, results, parallel_pool.as_ref());
         }
 
-        // Ensure clang parse service has enough lanes for graph refresh targets.
         if let Some(ref input) = graph_input {
             let need_parse = input.targets.iter().filter(|t| t.cached_clang.is_none()).count();
             if need_parse > 0 {
@@ -481,44 +576,17 @@ impl App {
         }
 
         let graph_started = Instant::now();
-        let (project_graph_stats, graph_warnings) = std::thread::scope(|s| {
-            let graph_handle = if let (Some(input), Some(project_graph)) =
-                (graph_input, project_graph_runtime.as_ref())
-            {
-                Some(s.spawn(|| {
-                    Self::refresh_project_graph_owned(
-                        input,
-                        project_graph,
-                        &file_io,
-                        &parser_manager,
-                        parallel_pool.as_ref(),
-                    )
-                }))
-            } else {
-                None
-            };
+        let (project_graph_stats, graph_warnings) =
+            Self::execute_graph_refresh_and_backup(
+                &ctx.config,
+                graph_input,
+                ctx.project_graph_runtime.as_ref(),
+                &ctx.file_io,
+                &ctx.parser_manager,
+                parallel_pool.as_ref(),
+                results,
+            );
 
-            // Backup manifest runs on main thread (fast, ~1ms).
-            if !config.check {
-                if let Err(err) = BackupManifest::write(&config, results.as_slice()) {
-                    tracing::warn!("failed writing backup manifest: {err:#}");
-                }
-            }
-
-            // Join graph refresh thread.
-            match graph_handle {
-                Some(handle) => match handle.join() {
-                    Ok(output) => (output.stats, output.warnings),
-                    Err(_) => {
-                        tracing::error!("graph refresh thread panicked");
-                        (None, Vec::new())
-                    }
-                },
-                None => (None, Vec::new()),
-            }
-        });
-
-        // Apply graph refresh warnings back to results.
         for (index, warning) in graph_input_warnings.into_iter().chain(graph_warnings) {
             match index {
                 Some(idx) if idx < results.len() => {
@@ -534,26 +602,64 @@ impl App {
 
         let write_ms = write_started.elapsed().as_secs_f64() * 1000.0;
         let graph_ms = graph_started.elapsed().as_secs_f64() * 1000.0;
-        let report_dir = config.report_path.parent().unwrap_or(Path::new("."));
-        let report_name = config
-            .report_path
-            .file_name()
-            .unwrap_or("report.ndjson".as_ref());
-        let run_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let run_report_path = report_dir.join(run_ts.to_string()).join(report_name);
-        let reporter = ReporterProcess::spawn(run_report_path)
-            .context("failed spawning reporter process")?;
-        for result in &results {
-            reporter.try_send(ReportRecord::from(result));
-        }
+        Ok((write_ms, graph_ms, project_graph_stats))
+    }
 
+    fn execute_graph_refresh_and_backup(
+        config: &AppConfig,
+        graph_input: Option<crate::app::graph_refresh::GraphRefreshInput>,
+        project_graph_runtime: Option<&std::sync::Arc<crate::runtime::graph_runtime::ProjectGraphRuntime>>,
+        file_io: &FileIo,
+        parser_manager: &ParserManager,
+        parallel_pool: Option<&rayon::ThreadPool>,
+        results: &[FileResult],
+    ) -> (Option<crate::graph::store::PersistStats>, Vec<(Option<usize>, String)>) {
+        std::thread::scope(|s| {
+            let graph_handle = if let (Some(input), Some(project_graph)) =
+                (graph_input, project_graph_runtime)
+            {
+                Some(s.spawn(|| {
+                    Self::refresh_project_graph_owned(
+                        input,
+                        project_graph,
+                        file_io,
+                        parser_manager,
+                        parallel_pool,
+                    )
+                }))
+            } else {
+                None
+            };
+
+            if !config.check {
+                if let Err(err) = BackupManifest::write(config, results) {
+                    tracing::warn!("failed writing backup manifest: {err:#}");
+                }
+            }
+
+            match graph_handle {
+                Some(handle) => match handle.join() {
+                    Ok(output) => (output.stats, output.warnings),
+                    Err(_) => {
+                        tracing::error!("graph refresh thread panicked");
+                        (None, Vec::new())
+                    }
+                },
+                None => (None, Vec::new()),
+            }
+        })
+    }
+
+    fn build_and_print_summary(
+        config: &AppConfig,
+        results: &[FileResult],
+        timing: &PhaseTiming,
+        project_graph_stats: Option<crate::graph::store::PersistStats>,
+    ) -> (RunSummary, usize, usize) {
         let mut summary = RunSummary::default();
         let mut total_edits = 0usize;
         let mut backup_writes = 0usize;
-        for result in &results {
+        for result in results {
             summary.merge_file(
                 result.outcome.changed,
                 result.outcome.violations.len(),
@@ -606,9 +712,9 @@ impl App {
             }
         }
 
-        let elapsed = engine_wall_started.elapsed();
+        let elapsed = timing.engine_wall_started.elapsed();
         let throughput = summary.files_processed as f64 / elapsed.as_secs_f64().max(0.000_1);
-        let contract_violation_count = Self::contract_violation_count(results.as_slice());
+        let contract_violation_count = Self::contract_violation_count(results);
 
         println!("files processed: {}", summary.files_processed);
         println!("files changed: {}", summary.files_changed);
@@ -622,7 +728,7 @@ impl App {
         println!("throughput: {:.2} files/s", throughput);
         println!(
             "phases: observation={:.1}ms engine={:.1}ms write={:.1}ms graph={:.1}ms",
-            observation_ms, engine_wall_ms, write_ms, graph_ms,
+            timing.observation_ms, timing.engine_wall_ms, timing.write_ms, timing.graph_ms,
         );
         if let Some(stats) = project_graph_stats {
             println!(
@@ -651,6 +757,12 @@ impl App {
             }
         }
 
+        Self::print_telemetry();
+
+        (summary, total_edits, contract_violation_count)
+    }
+
+    fn print_telemetry() {
         if tracing::enabled!(Level::INFO) {
             let telemetry = PolicyTelemetry::snapshot_sorted();
             if !telemetry.is_empty() {
@@ -742,33 +854,57 @@ impl App {
                 adaptive.last_delta
             );
         }
+    }
 
+    fn finalize_run(
+        ctx: &mut RunContext,
+        results: &[FileResult],
+        summary: &RunSummary,
+        contract_violation_count: usize,
+    ) -> Result<()> {
+        let report_dir = ctx.config.report_path.parent().unwrap_or(Path::new("."));
+        let report_name = ctx
+            .config
+            .report_path
+            .file_name()
+            .unwrap_or("report.ndjson".as_ref());
+        let run_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let run_report_path = report_dir.join(run_ts.to_string()).join(report_name);
+        let reporter = ReporterProcess::spawn(run_report_path)
+            .context("failed spawning reporter process")?;
+        for result in results {
+            reporter.try_send(ReportRecord::from(result));
+        }
         reporter.finish().with_context(|| {
             format!(
                 "failed finishing reporter process at {}",
                 report_dir.display()
             )
         })?;
-        let gate_rollout_signal = if config.accuracy_gate.enabled {
-            Self::collect_accuracy_gate_rollout_signal(results.as_slice())
+
+        let gate_rollout_signal = if ctx.config.accuracy_gate.enabled {
+            Self::collect_accuracy_gate_rollout_signal(results)
         } else {
             None
         };
-        let benchmark_spawned = Self::spawn_benchmark(&args, &config)?;
+        let benchmark_spawned = Self::spawn_benchmark(&ctx.args, &ctx.config)?;
         if benchmark_spawned {
             println!("accuracy_benchmark: scheduled async");
         } else {
             Self::finalize_accuracy_validation(
-                &mut config,
-                &mut accuracy_rollout_state,
-                requested_rollout_profile,
-                requested_fail_closed,
+                &mut ctx.config,
+                &mut ctx.accuracy_rollout_state,
+                ctx.requested_rollout_profile,
+                ctx.requested_fail_closed,
                 gate_rollout_signal,
             )?;
         }
         if Self::is_ci_environment()
-            && config.accuracy_gate.ci_require_benchmark
-            && config.accuracy_gate.enabled
+            && ctx.config.accuracy_gate.ci_require_benchmark
+            && ctx.config.accuracy_gate.enabled
             && contract_violation_count > 0
         {
             return Err(anyhow!(
@@ -776,26 +912,26 @@ impl App {
                 contract_violation_count
             ));
         }
-        if let Some(journal) = run_journal.as_mut() {
-            journal.finish_success(&summary);
+        if let Some(journal) = ctx.run_journal.as_mut() {
+            journal.finish_success(summary);
         }
 
-        if let Some(final_state) = CertaintyFilterState::load_from_path(&adaptive_state_path) {
-            if config.verbose {
+        if let Some(final_state) = CertaintyFilterState::load_from_path(&ctx.adaptive_state_path) {
+            if ctx.config.verbose {
                 info!(
                     observation_count = final_state.observation_count,
-                    path = %adaptive_state_path.display(),
+                    path = %ctx.adaptive_state_path.display(),
                     "adaptive state persisted"
                 );
             }
         } else {
-            let fallback = adaptive_state.load();
-            if let Err(err) = fallback.save_to_path(&adaptive_state_path) {
-                warn!(error = %err, path = %adaptive_state_path.display(), "failed to persist adaptive state");
-            } else if config.verbose {
+            let fallback = ctx.adaptive_state.load();
+            if let Err(err) = fallback.save_to_path(&ctx.adaptive_state_path) {
+                warn!(error = %err, path = %ctx.adaptive_state_path.display(), "failed to persist adaptive state");
+            } else if ctx.config.verbose {
                 info!(
                     observation_count = fallback.observation_count,
-                    path = %adaptive_state_path.display(),
+                    path = %ctx.adaptive_state_path.display(),
                     "saved adaptive state to disk (no worker shards)"
                 );
             }

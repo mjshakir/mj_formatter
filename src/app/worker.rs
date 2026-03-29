@@ -42,6 +42,14 @@ use crate::runtime::telemetry::{
 use crate::runtime::graph_runtime::ProjectGraphRuntime;
 use crate::runtime::retry_telemetry::RetryLearningTelemetry;
 
+pub(crate) struct WorkerSpawnConfig<'a> {
+    pub adaptive_state_path: &'a Path,
+    pub retry_optimizer_state_path: &'a Path,
+    pub population_measurements_path: Option<&'a Path>,
+    pub worker_jobs: usize,
+    pub worker_slot: usize,
+}
+
 struct WorkerBatchTask {
     index: usize,
     estimated_cost: u64,
@@ -305,14 +313,12 @@ impl App {
         Ok(pass_result.results)
     }
 
-    fn run_pass(
+    fn setup_processing_environment(
         config: &AppConfig,
-        files: Vec<PathBuf>,
         project_graph_runtime: Option<Arc<ProjectGraphRuntime>>,
         allow_check_result_cache: bool,
-        record_dispatch_history: bool,
         adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
-    ) -> Result<ProcessingPassResult> {
+    ) -> (usize, ParserManager, Arc<FormatterEngine>, FileProcessor, Option<Arc<CheckResultCache>>) {
         let effective_jobs = Self::resolve_effective_jobs(config.jobs);
         ClangParseService::configure(effective_jobs);
         crate::policy::clang_format_service::ClangFormatService::configure(effective_jobs);
@@ -320,7 +326,6 @@ impl App {
             warn!(error = %err, "failed to initialize clang parse service eagerly");
         }
         Self::seed_learning_state_from_project_graph(project_graph_runtime.as_ref());
-        let _cluster_read_guard = PolicyClusterTelemetry::begin_read_model();
         let parser_manager = ParserManager::with_full_config(
             config.clang_binary.clone(),
             config.clang_args.clone(),
@@ -369,59 +374,20 @@ impl App {
             };
         let processor =
             FileProcessor::new(engine.clone(), file_io, config.check, check_result_cache.clone());
-        let mut dispatch_history = DispatchHistoryStore::open(config.run_journal_dir.as_path());
-        let mut feature_cache =
-            DispatchFeatureCache::open(config.run_journal_dir.as_path(), record_dispatch_history);
-        let scheduled_batches = Self::build_file_batches(
-            files,
-            effective_jobs,
-            DispatchMode::InProcess,
-            &parser_manager,
-            &dispatch_history,
-            &mut feature_cache,
-        );
-        if let Err(err) = feature_cache.persist() {
-            warn!(error = %err, "failed to persist dispatch feature cache");
-        }
-        let total_files = scheduled_batches
-            .iter()
-            .map(|batch| batch.paths.len())
-            .sum::<usize>();
-        // Snapshot batch metadata before consuming paths for telemetry reconstruction.
-        let batch_meta: Vec<(u64, usize)> = scheduled_batches
-            .iter()
-            .map(|b| (b.estimated_cost, b.paths.len()))
-            .collect();
-        // Flatten into per-file tasks carrying batch_index. Paths are moved, not cloned.
-        let flat_tasks: Vec<_> = scheduled_batches
-            .into_iter()
-            .enumerate()
-            .flat_map(|(batch_index, batch)| {
-                batch.paths.into_iter().map(move |path| (batch_index, path))
-            })
-            .collect();
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(effective_jobs.max(1))
-            .build()
-            .expect("failed to build rayon thread pool");
+        (effective_jobs, parser_manager, engine, processor, check_result_cache)
+    }
 
-        let pass_started = Instant::now();
-        let processor = Arc::new(processor);
-        let file_outcomes: Vec<_> = {
-            let processor = processor.clone();
-            pool.install(|| {
-                flat_tasks
-                    .into_par_iter()
-                    .map(|(batch_index, path)| (batch_index, processor.process(path)))
-                    .collect()
-            })
-        };
-        let pass_elapsed_ns = pass_started
-            .elapsed()
-            .as_nanos()
-            .min(u64::MAX as u128) as u64;
-
-        // Reconstruct per-batch telemetry from per-file outcomes (sequential O(N), cheap).
+    fn aggregate_pass_results(
+        config: &AppConfig,
+        engine: &Arc<FormatterEngine>,
+        check_result_cache: &Option<Arc<CheckResultCache>>,
+        file_outcomes: Vec<(usize, crate::runtime::scheduler::ProcessedFileOutcome)>,
+        batch_meta: &[(u64, usize)],
+        total_files: usize,
+        pass_elapsed_ns: u64,
+        record_dispatch_history: bool,
+        dispatch_history: &mut DispatchHistoryStore,
+    ) -> Result<ProcessingPassResult> {
         let batch_count = batch_meta.len();
         let mut batch_retry_effort = vec![0u64; batch_count];
         let mut batch_error_count = vec![0usize; batch_count];
@@ -478,6 +444,76 @@ impl App {
             }
         }
         Ok(results)
+    }
+
+    fn run_pass(
+        config: &AppConfig,
+        files: Vec<PathBuf>,
+        project_graph_runtime: Option<Arc<ProjectGraphRuntime>>,
+        allow_check_result_cache: bool,
+        record_dispatch_history: bool,
+        adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
+    ) -> Result<ProcessingPassResult> {
+        let (effective_jobs, parser_manager, engine, processor, check_result_cache) =
+            Self::setup_processing_environment(
+                config, project_graph_runtime, allow_check_result_cache, adaptive_state,
+            );
+        let _cluster_read_guard = PolicyClusterTelemetry::begin_read_model();
+        let mut dispatch_history = DispatchHistoryStore::open(config.run_journal_dir.as_path());
+        let mut feature_cache =
+            DispatchFeatureCache::open(config.run_journal_dir.as_path(), record_dispatch_history);
+        let scheduled_batches = Self::build_file_batches(
+            files,
+            effective_jobs,
+            DispatchMode::InProcess,
+            &parser_manager,
+            &dispatch_history,
+            &mut feature_cache,
+        );
+        if let Err(err) = feature_cache.persist() {
+            warn!(error = %err, "failed to persist dispatch feature cache");
+        }
+        let total_files = scheduled_batches
+            .iter()
+            .map(|batch| batch.paths.len())
+            .sum::<usize>();
+        let batch_meta: Vec<(u64, usize)> = scheduled_batches
+            .iter()
+            .map(|b| (b.estimated_cost, b.paths.len()))
+            .collect();
+        let flat_tasks: Vec<_> = scheduled_batches
+            .into_iter()
+            .enumerate()
+            .flat_map(|(batch_index, batch)| {
+                batch.paths.into_iter().map(move |path| (batch_index, path))
+            })
+            .collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(effective_jobs.max(1))
+            .build()
+            .expect("failed to build rayon thread pool");
+
+        let pass_started = Instant::now();
+        let processor = Arc::new(processor);
+        let file_outcomes: Vec<_> = {
+            let processor = processor.clone();
+            pool.install(|| {
+                flat_tasks
+                    .into_par_iter()
+                    .map(|(batch_index, path)| (batch_index, processor.process(path)))
+                    .collect()
+            })
+        };
+        let pass_elapsed_ns = pass_started
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+
+        Self::aggregate_pass_results(
+            config, &engine, &check_result_cache, file_outcomes,
+            &batch_meta, total_files, pass_elapsed_ns,
+            record_dispatch_history, &mut dispatch_history,
+        )
     }
 
     pub(crate) fn run_multiprocess_pass(
@@ -583,15 +619,18 @@ impl App {
                         temp_root.join(format!("worker_slot_{worker_slot}.adaptive_state.json"));
                     let retry_optimizer_state_path = temp_root
                         .join(format!("worker_slot_{worker_slot}.retry_optimizer_state.json"));
+                    let spawn_cfg = WorkerSpawnConfig {
+                        adaptive_state_path: adaptive_state_path.as_path(),
+                        retry_optimizer_state_path: retry_optimizer_state_path.as_path(),
+                        population_measurements_path: pop_path,
+                        worker_jobs,
+                        worker_slot,
+                    };
                     let mut worker = Self::spawn_worker(
                         current_exe,
                         args,
                         config,
-                        worker_jobs,
-                        worker_slot,
-                        adaptive_state_path.as_path(),
-                        retry_optimizer_state_path.as_path(),
-                        pop_path,
+                        &spawn_cfg,
                     )?;
                     loop {
                         let batch_index = next_batch.fetch_add(1, Ordering::Relaxed);
@@ -636,11 +675,7 @@ impl App {
                                     current_exe,
                                     args,
                                     config,
-                                    worker_jobs,
-                                    worker_slot,
-                                    adaptive_state_path.as_path(),
-                                    retry_optimizer_state_path.as_path(),
-                                    pop_path,
+                                    &spawn_cfg,
                                 )?;
                                 continue;
                             }
@@ -711,11 +746,7 @@ impl App {
                                         current_exe,
                                         args,
                                         config,
-                                        worker_jobs,
-                                        worker_slot,
-                                        adaptive_state_path.as_path(),
-                                        retry_optimizer_state_path.as_path(),
-                                        pop_path,
+                                        &spawn_cfg,
                                     )?;
                                     continue;
                                 }
@@ -824,19 +855,14 @@ impl App {
         Self::validate_and_order_multiprocess_results(merged, expected_input_files.as_slice())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn spawn_worker(
         current_exe: &Path,
         args: &CliArgs,
         config: &AppConfig,
-        worker_jobs: usize,
-        worker_slot: usize,
-        adaptive_state_path: &Path,
-        retry_optimizer_state_path: &Path,
-        population_measurements_path: Option<&Path>,
+        spawn_cfg: &WorkerSpawnConfig<'_>,
     ) -> Result<PersistentWorkerProcess> {
         let mut command = Command::new(current_exe);
-        Self::append_base_args(&mut command, args, config, worker_jobs);
+        Self::append_base_args(&mut command, args, config, spawn_cfg.worker_jobs);
         let stderr = if config.verbose {
             Stdio::inherit()
         } else {
@@ -848,13 +874,13 @@ impl App {
             .stderr(stderr)
             .env(
                 ADAPTIVE_CONFIDENCE_STATE_PATH_ENV,
-                adaptive_state_path.as_os_str(),
+                spawn_cfg.adaptive_state_path.as_os_str(),
             )
             .env(
                 RETRY_STRATEGY_OPTIMIZER_STATE_PATH_ENV,
-                retry_optimizer_state_path.as_os_str(),
+                spawn_cfg.retry_optimizer_state_path.as_os_str(),
             );
-        if let Some(pop_path) = population_measurements_path {
+        if let Some(pop_path) = spawn_cfg.population_measurements_path {
             command.env("FMT_POPULATION_PATH", pop_path.as_os_str());
         }
         if config.observation_only {
@@ -868,7 +894,7 @@ impl App {
         let mut child = command.spawn().with_context(|| {
             format!(
                 "failed spawning persistent worker process {}",
-                worker_slot + 1
+                spawn_cfg.worker_slot + 1
             )
         })?;
         let stdin = io::BufWriter::with_capacity(
@@ -876,12 +902,12 @@ impl App {
             child
                 .stdin
                 .take()
-                .ok_or_else(|| anyhow!("persistent worker {} missing stdin", worker_slot + 1))?,
+                .ok_or_else(|| anyhow!("persistent worker {} missing stdin", spawn_cfg.worker_slot + 1))?,
         );
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow!("persistent worker {} missing stdout", worker_slot + 1))?;
+            .ok_or_else(|| anyhow!("persistent worker {} missing stdout", spawn_cfg.worker_slot + 1))?;
         let (response_tx, responses) = mpsc::channel();
         thread::spawn(move || {
             let mut stdout = io::BufReader::new(stdout);

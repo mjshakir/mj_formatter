@@ -91,6 +91,73 @@ impl ConfigLoader {
         let raw = toml::from_str::<RawConfig>(&content)
             .with_context(|| format!("failed to parse TOML {}", config_path.display()))?;
 
+        let (style_name, policy_settings, policy_order) =
+            self.load_policy_config(args, &raw, &project_root)?;
+        let (root, include_patterns, exclude_patterns, processes, jobs, check, verbose,
+             backup, backup_mode, backup_suffix, backup_dir, run_journal_dir, report_path,
+             cache_enabled, cache_path, cache_l1_size, tracker_path) =
+            Self::load_path_config(args, &raw)?;
+        let (clang_binary, clang_args, clang_compdb_path, clang_args_mode, cpp_standard,
+             semantic_require_compdb, semantic_no_inferred, worker_timeout_secs,
+             worker_kill_secs, worker_max_restarts, clang_format_binary,
+             conflict_enabled, conflict_touch_threshold) =
+            Self::load_clang_config(args, &raw, &root)?;
+        let (confidence, retry_strategy_optimizer, retry) =
+            Self::load_confidence_and_retry(&raw)?;
+        let (accuracy_gate, accuracy_benchmark, project_graph, convergence_learn_on_check) =
+            Self::load_project_graph_config(&raw)?;
+
+        Ok(AppConfig {
+            root,
+            include_patterns,
+            exclude_patterns,
+            jobs,
+            processes,
+            check,
+            verbose,
+            backup,
+            backup_mode,
+            backup_suffix,
+            backup_dir,
+            run_journal_dir,
+            report_path,
+            cache_enabled,
+            cache_path,
+            cache_l1_size,
+            tracker_path,
+            style_name,
+            policy_settings,
+            policy_order,
+            cpp_standard,
+            clang_binary,
+            clang_args,
+            clang_compdb_path,
+            clang_args_mode,
+            semantic_require_compdb,
+            semantic_no_inferred,
+            worker_timeout_secs,
+            worker_kill_secs,
+            worker_max_restarts,
+            clang_format_binary,
+            conflict_enabled,
+            conflict_touch_threshold,
+            confidence,
+            retry_strategy_optimizer,
+            retry,
+            accuracy_gate,
+            accuracy_benchmark,
+            project_graph,
+            convergence_learn_on_check,
+            observation_only: false,
+        })
+    }
+
+    fn load_policy_config(
+        &self,
+        args: &CliArgs,
+        raw: &RawConfig,
+        project_root: &Path,
+    ) -> Result<(String, FxHashMap<String, PolicyConfig>, Vec<String>)> {
         let style_name = args
             .style
             .clone()
@@ -129,6 +196,19 @@ impl ConfigLoader {
             }
         }
 
+        let policy_order = raw.policies.order.clone();
+        Ok((style_name, policy_settings, policy_order))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn load_path_config(
+        args: &CliArgs,
+        raw: &RawConfig,
+    ) -> Result<(
+        PathBuf, Vec<String>, Vec<String>, usize, usize, bool, bool,
+        bool, BackupMode, String, PathBuf, PathBuf, PathBuf,
+        bool, PathBuf, usize, PathBuf,
+    )> {
         let mut include_patterns = raw.formatter.include.clone();
         if !args.include.is_empty() {
             include_patterns.extend(args.include.iter().cloned());
@@ -162,11 +242,6 @@ impl ConfigLoader {
             }))
             .or_else(|| raw.formatter.jobs.filter(|&j| j != 0))
             .unwrap_or_else(|| {
-                // I/O-aware default: actual I/O blocking fraction ~60%.
-                // Optimal threads/core ≈ 1/(1-0.60) ≈ 2.5, use 4 for headroom.
-                // Total = cores * 4. Distributes as 4 threads/process when p=cores,
-                // and gives 16 threads for single-process mode on a 4-core machine.
-                // jobs=0 in config means "auto" — use this formula instead of available_parallelism.
                 let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
                 cores.saturating_mul(4)
             });
@@ -224,8 +299,22 @@ impl ConfigLoader {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("var/cache/context_tracker.bin"));
 
-        let policy_order = raw.policies.order.clone();
+        Ok((
+            root, include_patterns, exclude_patterns, processes, jobs, check, verbose,
+            backup, backup_mode, backup_suffix, backup_dir, run_journal_dir, report_path,
+            cache_enabled, cache_path, cache_l1_size, tracker_path,
+        ))
+    }
 
+    #[allow(clippy::type_complexity)]
+    fn load_clang_config(
+        args: &CliArgs,
+        raw: &RawConfig,
+        root: &Path,
+    ) -> Result<(
+        String, Vec<String>, Option<PathBuf>, ClangArgsMode, String,
+        bool, bool, u64, u64, usize, String, bool, usize,
+    )> {
         let clang_binary = raw
             .formatter
             .clang_binary
@@ -265,9 +354,9 @@ impl ConfigLoader {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .or_else(|| Self::discover_compdb_path(root.as_path()));
+            .or_else(|| Self::discover_compdb_path(root));
         let clang_compdb_path =
-            Self::resolve_compdb(root.as_path(), discovered_compdb_path)?;
+            Self::resolve_compdb(root, discovered_compdb_path)?;
         let cpp_standard = raw
             .formatter
             .cpp_standard
@@ -302,6 +391,17 @@ impl ConfigLoader {
         let conflict_enabled = raw.formatter.conflict_enabled.unwrap_or(true);
         let conflict_touch_threshold = raw.formatter.conflict_touch_threshold.unwrap_or(3).max(2);
 
+        Ok((
+            clang_binary, clang_args, clang_compdb_path, clang_args_mode, cpp_standard,
+            semantic_require_compdb, semantic_no_inferred, worker_timeout_secs,
+            worker_kill_secs, worker_max_restarts, clang_format_binary,
+            conflict_enabled, conflict_touch_threshold,
+        ))
+    }
+
+    fn load_confidence_and_retry(
+        raw: &RawConfig,
+    ) -> Result<(ConfidenceConfig, RetryOptimizerConfig, RetryConfig)> {
         let mut confidence = ConfidenceConfig::default();
         confidence.enabled = raw
             .formatter
@@ -489,6 +589,12 @@ impl ConfigLoader {
             .cache_size
             .unwrap_or(retry.retry_snapshot_cache_size);
 
+        Ok((confidence, retry_strategy_optimizer, retry))
+    }
+
+    fn load_project_graph_config(
+        raw: &RawConfig,
+    ) -> Result<(AccuracyGateConfig, AccuracyBenchmarkConfig, ProjectGraphConfig, bool)> {
         let accuracy_profile =
             AccuracyRolloutProfile::from_str(raw.formatter.accuracy.profile.as_deref());
         let profile_defaults = Self::accuracy_profile_defaults(accuracy_profile);
@@ -701,49 +807,7 @@ impl ConfigLoader {
             .max(1);
         let convergence_learn_on_check = raw.formatter.convergence_learn_on_check.unwrap_or(false);
 
-        Ok(AppConfig {
-            root,
-            include_patterns,
-            exclude_patterns,
-            jobs,
-            processes,
-            check,
-            verbose,
-            backup,
-            backup_mode,
-            backup_suffix,
-            backup_dir,
-            run_journal_dir,
-            report_path,
-            cache_enabled,
-            cache_path,
-            cache_l1_size,
-            tracker_path,
-            style_name,
-            policy_settings,
-            policy_order,
-            cpp_standard,
-            clang_binary,
-            clang_args,
-            clang_compdb_path,
-            clang_args_mode,
-            semantic_require_compdb,
-            semantic_no_inferred,
-            worker_timeout_secs,
-            worker_kill_secs,
-            worker_max_restarts,
-            clang_format_binary,
-            conflict_enabled,
-            conflict_touch_threshold,
-            confidence,
-            retry_strategy_optimizer,
-            retry,
-            accuracy_gate,
-            accuracy_benchmark,
-            project_graph,
-            convergence_learn_on_check,
-            observation_only: false,
-        })
+        Ok((accuracy_gate, accuracy_benchmark, project_graph, convergence_learn_on_check))
     }
 
     fn accuracy_profile_defaults(profile: AccuracyRolloutProfile) -> AccuracyProfileDefaults {
