@@ -93,7 +93,7 @@ impl App {
             max_edges: config.project_graph.max_edges.max(1),
             tombstone_enabled: config.project_graph.tombstone_enabled,
             tombstone_retention_ms: tombstone_retention_ms.max(1),
-            tombstone_decay_ms: tombstone_decay_ms.max(1),
+            _tombstone_decay_ms: tombstone_decay_ms.max(1),
             convergence_decay_enabled: config.project_graph.convergence_decay_enabled,
             convergence_decay_half_life_ms: convergence_decay_half_life_ms.max(1),
             convergence_decay_min_count: config.project_graph.convergence_decay_min_count.max(1),

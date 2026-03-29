@@ -112,6 +112,7 @@ impl Default for NodeMetrics {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ProjectSignal {
     pub reference_count: u64,
@@ -120,6 +121,7 @@ pub struct ProjectSignal {
     pub from_tombstone: bool,
 }
 
+#[cfg(test)]
 impl ProjectSignal {
     pub fn is_empty(self) -> bool {
         self.reference_count == 0 && self.file_count == 0 && self.consensus_score <= 0.0

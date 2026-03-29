@@ -1,31 +1,41 @@
+#[cfg(test)]
 use rustc_hash::FxHashSet;
 
 use crate::model::context_query::SemanticContextQuery;
+#[cfg(test)]
 use crate::parser::clang_types;
 use crate::parser::file_context::{
-    SemanticDeclaration, SemanticReference, SemanticScope, SourceLocation,
+    SemanticDeclaration, SemanticReference, SemanticScope,
 };
+#[cfg(test)]
+use crate::parser::file_context::SourceLocation;
 use crate::parser::semantic_region::SemanticRegion;
 use crate::graph::snapshot::ProjectGraphSnapshot;
+#[cfg(test)]
 use crate::graph::types::ProjectSignal;
+#[cfg(test)]
 use crate::graph::symbol_id::SymbolId;
 
+#[cfg(test)]
 pub trait SignalKey {
     fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId>;
 }
 
+#[cfg(test)]
 impl SignalKey for &str {
     fn symbol_ids(&self, _query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
         ProjectContextQuery::symbol_ids_for_stable_id(self)
     }
 }
 
+#[cfg(test)]
 impl SignalKey for &SemanticDeclaration {
     fn symbol_ids(&self, _query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
         ProjectContextQuery::symbol_ids_for_declaration(self)
     }
 }
 
+#[cfg(test)]
 impl SignalKey for SourceLocation {
     fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
         match query.symbol_at(self.line, self.column, &[]) {
@@ -35,6 +45,7 @@ impl SignalKey for SourceLocation {
     }
 }
 
+#[cfg(test)]
 impl SignalKey for (usize, usize) {
     fn symbol_ids(&self, query: &SemanticContextQuery<'_>) -> Vec<SymbolId> {
         SourceLocation::new(self.0, self.1).symbol_ids(query)
@@ -44,17 +55,23 @@ impl SignalKey for (usize, usize) {
 #[derive(Clone, Debug)]
 pub struct ProjectContextQuery<'a> {
     semantic_query: SemanticContextQuery<'a>,
+    #[cfg(test)]
     project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
+    #[cfg(not(test))]
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> ProjectContextQuery<'a> {
     pub fn new(
         semantic_query: SemanticContextQuery<'a>,
-        project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
+        _project_graph_snapshot: Option<&'a ProjectGraphSnapshot>,
     ) -> Self {
         Self {
             semantic_query,
-            project_graph_snapshot,
+            #[cfg(test)]
+            project_graph_snapshot: _project_graph_snapshot,
+            #[cfg(not(test))]
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -103,12 +120,14 @@ impl<'a> ProjectContextQuery<'a> {
         self.semantic_query.context_cluster_key(lines)
     }
 
+    #[cfg(test)]
     pub fn signal(&self, key: impl SignalKey) -> Option<ProjectSignal> {
         let snapshot = self.project_graph_snapshot?;
         let ids = key.symbol_ids(&self.semantic_query);
         Self::best_project_signal(snapshot, &ids)
     }
 
+    #[cfg(test)]
     fn best_project_signal(
         snapshot: &ProjectGraphSnapshot,
         symbol_ids: &[SymbolId],
@@ -125,6 +144,7 @@ impl<'a> ProjectContextQuery<'a> {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn symbol_ids_for_stable_id(stable_id: &str) -> Vec<SymbolId> {
         let trimmed = stable_id.trim();
         if let Some(usr) = trimmed.strip_prefix("usr:") {
@@ -136,6 +156,7 @@ impl<'a> ProjectContextQuery<'a> {
         Vec::new()
     }
 
+    #[cfg(test)]
     pub(crate) fn symbol_ids_for_declaration(declaration: &SemanticDeclaration) -> Vec<SymbolId> {
         let mut ids = Vec::<SymbolId>::new();
         if let Some(usr) = declaration
@@ -181,6 +202,7 @@ impl<'a> ProjectContextQuery<'a> {
         deduped
     }
 
+    #[cfg(test)]
     fn sanitize_component(raw: &str) -> String {
         raw.replace('|', "%7C")
     }
@@ -227,7 +249,7 @@ mod tests {
                 last_updated_unix_ms: 1,
             },
         );
-        let snapshot = ProjectGraphSnapshot::with_tombstone_decay(Arc::new(state), 0);
+        let snapshot = ProjectGraphSnapshot::new(Arc::new(state));
         let query = ProjectContextQuery::new(
             SemanticContextQuery::from_semantic(Some(&semantic)),
             Some(&snapshot),

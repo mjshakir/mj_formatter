@@ -9,6 +9,7 @@ use crate::graph::types::GraphEdgeKind;
 use crate::graph::types::GraphNode;
 use crate::graph::types::GraphNodeKind;
 use crate::graph::types::NodeMetrics;
+#[cfg(test)]
 use crate::graph::types::ProjectSignal;
 use crate::graph::symbol_id::SymbolId;
 use crate::graph::types::SymbolTombstone;
@@ -334,6 +335,7 @@ impl ProjectGraphState {
         snapshot
     }
 
+    #[cfg(test)]
     pub fn symbol_project_signal(
         &self,
         symbol_id: &SymbolId,

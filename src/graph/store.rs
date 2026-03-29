@@ -147,7 +147,7 @@ pub struct ProjectGraphStoreOptions {
     pub max_edges: usize,
     pub tombstone_enabled: bool,
     pub tombstone_retention_ms: u64,
-    pub tombstone_decay_ms: u64,
+    pub _tombstone_decay_ms: u64,
     pub convergence_decay_enabled: bool,
     pub convergence_decay_half_life_ms: u64,
     pub convergence_decay_min_count: u64,
@@ -162,7 +162,7 @@ impl Default for ProjectGraphStoreOptions {
             max_edges: 1_000_000,
             tombstone_enabled: true,
             tombstone_retention_ms: 90 * 24 * 60 * 60 * 1000,
-            tombstone_decay_ms: 30 * 24 * 60 * 60 * 1000,
+            _tombstone_decay_ms: 30 * 24 * 60 * 60 * 1000,
             convergence_decay_enabled: true,
             convergence_decay_half_life_ms: 30 * 24 * 60 * 60 * 1000,
             convergence_decay_min_count: 1,
@@ -207,10 +207,7 @@ impl ProjectGraphStore {
         }
 
         self.generation.store(generation, Ordering::Release);
-        Ok(ProjectGraphSnapshot::with_tombstone_decay(
-            Arc::new(state),
-            self.options.tombstone_decay_ms,
-        ))
+        Ok(ProjectGraphSnapshot::from_state(Arc::new(state)))
     }
 
     #[cfg(test)]
@@ -260,10 +257,7 @@ impl ProjectGraphStore {
             format!("failed writing project graph state {}", self.path.display())
         })?;
 
-        let snapshot = ProjectGraphSnapshot::with_tombstone_decay(
-            Arc::new(payload.state),
-            self.options.tombstone_decay_ms,
-        );
+        let snapshot = ProjectGraphSnapshot::from_state(Arc::new(payload.state));
         let stats = PersistStats {
             generation: next_generation,
             prune_enabled: self.options.prune_enabled,
@@ -466,7 +460,7 @@ mod tests {
                 max_edges: 1,
                 tombstone_enabled: true,
                 tombstone_retention_ms: u64::MAX,
-                tombstone_decay_ms: 10_000,
+                _tombstone_decay_ms: 10_000,
                 convergence_decay_enabled: true,
                 convergence_decay_half_life_ms: 10_000,
                 convergence_decay_min_count: 1,
@@ -564,7 +558,7 @@ mod tests {
                 max_edges: 1,
                 tombstone_enabled: false,
                 tombstone_retention_ms: u64::MAX,
-                tombstone_decay_ms: 10_000,
+                _tombstone_decay_ms: 10_000,
                 convergence_decay_enabled: true,
                 convergence_decay_half_life_ms: 1_000,
                 convergence_decay_min_count: 1,

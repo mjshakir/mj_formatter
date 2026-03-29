@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::graph::types::GraphEdgeKind;
@@ -12,6 +13,7 @@ use crate::graph::types::GraphNode;
 use crate::graph::types::GraphNodeKind;
 use crate::graph::types::NodeMetrics;
 use crate::graph::state::ProjectGraphState;
+#[cfg(test)]
 use crate::graph::types::ProjectSignal;
 use crate::graph::symbol_bucket::file_symbol_id;
 use crate::graph::symbol_id::SymbolId;
@@ -19,26 +21,16 @@ use crate::graph::symbol_id::SymbolId;
 #[derive(Clone, Debug)]
 pub struct ProjectGraphSnapshot {
     state: Arc<ProjectGraphState>,
-    tombstone_decay_ms: u64,
 }
 
 impl ProjectGraphSnapshot {
     #[cfg(test)]
     pub fn new(state: Arc<ProjectGraphState>) -> Self {
-        Self {
-            state,
-            tombstone_decay_ms: 0,
-        }
+        Self { state }
     }
 
-    pub fn with_tombstone_decay(
-        state: Arc<ProjectGraphState>,
-        tombstone_decay_ms: u64,
-    ) -> Self {
-        Self {
-            state,
-            tombstone_decay_ms,
-        }
+    pub fn from_state(state: Arc<ProjectGraphState>) -> Self {
+        Self { state }
     }
 
     #[cfg(test)]
@@ -55,9 +47,10 @@ impl ProjectGraphSnapshot {
         self.state.node(symbol_id)
     }
 
+    #[cfg(test)]
     pub fn project_signal(&self, symbol_id: &SymbolId) -> Option<ProjectSignal> {
         self.state
-            .symbol_project_signal(symbol_id, current_unix_ms(), self.tombstone_decay_ms)
+            .symbol_project_signal(symbol_id, current_unix_ms(), 0)
     }
 
     pub fn affected_file_paths(
@@ -285,6 +278,7 @@ impl ProjectGraphSnapshot {
     }
 }
 
+#[cfg(test)]
 fn current_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
