@@ -472,7 +472,7 @@ mod tests {
     use super::{ParserManager, SemanticCompdbContextKind};
     use crate::config::enums::ClangArgsMode;
     use crate::parser::clang_result::{
-        ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
+        ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
     };
     use crate::parser::file_context::SemanticDeclaration;
 
@@ -516,7 +516,7 @@ mod tests {
             vec![ClangDiagnosticEntry {
                 line: 10,
                 column: 4,
-                severity: ClangDiagnosticSeverity::Fatal,
+                severity: clang_sys::CXDiagnostic_Fatal as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             }],
@@ -562,14 +562,14 @@ mod tests {
                 ClangDiagnosticEntry {
                     line: 7,
                     column: 9,
-                    severity: ClangDiagnosticSeverity::Fatal,
+                    severity: clang_sys::CXDiagnostic_Fatal as u32,
                     warning_option: String::new(),
                     fix_its: Vec::new(),
                 },
                 ClangDiagnosticEntry {
                     line: 9,
                     column: 3,
-                    severity: ClangDiagnosticSeverity::Fatal,
+                    severity: clang_sys::CXDiagnostic_Fatal as u32,
                     warning_option: String::new(),
                     fix_its: Vec::new(),
                 },
@@ -617,7 +617,7 @@ mod tests {
             vec![ClangDiagnosticEntry {
                 line: 7,
                 column: 9,
-                severity: ClangDiagnosticSeverity::Fatal,
+                severity: clang_sys::CXDiagnostic_Fatal as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             }],

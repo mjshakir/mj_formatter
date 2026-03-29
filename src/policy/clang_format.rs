@@ -418,7 +418,7 @@ mod tests {
     use super::ClangFormatPolicy;
     use crate::model::policy_context::PolicyContext;
     use crate::parser::clang_result::{
-        ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
+        ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
     };
     use crate::parser::file_context::SemanticFileContext;
     use crate::policy::Policy;
@@ -471,7 +471,7 @@ mod tests {
             vec![ClangDiagnosticEntry {
                 line: 1,
                 column: 1,
-                severity: ClangDiagnosticSeverity::Fatal,
+                severity: clang_sys::CXDiagnostic_Fatal as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             }],

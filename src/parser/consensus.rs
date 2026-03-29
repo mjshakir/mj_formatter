@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
+    ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
 };
 use crate::parser::clang_types::ClangSymbolKey;
 use crate::parser::file_context::SemanticDeclaration;
@@ -49,8 +49,8 @@ impl ParserConsensusSelector {
         let mut symbol_exemplar: FxHashMap<(String, i32, usize, usize, Option<String>, Option<String>), SemanticDeclaration> = FxHashMap::default();
         let mut rename_votes: FxHashMap<(ClangSymbolKey, usize), usize> = FxHashMap::default();
         let mut ref_votes: FxHashMap<(ClangDeclKey, usize), usize> = FxHashMap::default();
-        let mut diag_votes: FxHashMap<(usize, usize, ClangDiagnosticSeverity), usize> = FxHashMap::default();
-        let mut diag_messages: FxHashMap<(usize, usize, ClangDiagnosticSeverity), String> = FxHashMap::default();
+        let mut diag_votes: FxHashMap<(usize, usize, u32), usize> = FxHashMap::default();
+        let mut diag_messages: FxHashMap<(usize, usize, u32), String> = FxHashMap::default();
 
         for parse in &parses {
             if Self::header_semantic_vote_eligible(parse) {
@@ -151,7 +151,7 @@ impl ParserConsensusSelector {
             left.line
                 .cmp(&right.line)
                 .then(left.column.cmp(&right.column))
-                .then_with(|| (left.severity as u8).cmp(&(right.severity as u8)))
+                .then_with(|| left.severity.cmp(&right.severity))
         });
         let mut diagnostics = Vec::<String>::with_capacity(diagnostic_entries.len());
         let mut diagnostic_summary = ClangDiagnosticSummary::default();
@@ -166,19 +166,19 @@ impl ParserConsensusSelector {
                 ));
             }
             match entry.severity {
-                ClangDiagnosticSeverity::Ignored => {
+                s if s == clang_sys::CXDiagnostic_Ignored as u32 => {
                     diagnostic_summary.ignored = diagnostic_summary.ignored.saturating_add(1)
                 }
-                ClangDiagnosticSeverity::Note => {
+                s if s == clang_sys::CXDiagnostic_Note as u32 => {
                     diagnostic_summary.note = diagnostic_summary.note.saturating_add(1)
                 }
-                ClangDiagnosticSeverity::Warning => {
+                s if s == clang_sys::CXDiagnostic_Warning as u32 => {
                     diagnostic_summary.warning = diagnostic_summary.warning.saturating_add(1)
                 }
-                ClangDiagnosticSeverity::Error => {
+                s if s == clang_sys::CXDiagnostic_Error as u32 => {
                     diagnostic_summary.error = diagnostic_summary.error.saturating_add(1)
                 }
-                ClangDiagnosticSeverity::Fatal => {
+                _ => {
                     diagnostic_summary.fatal = diagnostic_summary.fatal.saturating_add(1)
                 }
             }

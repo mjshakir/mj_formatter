@@ -18,21 +18,6 @@ pub struct ClangParseResult {
     reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub enum ClangDiagnosticSeverity {
-    Ignored,
-    Note,
-    Warning,
-    Error,
-    Fatal,
-}
-
-impl ClangDiagnosticSeverity {
-    pub fn is_error(self) -> bool {
-        matches!(self, Self::Error | Self::Fatal)
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ClangFixIt {
     pub replacement: String,
@@ -46,7 +31,7 @@ pub struct ClangFixIt {
 pub struct ClangDiagnosticEntry {
     pub line: usize,
     pub column: usize,
-    pub severity: ClangDiagnosticSeverity,
+    pub severity: u32,
     pub warning_option: String,
     pub fix_its: Vec<ClangFixIt>,
 }
@@ -175,7 +160,7 @@ impl ClangParseResult {
     pub fn error_diagnostic_lines(&self) -> BTreeSet<usize> {
         self.diagnostic_entries
             .iter()
-            .filter(|entry| entry.severity.is_error())
+            .filter(|entry| entry.severity == clang_sys::CXDiagnostic_Error as u32 || entry.severity == clang_sys::CXDiagnostic_Fatal as u32)
             .filter_map(|entry| (entry.line > 0).then_some(entry.line))
             .collect()
     }
