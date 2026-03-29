@@ -7,7 +7,7 @@ use crate::engine::semantic_contract::{
     SemanticContract, SemanticContractSnapshot,
 };
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary, ClangParseResult,
+    ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
 };
 use crate::parser::manager::{ParserManager, SemanticCompdbContextKind};
 use crate::parser::ts_traversal;
@@ -194,13 +194,13 @@ impl PostEditChecker {
         lines
     }
 
-    fn diagnostic_severity_bucket(severity: ClangDiagnosticSeverity) -> u8 {
+    fn diagnostic_severity_bucket(severity: u32) -> u8 {
         match severity {
-            ClangDiagnosticSeverity::Ignored => 0,
-            ClangDiagnosticSeverity::Note => 1,
-            ClangDiagnosticSeverity::Warning => 2,
-            ClangDiagnosticSeverity::Error => 3,
-            ClangDiagnosticSeverity::Fatal => 4,
+            s if s == clang_sys::CXDiagnostic_Ignored as u32 => 0,
+            s if s == clang_sys::CXDiagnostic_Note as u32 => 1,
+            s if s == clang_sys::CXDiagnostic_Warning as u32 => 2,
+            s if s == clang_sys::CXDiagnostic_Error as u32 => 3,
+            _ => 4,
         }
     }
 
@@ -429,14 +429,15 @@ impl CheckBaseline {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
+    use rustc_hash::FxHashMap;
     use std::path::PathBuf;
 
     use crate::engine::semantic_contract::{
         ScopeStructure, SemanticContract, SemanticContractSnapshot, SemanticScopeCounts,
         SymbolIdentity,
     };
-    use crate::parser::clang_result::{ClangDiagnosticEntry, ClangDiagnosticSeverity};
+    use crate::parser::clang_result::ClangDiagnosticEntry;
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticSummary;
 
@@ -496,9 +497,9 @@ mod tests {
             SemanticContract::new(),
         );
         let path = PathBuf::from("semantic_ref.cpp");
-        let mut reference_counts = BTreeMap::new();
+        let mut reference_counts = FxHashMap::default();
         reference_counts.insert("usr:c:@F@value#".to_string(), 12usize);
-        let mut reference_lines = BTreeMap::new();
+        let mut reference_lines = FxHashMap::default();
         reference_lines.insert("usr:c:@F@value#".to_string(), 1usize);
         let baseline = CheckBaseline {
             before_tree_error: Some(false),
@@ -573,9 +574,9 @@ mod tests {
             SemanticContract::new(),
         );
         let path = PathBuf::from("semantic_skip.cpp");
-        let mut reference_counts = BTreeMap::new();
+        let mut reference_counts = FxHashMap::default();
         reference_counts.insert("usr:c:@F@foo#".to_string(), 3usize);
-        let mut reference_lines = BTreeMap::new();
+        let mut reference_lines = FxHashMap::default();
         reference_lines.insert("usr:c:@F@foo#".to_string(), 1usize);
         let baseline = CheckBaseline {
             before_semantic_snapshot: Some(SemanticContractSnapshot {
@@ -681,7 +682,7 @@ mod tests {
         let before = vec![ClangDiagnosticEntry {
             line: 4,
             column: 1,
-            severity: ClangDiagnosticSeverity::Warning,
+            severity: clang_sys::CXDiagnostic_Warning as u32,
             warning_option: String::new(),
             fix_its: Vec::new(),
         }];
@@ -689,14 +690,14 @@ mod tests {
             ClangDiagnosticEntry {
                 line: 4,
                 column: 1,
-                severity: ClangDiagnosticSeverity::Warning,
+                severity: clang_sys::CXDiagnostic_Warning as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             },
             ClangDiagnosticEntry {
                 line: 8,
                 column: 1,
-                severity: ClangDiagnosticSeverity::Error,
+                severity: clang_sys::CXDiagnostic_Error as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             },

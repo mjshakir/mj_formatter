@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 
-use crate::parser::clang_result::ClangDiagnosticSeverity;
 use crate::parser::file_context::{
-    SemanticDeclaration, SemanticFileContext, SemanticReference, SemanticScope, SemanticScopeKind,
-    SourceLocation,
+    SemanticDeclaration, SemanticFileContext, SemanticReference, SemanticScope, SourceLocation,
+    is_function_scope, is_namespace_scope, is_preprocessor_scope, is_type_scope,
 };
 use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
 
@@ -57,14 +56,14 @@ impl<'a> SemanticContextQuery<'a> {
 
         if let Some(context) = semantic {
             for scope in &context.scopes {
-                if scope.kind == SemanticScopeKind::Preprocessor {
+                if is_preprocessor_scope(scope.node_kind_id) {
                     preprocessor_ranges.push((scope.start_line, scope.end_line));
                 }
             }
             preprocessor_ranges.sort_unstable_by(|left, right| left.0.cmp(&right.0));
             for entry in &context.diagnostic_entries {
-                if entry.severity == ClangDiagnosticSeverity::Error
-                    || entry.severity == ClangDiagnosticSeverity::Fatal
+                if entry.severity == clang_sys::CXDiagnostic_Error as u32
+                    || entry.severity == clang_sys::CXDiagnostic_Fatal as u32
                 {
                     diagnostic_error_lines.insert(entry.line);
                 }
@@ -233,7 +232,7 @@ impl<'a> SemanticContextQuery<'a> {
         if self.has_diag_error(location.line)
             && self
                 .scope_at(location.line, location.column)
-                .is_some_and(|scope| scope.kind == SemanticScopeKind::Preprocessor)
+                .is_some_and(|scope| is_preprocessor_scope(scope.node_kind_id))
         {
             return false;
         }
@@ -386,14 +385,12 @@ impl<'a> SemanticContextQuery<'a> {
         if !self.is_available() {
             return SemanticLineScope::Unknown;
         }
-        match self.scope_at(line, 1).map(|scope| scope.kind) {
-            Some(SemanticScopeKind::Preprocessor) => SemanticLineScope::Preprocessor,
-            Some(SemanticScopeKind::Function) => SemanticLineScope::Function,
-            Some(SemanticScopeKind::Type) => SemanticLineScope::Type,
-            Some(SemanticScopeKind::Namespace) => SemanticLineScope::Namespace,
-            Some(SemanticScopeKind::Template)
-            | Some(SemanticScopeKind::Attribute) => SemanticLineScope::Global,
-            None => SemanticLineScope::Global,
+        match self.scope_at(line, 1).map(|scope| scope.node_kind_id) {
+            Some(id) if is_preprocessor_scope(id) => SemanticLineScope::Preprocessor,
+            Some(id) if is_function_scope(id) => SemanticLineScope::Function,
+            Some(id) if is_type_scope(id) => SemanticLineScope::Type,
+            Some(id) if is_namespace_scope(id) => SemanticLineScope::Namespace,
+            _ => SemanticLineScope::Global,
         }
     }
 
@@ -415,11 +412,11 @@ mod tests {
     use crate::model::context_query::SemanticLineRole;
     use crate::model::context_query::SemanticLineScope;
     use crate::parser::clang_result::{
-        ClangDiagnosticEntry, ClangDiagnosticSeverity, ClangDiagnosticSummary,
+        ClangDiagnosticEntry, ClangDiagnosticSummary,
     };
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
-        SemanticScope, SemanticScopeKind,
+        SemanticScope,
     };
     use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
     #[test]
@@ -458,7 +455,6 @@ mod tests {
                 },
             ],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 0,
                 end_offset: 60,
@@ -488,14 +484,14 @@ mod tests {
                 ClangDiagnosticEntry {
                     line: 8,
                     column: 2,
-                    severity: ClangDiagnosticSeverity::Error,
+                    severity: clang_sys::CXDiagnostic_Error as u32,
                     warning_option: String::new(),
                     fix_its: Vec::new(),
                 },
                 ClangDiagnosticEntry {
                     line: 9,
                     column: 2,
-                    severity: ClangDiagnosticSeverity::Error,
+                    severity: clang_sys::CXDiagnostic_Error as u32,
                     warning_option: String::new(),
                     fix_its: Vec::new(),
                 },
@@ -513,7 +509,6 @@ mod tests {
                 ..Default::default()
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Preprocessor,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                 start_offset: 0,
                 end_offset: 20,
@@ -543,7 +538,7 @@ mod tests {
             diagnostic_entries: vec![ClangDiagnosticEntry {
                 line: 9,
                 column: 2,
-                severity: ClangDiagnosticSeverity::Error,
+                severity: clang_sys::CXDiagnostic_Error as u32,
                 warning_option: String::new(),
                 fix_its: Vec::new(),
             }],
@@ -570,7 +565,6 @@ mod tests {
             }],
             scopes: vec![
                 SemanticScope {
-                    kind: SemanticScopeKind::Preprocessor,
                     node_kind_id: crate::parser::ts_cpp_symbols::sym_preproc_if,
                     start_offset: 0,
                     end_offset: 8,
@@ -578,7 +572,6 @@ mod tests {
                     end_line: 1,
                 },
                 SemanticScope {
-                    kind: SemanticScopeKind::Function,
                     node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                     start_offset: 9,
                     end_offset: 80,
@@ -635,7 +628,6 @@ mod tests {
                 column: 3,
             }],
             scopes: vec![SemanticScope {
-                kind: SemanticScopeKind::Function,
                 node_kind_id: crate::parser::ts_cpp_symbols::sym_function_definition,
                 start_offset: 9,
                 end_offset: 80,

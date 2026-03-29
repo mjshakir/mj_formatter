@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tree_sitter::Tree;
 
 use crate::engine::semantic_contract::SemanticReadinessInput;
-use crate::parser::clang_result::{ClangDiagnosticSeverity, ClangParseResult};
+use crate::parser::clang_result::ClangParseResult;
 use crate::parser::file_context::SemanticFileContext;
 
 use super::{CheckBaseline, PostEditCheckResult, PostEditChecker, PostEditFailureKind};
@@ -115,12 +115,10 @@ pub(super) fn validate(
                         }
                         if delta_lines.is_empty() {
                             for entry in parse.diagnostic_entries() {
-                                if matches!(
-                                    entry.severity,
-                                    ClangDiagnosticSeverity::Warning
-                                        | ClangDiagnosticSeverity::Error
-                                        | ClangDiagnosticSeverity::Fatal
-                                ) && entry.line > 0
+                                if (entry.severity == clang_sys::CXDiagnostic_Warning as u32
+                                    || entry.severity == clang_sys::CXDiagnostic_Error as u32
+                                    || entry.severity == clang_sys::CXDiagnostic_Fatal as u32)
+                                    && entry.line > 0
                                 {
                                     delta_lines.insert(entry.line);
                                 }

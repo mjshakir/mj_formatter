@@ -7,7 +7,7 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::context_query::SemanticContextQuery;
 use crate::model::violation::Violation;
-use crate::parser::file_context::SemanticScopeKind;
+use crate::parser::file_context::is_preprocessor_scope;
 use crate::parser::query_cache::TsQueryCache;
 use crate::policy::Policy;
 use crate::parser::text_scan;
@@ -210,7 +210,7 @@ impl LogicalKeywordOperatorsPolicy {
                 if semantic_query.is_available()
                     && semantic_query
                         .scope_at(line, column)
-                        .is_some_and(|scope| scope.kind == SemanticScopeKind::Preprocessor)
+                        .is_some_and(|scope| is_preprocessor_scope(scope.node_kind_id))
                 {
                     *skipped = skipped.saturating_add(1);
                     return;

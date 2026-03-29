@@ -2,7 +2,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::parser::file_context::SemanticScopeKind;
+use crate::parser::file_context::{
+    is_function_scope, is_namespace_scope, is_preprocessor_scope,
+    is_template_scope, is_type_scope,
+};
 
 pub const NUM_POLICIES: usize = 16;
 pub const NUM_FILE_KINDS: usize = 3;
@@ -34,28 +37,13 @@ impl FileContextKind {
 
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum BlockContextKind {
-    Namespace = 0,
-    Type = 1,
-    Function = 2,
-    Preprocessor = 3,
-    Global = 4,
-    Template = 5,
-}
-
-impl From<SemanticScopeKind> for BlockContextKind {
-    fn from(kind: SemanticScopeKind) -> Self {
-        match kind {
-            SemanticScopeKind::Namespace => Self::Namespace,
-            SemanticScopeKind::Type => Self::Type,
-            SemanticScopeKind::Function => Self::Function,
-            SemanticScopeKind::Preprocessor => Self::Preprocessor,
-            SemanticScopeKind::Template => Self::Template,
-            SemanticScopeKind::Attribute => Self::Global,
-        }
-    }
+pub fn block_context_index(node_kind_id: u16) -> usize {
+    if is_namespace_scope(node_kind_id) { 0 }
+    else if is_type_scope(node_kind_id) { 1 }
+    else if is_function_scope(node_kind_id) { 2 }
+    else if is_preprocessor_scope(node_kind_id) { 3 }
+    else if is_template_scope(node_kind_id) { 5 }
+    else { 4 }
 }
 
 pub fn policy_index(policy_name: &str) -> Option<u8> {
@@ -102,7 +90,7 @@ impl Default for PolicyContextTracker {
 #[cfg(test)]
 pub struct PolicyOutcomeRecord {
     pub policy_index: u8,
-    pub block_kind: BlockContextKind,
+    pub block_index: usize,
     pub success: bool,
 }
 
@@ -133,8 +121,8 @@ impl PolicyContextTracker {
     }
 
     #[cfg(test)]
-    fn block_idx(policy_idx: u8, block_kind: BlockContextKind) -> usize {
-        (policy_idx as usize) * NUM_BLOCK_KINDS + (block_kind as usize)
+    fn block_idx(policy_idx: u8, block_index: usize) -> usize {
+        (policy_idx as usize) * NUM_BLOCK_KINDS + block_index
     }
 
     #[cfg(test)]
@@ -153,11 +141,11 @@ impl PolicyContextTracker {
     pub fn observe_block(
         &mut self,
         policy_idx: u8,
-        block_kind: BlockContextKind,
+        block_index: usize,
         success: bool,
     ) {
         const EMA_ALPHA: f32 = 0.20;
-        let idx = Self::block_idx(policy_idx, block_kind);
+        let idx = Self::block_idx(policy_idx, block_index);
         if idx >= BLOCK_EMA_LEN {
             return;
         }
@@ -174,14 +162,14 @@ impl PolicyContextTracker {
     ) {
         for record in outcomes {
             self.observe_file(record.policy_index, file_kind, record.success);
-            self.observe_block(record.policy_index, record.block_kind, record.success);
+            self.observe_block(record.policy_index, record.block_index, record.success);
         }
     }
 
     #[cfg(test)]
-    fn context_modifier(&self, policy_idx: u8, file_kind: FileContextKind, block_kind: BlockContextKind) -> f64 {
+    fn context_modifier(&self, policy_idx: u8, file_kind: FileContextKind, block_index: usize) -> f64 {
         let file_mod = self.file_modifier(policy_idx, file_kind);
-        let block_mod = self.block_modifier(policy_idx, block_kind);
+        let block_mod = self.block_modifier(policy_idx, block_index);
         (file_mod * block_mod) as f64
     }
 
@@ -195,8 +183,8 @@ impl PolicyContextTracker {
     }
 
     #[cfg(test)]
-    fn block_modifier(&self, policy_idx: u8, block_kind: BlockContextKind) -> f32 {
-        let idx = Self::block_idx(policy_idx, block_kind);
+    fn block_modifier(&self, policy_idx: u8, block_index: usize) -> f32 {
+        let idx = Self::block_idx(policy_idx, block_index);
         if idx >= BLOCK_EMA_LEN || self.block_cnt[idx] < MIN_OBSERVATIONS {
             return 1.0;
         }
@@ -274,26 +262,26 @@ impl PolicyContextTracker {
 
     /// Batch-compute all 16 policy block modifiers for a given block_kind.
     /// Returns [f32; 24] (padded to 24 for NEON alignment; indices 16..23 = 1.0).
-    pub fn batch_block_modifiers(&self, block_kind: BlockContextKind) -> [f32; 24] {
+    pub fn batch_block_modifiers(&self, block_index: usize) -> [f32; 24] {
         let mut result = [1.0f32; 24];
         #[cfg(target_arch = "aarch64")]
         {
-            unsafe { self.batch_block_modifiers_neon(block_kind, &mut result) };
+            unsafe { self.batch_block_modifiers_neon(block_index, &mut result) };
         }
         #[cfg(target_arch = "x86_64")]
         {
-            unsafe { self.batch_block_modifiers_x86(block_kind, &mut result) };
+            unsafe { self.batch_block_modifiers_x86(block_index, &mut result) };
         }
         #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
-            self.batch_block_modifiers_scalar(block_kind, &mut result);
+            self.batch_block_modifiers_scalar(block_index, &mut result);
         }
         result
     }
 
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    fn batch_block_modifiers_scalar(&self, block_kind: BlockContextKind, out: &mut [f32; 24]) {
-        let bk = block_kind as usize;
+    fn batch_block_modifiers_scalar(&self, block_index: usize, out: &mut [f32; 24]) {
+        let bk = block_index;
         for p in 0..NUM_POLICIES {
             let idx = p * NUM_BLOCK_KINDS + bk;
             if self.block_cnt[idx] >= MIN_OBSERVATIONS {
@@ -304,10 +292,10 @@ impl PolicyContextTracker {
 
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
-    unsafe fn batch_block_modifiers_neon(&self, block_kind: BlockContextKind, out: &mut [f32; 24]) {
+    unsafe fn batch_block_modifiers_neon(&self, block_index: usize, out: &mut [f32; 24]) {
         use core::arch::aarch64::*;
 
-        let bk = block_kind as usize;
+        let bk = block_index;
         let min_obs = vdupq_n_u32(MIN_OBSERVATIONS);
         let one = vdupq_n_f32(1.0);
 
@@ -440,10 +428,10 @@ impl PolicyContextTracker {
     }
 
     #[inline(always)]
-    unsafe fn batch_block_modifiers_x86(&self, block_kind: BlockContextKind, out: &mut [f32; 24]) {
+    unsafe fn batch_block_modifiers_x86(&self, block_index: usize, out: &mut [f32; 24]) {
         use core::arch::x86_64::*;
 
-        let bk = block_kind as usize;
+        let bk = block_index;
         let one = _mm_set1_ps(1.0);
 
         let mut p = 0usize;
@@ -481,7 +469,7 @@ mod tests {
     #[test]
     fn neutral_no_observations() {
         let tracker = PolicyContextTracker::new();
-        let m = tracker.context_modifier(0, FileContextKind::Header, BlockContextKind::Global);
+        let m = tracker.context_modifier(0, FileContextKind::Header, 4);
         assert!((m - 1.0).abs() < 1e-6, "expected neutral modifier, got {}", m);
     }
 
@@ -490,9 +478,9 @@ mod tests {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..10 {
             tracker.observe_file(0, FileContextKind::Header, true);
-            tracker.observe_block(0, BlockContextKind::Namespace, true);
+            tracker.observe_block(0, 0, true);
         }
-        let m = tracker.context_modifier(0, FileContextKind::Header, BlockContextKind::Namespace);
+        let m = tracker.context_modifier(0, FileContextKind::Header, 0);
         assert!(m > 1.0, "expected boost after successes, got {}", m);
     }
 
@@ -501,9 +489,9 @@ mod tests {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..10 {
             tracker.observe_file(0, FileContextKind::Implementation, false);
-            tracker.observe_block(0, BlockContextKind::Function, false);
+            tracker.observe_block(0, 2, false);
         }
-        let m = tracker.context_modifier(0, FileContextKind::Implementation, BlockContextKind::Function);
+        let m = tracker.context_modifier(0, FileContextKind::Implementation, 2);
         assert!(m < 1.0, "expected penalty after failures, got {}", m);
     }
 
@@ -547,7 +535,7 @@ mod tests {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..5 {
             tracker.observe_file(3, FileContextKind::Paired, true);
-            tracker.observe_block(3, BlockContextKind::Type, true);
+            tracker.observe_block(3, 1, true);
         }
         let dir = std::env::temp_dir().join("mj_fmt_test_ctx_tracker");
         let path = dir.join("tracker.bin");
@@ -571,14 +559,14 @@ mod tests {
     fn observe_updates_both() {
         let mut tracker = PolicyContextTracker::new();
         let outcomes = vec![
-            PolicyOutcomeRecord { policy_index: 0, block_kind: BlockContextKind::Global, success: true },
-            PolicyOutcomeRecord { policy_index: 1, block_kind: BlockContextKind::Namespace, success: false },
+            PolicyOutcomeRecord { policy_index: 0, block_index: 4, success: true },
+            PolicyOutcomeRecord { policy_index: 1, block_index: 0, success: false },
         ];
         for _ in 0..5 {
             tracker.batch_observe_outcomes(FileContextKind::Header, &outcomes);
         }
-        let m0 = tracker.context_modifier(0, FileContextKind::Header, BlockContextKind::Global);
-        let m1 = tracker.context_modifier(1, FileContextKind::Header, BlockContextKind::Namespace);
+        let m0 = tracker.context_modifier(0, FileContextKind::Header, 4);
+        let m1 = tracker.context_modifier(1, FileContextKind::Header, 0);
         assert!(m0 > 1.0, "policy 0 should be boosted: {}", m0);
         assert!(m1 < 1.0, "policy 1 should be penalized: {}", m1);
     }
@@ -586,7 +574,7 @@ mod tests {
     #[test]
     fn block_modifiers_neutral() {
         let tracker = PolicyContextTracker::new();
-        let mods = tracker.batch_block_modifiers(BlockContextKind::Function);
+        let mods = tracker.batch_block_modifiers(2);
         for (p, &m) in mods.iter().enumerate().take(NUM_POLICIES) {
             assert!((m - 1.0).abs() < 1e-6, "policy {p} should be neutral");
         }
@@ -596,10 +584,10 @@ mod tests {
     fn block_modifiers_learning() {
         let mut tracker = PolicyContextTracker::new();
         for _ in 0..5 {
-            tracker.observe_block(2, BlockContextKind::Function, true);
-            tracker.observe_block(3, BlockContextKind::Function, false);
+            tracker.observe_block(2, 2, true);
+            tracker.observe_block(3, 2, false);
         }
-        let mods = tracker.batch_block_modifiers(BlockContextKind::Function);
+        let mods = tracker.batch_block_modifiers(2);
         assert!(mods[2] > 1.0, "policy 2 should be boosted: {}", mods[2]);
         assert!(mods[3] < 1.0, "policy 3 should be penalized: {}", mods[3]);
         assert!((mods[0] - 1.0).abs() < 1e-6, "policy 0 should be neutral");

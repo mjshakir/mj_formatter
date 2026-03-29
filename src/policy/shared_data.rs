@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::parser::file_context::{SemanticFileContext, SemanticScopeKind};
+use crate::parser::file_context::{SemanticFileContext, is_preprocessor_scope};
 use crate::policy::text_utils;
 
 #[derive(Debug)]
@@ -17,7 +17,7 @@ impl<'a> PolicySharedData<'a> {
         let mut macro_lines = vec![false; line_count];
         if let Some(ctx) = semantic {
             for scope in &ctx.scopes {
-                if scope.kind == SemanticScopeKind::Preprocessor {
+                if is_preprocessor_scope(scope.node_kind_id) {
                     let start = scope.start_line.saturating_sub(1);
                     let end = scope.end_line.min(line_count);
                     for line in &mut macro_lines[start..end] {
