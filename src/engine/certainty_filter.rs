@@ -7,19 +7,9 @@ pub const NUM_DIMS: usize = 5;
 
 // Dimension indices: 0=structural, 1=semantic, 2=coverage, 3=richness, 4=edit_success
 
-// Default Q — process noise (from old Stable model)
-const DEFAULT_Q_DIAG: [f64; NUM_DIMS] = [0.0001, 0.0001, 0.00005, 0.00005, 0.001];
-
-// Default R — measurement noise (from old Stable model)
 const DEFAULT_R_DIAG: [f64; NUM_DIMS] = [0.002, 0.002, 0.003, 0.005, 0.02];
-
-// Default estimates
 const DEFAULT_ESTIMATES: [f64; NUM_DIMS] = [0.85, 0.50, 0.50, 0.50, 0.85];
 
-// Default covariance diagonal
-const DEFAULT_COV_DIAG: [f64; NUM_DIMS] = [0.05, 0.10, 0.10, 0.10, 0.05];
-
-// Sage-Husa adaptive noise guard rails
 const Q_FLOOR: [f64; NUM_DIMS] = [1e-6, 1e-6, 1e-6, 1e-6, 1e-5];
 const Q_CEIL: [f64; NUM_DIMS] = [0.05, 0.05, 0.04, 0.04, 0.08];
 const R_FLOOR: [f64; NUM_DIMS] = DEFAULT_R_DIAG;
@@ -27,14 +17,27 @@ const R_CEIL: [f64; NUM_DIMS] = [0.10, 0.10, 0.08, 0.08, 0.15];
 const ADAPTATION_WINDOW: f64 = 20.0;
 const ADAPTATION_MIN_OBS: u32 = 3;
 
+const DEFAULT_COV: [[f64; NUM_DIMS]; NUM_DIMS] = mat5_diagonal(&[0.05, 0.10, 0.10, 0.10, 0.05]);
+const DEFAULT_Q: [[f64; NUM_DIMS]; NUM_DIMS] = mat5_diagonal(&[0.0001, 0.0001, 0.00005, 0.00005, 0.001]);
+const DEFAULT_R: [[f64; NUM_DIMS]; NUM_DIMS] = mat5_diagonal(&DEFAULT_R_DIAG);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CertaintyFilterState {
     pub estimates: [f64; NUM_DIMS],
     pub covariance: [[f64; NUM_DIMS]; NUM_DIMS],
     pub adaptive_q: [[f64; NUM_DIMS]; NUM_DIMS],
     pub adaptive_r: [[f64; NUM_DIMS]; NUM_DIMS],
-    pub adaptation_count: u32,
+    #[serde(default)]
+    _legacy_adaptation_count: u32,
     pub observation_count: u32,
+}
+
+struct KalmanResult {
+    estimates: [f64; NUM_DIMS],
+    covariance: [[f64; N]; N],
+    p_pred: [[f64; N]; N],
+    k: [[f64; N]; N],
+    innovation: [f64; NUM_DIMS],
 }
 
 // Full 5x5 Kalman update with Joseph form for numerical stability
@@ -44,12 +47,12 @@ fn kalman_update_full(
     measurement: [f64; NUM_DIMS],
     q: &[[f64; N]; N],
     r: &[[f64; N]; N],
-) -> ([f64; NUM_DIMS], [[f64; N]; N]) {
+) -> KalmanResult {
     // Predict: P_pred = P + Q (F=I)
     let p_pred = mat5_add(&prior_cov, q);
 
     // Innovation: z - H*x (H=I)
-    let innov = vec5_sub(&measurement, &prior_est);
+    let innovation = vec5_sub(&measurement, &prior_est);
 
     // Innovation covariance: S = P_pred + R
     let s = mat5_add(&p_pred, r);
@@ -59,24 +62,31 @@ fn kalman_update_full(
     let k = mat5_mul(&p_pred, &s_inv);
 
     // Update estimate: x = x + K * innov
-    let k_innov = mat5_matvec(&k, &innov);
-    let est_out = vec5_add_clamp(&prior_est, &k_innov);
+    let k_innov = mat5_matvec(&k, &innovation);
+    let estimates = vec5_add_clamp(&prior_est, &k_innov);
 
     // Joseph form: P = (I-K)*P_pred*(I-K)^T + K*R*K^T
-    let i_k = mat5_sub(&mat5_identity(), &k);
-    let i_k_t = mat5_transpose(&i_k);
+    let i_k = mat5_neg_add_identity(&k);
     let k_t = mat5_transpose(&k);
-    let cov_out = mat5_add(
+    let i_k_t = mat5_neg_add_identity(&k_t);
+    let covariance = mat5_add(
         &mat5_mul(&i_k, &mat5_mul(&p_pred, &i_k_t)),
         &mat5_mul(&k, &mat5_mul(r, &k_t)),
     );
 
-    (est_out, cov_out)
+    KalmanResult { estimates, covariance, p_pred, k, innovation }
 }
 
-fn clamp_diagonal(m: &mut [[f64; N]; N], floor: &[f64; NUM_DIMS], ceil: &[f64; NUM_DIMS]) {
+fn clamp_diagonal_with_maturity(
+    m: &mut [[f64; N]; N],
+    floor: &[f64; NUM_DIMS],
+    ceil: &[f64; NUM_DIMS],
+    maturity: f64,
+) {
     for d in 0..NUM_DIMS {
-        m[d][d] = m[d][d].clamp(floor[d], ceil[d]);
+        let f = floor[d] * (1.0 - 0.5 * maturity);
+        let c = ceil[d] * (1.0 + 2.0 * (1.0 - maturity));
+        m[d][d] = m[d][d].clamp(f, c);
     }
 }
 
@@ -84,10 +94,10 @@ impl CertaintyFilterState {
     pub fn new() -> Self {
         Self {
             estimates: DEFAULT_ESTIMATES,
-            covariance: mat5_diagonal(&DEFAULT_COV_DIAG),
-            adaptive_q: mat5_diagonal(&DEFAULT_Q_DIAG),
-            adaptive_r: mat5_diagonal(&DEFAULT_R_DIAG),
-            adaptation_count: 0,
+            covariance: DEFAULT_COV,
+            adaptive_q: DEFAULT_Q,
+            adaptive_r: DEFAULT_R,
+            _legacy_adaptation_count: 0,
             observation_count: 0,
         }
     }
@@ -101,9 +111,9 @@ impl CertaintyFilterState {
         Self {
             estimates: prior_estimates,
             covariance: mat5_diagonal(&prior_variances),
-            adaptive_q: mat5_diagonal(&DEFAULT_Q_DIAG),
-            adaptive_r: mat5_diagonal(&DEFAULT_R_DIAG),
-            adaptation_count: 0,
+            adaptive_q: DEFAULT_Q,
+            adaptive_r: DEFAULT_R,
+            _legacy_adaptation_count: 0,
             observation_count: prior_observation_count,
         }
     }
@@ -140,9 +150,9 @@ impl CertaintyFilterState {
         Self {
             estimates: merged_est,
             covariance: merged_cov,
-            adaptive_q: mat5_diagonal(&DEFAULT_Q_DIAG),
-            adaptive_r: mat5_diagonal(&DEFAULT_R_DIAG),
-            adaptation_count: 0,
+            adaptive_q: DEFAULT_Q,
+            adaptive_r: DEFAULT_R,
+            _legacy_adaptation_count: 0,
             observation_count: total_obs.min(u32::MAX as u64) as u32,
         }
     }
@@ -202,7 +212,7 @@ impl CertaintyFilterState {
     pub fn risk_penalty(&self, risk_tier_index: usize) -> f64 {
         let complement = 1.0 - self.estimates[4];
         match risk_tier_index {
-            2 => complement * 1.0,
+            2 => complement,
             1 => complement * 0.333_333_333_333_333_3,
             _ => 0.0,
         }
@@ -219,10 +229,6 @@ impl CertaintyFilterState {
 
     pub fn fuzzy_min_semantic(&self) -> usize {
         (self.variance(1) * 30.0).clamp(1.0, 8.0) as usize
-    }
-
-    pub fn fuzzy_min_other(&self) -> usize {
-        1
     }
 
     // ── Post-check derivations ───────────────────────────────────────
@@ -296,16 +302,6 @@ impl CertaintyFilterState {
         self.stddev(4) * 1.5625
     }
 
-    #[cfg(test)]
-    pub fn cluster_outcome_regressed(&self) -> f64 {
-        self.estimates[4] * 0.294_117_647_058_823_53
-    }
-
-    #[cfg(test)]
-    pub fn cluster_outcome_accepted(&self) -> f64 {
-        1.0
-    }
-
     // ── Pipeline derivations ─────────────────────────────────────────
 
     pub fn semantic_confidence_bp_base(&self) -> u16 {
@@ -313,7 +309,11 @@ impl CertaintyFilterState {
     }
 
     pub fn retry_batch(&self) -> usize {
-        if self.estimates[0] > 0.7 { usize::MAX } else { 512 }
+        let e0 = self.estimates[0];
+        let sd0 = self.stddev(0);
+        let k = 10.0 / (sd0 + 0.05);
+        let sigmoid = 1.0 / (1.0 + (-(k * (e0 - 0.7))).exp());
+        (512.0 + sigmoid * (131072.0 - 512.0)) as usize
     }
 
     pub fn observe(
@@ -322,13 +322,13 @@ impl CertaintyFilterState {
     ) {
         if self.observation_count == 0 {
             self.estimates = measurement;
-            self.covariance = mat5_diagonal(&DEFAULT_R_DIAG);
+            self.covariance = DEFAULT_R;
             self.observation_count = 1;
             return;
         }
 
-        // Single-model Kalman update
-        let (updated_est, updated_cov) = kalman_update_full(
+        // Single-model Kalman update — returns intermediates for Sage-Husa reuse
+        let result = kalman_update_full(
             self.estimates,
             self.covariance,
             measurement,
@@ -337,42 +337,28 @@ impl CertaintyFilterState {
         );
 
         // Sage-Husa adaptive Q/R update
-        self.adaptation_count += 1;
-        if self.adaptation_count >= ADAPTATION_MIN_OBS {
-            let alpha = 1.0 / (self.adaptation_count as f64).min(ADAPTATION_WINDOW);
-            let innov = vec5_sub(&measurement, &self.estimates);
-            let innov_outer = mat5_outer(&innov);
+        if self.observation_count >= ADAPTATION_MIN_OBS {
+            let alpha = 1.0 / (self.observation_count.saturating_sub(1) as f64).min(ADAPTATION_WINDOW);
+            let maturity = (self.observation_count as f64 / ADAPTATION_WINDOW).min(1.0);
+            let innov_outer = mat5_outer(&result.innovation);
 
             // Adaptive R: R_hat = (1-α)*R + α*(innov*innov^T - P_pred)
-            let p_pred = mat5_add(&self.covariance, &self.adaptive_q);
-            let r_update = mat5_sub(&innov_outer, &p_pred);
-            self.adaptive_r = mat5_add(
-                &mat5_scale(&self.adaptive_r, 1.0 - alpha),
-                &mat5_scale(&r_update, alpha),
-            );
-            clamp_diagonal(&mut self.adaptive_r, &R_FLOOR, &R_CEIL);
+            let r_update = mat5_sub(&innov_outer, &result.p_pred);
+            self.adaptive_r = mat5_lerp(&self.adaptive_r, &r_update, alpha);
+            clamp_diagonal_with_maturity(&mut self.adaptive_r, &R_FLOOR, &R_CEIL, maturity);
             enforce_spd(&mut self.adaptive_r);
 
             // Adaptive Q: Q_hat = (1-α)*Q + α*(K*innov*innov^T*K^T + P_upd - P_mixed)
-            let s = mat5_add(&p_pred, &self.adaptive_r);
-            let s_inv = mat5_inverse_spd(&s).unwrap_or_else(mat5_identity);
-            let k = mat5_mul(&p_pred, &s_inv);
-            let k_innov = mat5_matvec(&k, &innov);
-            let q_update = mat5_sub(
-                &mat5_add(&mat5_outer(&k_innov), &updated_cov),
-                &self.covariance,
-            );
-            self.adaptive_q = mat5_add(
-                &mat5_scale(&self.adaptive_q, 1.0 - alpha),
-                &mat5_scale(&q_update, alpha),
-            );
-            clamp_diagonal(&mut self.adaptive_q, &Q_FLOOR, &Q_CEIL);
+            let k_innov = mat5_matvec(&result.k, &result.innovation);
+            let q_update = mat5_add_sub(&mat5_outer(&k_innov), &result.covariance, &self.covariance);
+            self.adaptive_q = mat5_lerp(&self.adaptive_q, &q_update, alpha);
+            clamp_diagonal_with_maturity(&mut self.adaptive_q, &Q_FLOOR, &Q_CEIL, maturity);
             enforce_spd(&mut self.adaptive_q);
         }
 
         // Store updated state
-        self.estimates = updated_est;
-        self.covariance = updated_cov;
+        self.estimates = result.estimates;
+        self.covariance = result.covariance;
         self.observation_count = self.observation_count.saturating_add(1);
 
         // Clamp estimates to [0, 1]
@@ -566,10 +552,15 @@ mod tests {
         for _ in 0..30 {
             obs5(&mut state, 0.95, 0.80, 0.70, 0.50, 0.90);
         }
-        assert!(state.adaptation_count >= 29);
+        assert!(state.observation_count >= 30);
+        let maturity = (state.observation_count as f64 / ADAPTATION_WINDOW).min(1.0);
         for d in 0..NUM_DIMS {
-            assert!(state.adaptive_q[d][d] >= Q_FLOOR[d]);
-            assert!(state.adaptive_q[d][d] <= Q_CEIL[d]);
+            let floor = Q_FLOOR[d] * (1.0 - 0.5 * maturity);
+            let ceil = Q_CEIL[d] * (1.0 + 2.0 * (1.0 - maturity));
+            assert!(state.adaptive_q[d][d] >= floor,
+                "q[{d}]={} < floor={floor}", state.adaptive_q[d][d]);
+            assert!(state.adaptive_q[d][d] <= ceil,
+                "q[{d}]={} > ceil={ceil}", state.adaptive_q[d][d]);
         }
     }
 
@@ -682,7 +673,6 @@ mod tests {
         let state = CertaintyFilterState::new();
         // v[1]=0.10 → 0.10*30=3
         assert_eq!(state.fuzzy_min_semantic(), 3);
-        assert_eq!(state.fuzzy_min_other(), 1);
     }
 
     #[test]
@@ -740,18 +730,11 @@ mod tests {
     }
 
     #[test]
-    fn derivation_cluster_outcomes() {
-        let state = CertaintyFilterState::new();
-        assert!((state.cluster_outcome_regressed() - 0.25).abs() < 0.001, "regressed={}", state.cluster_outcome_regressed());
-        assert!((state.cluster_outcome_accepted() - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
     fn derivation_pipeline() {
         let state = CertaintyFilterState::new();
         // e[1]=0.50 → 0.50*400=200
         assert_eq!(state.semantic_confidence_bp_base(), 200);
-        // e[0]=0.85 > 0.7 → MAX
-        assert_eq!(state.retry_batch(), usize::MAX);
+        // e[0]=0.85 → sigmoid saturates high, batch >> 100k
+        assert!(state.retry_batch() > 100_000, "retry_batch={}", state.retry_batch());
     }
 }
