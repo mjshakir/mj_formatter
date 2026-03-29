@@ -214,7 +214,7 @@ impl Policy for CompactDeclarationsPolicy {
                     idx += 1;
                     continue;
                 }
-                let names: Vec<String> = group.iter().map(|item| item.name.clone()).collect();
+                let names: Vec<&str> = group.iter().map(|item| item.name.as_str()).collect();
                 after_lines.push(Cow::Owned(format!(
                     "{}{} {};",
                     group[0].indent,

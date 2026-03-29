@@ -188,17 +188,7 @@ impl std::fmt::Display for RetryStrategyName {
     }
 }
 
-impl PartialEq<&str> for RetryStrategyName {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl PartialEq<RetryStrategyName> for &str {
-    fn eq(&self, other: &RetryStrategyName) -> bool {
-        *self == other.as_str()
-    }
-}
+impl_str_partial_eq!(RetryStrategyName);
 
 #[cfg(test)]
 mod tests {

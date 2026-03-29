@@ -22,6 +22,29 @@ enum IncludeQuote {
     Double,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IncludeGroup {
+    Main = 0,
+    Standard = 1,
+    ThirdParty = 2,
+    Project = 3,
+    Local = 4,
+}
+
+impl IncludeGroup {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "main" => Some(Self::Main),
+            "standard" => Some(Self::Standard),
+            "third_party" => Some(Self::ThirdParty),
+            "project" => Some(Self::Project),
+            "local" => Some(Self::Local),
+            _ => None,
+        }
+    }
+
+}
+
 #[derive(Clone, Debug)]
 struct IncludeEntry {
     header: String,
@@ -223,24 +246,24 @@ impl IncludeOrderPolicy {
         entry: &IncludeEntry,
         is_header_file: bool,
         main_candidates: &FxHashSet<String>,
-    ) -> &'static str {
+    ) -> IncludeGroup {
         let header = entry.header.to_lowercase();
         if !is_header_file && main_candidates.contains(&header) {
-            return "main";
+            return IncludeGroup::Main;
         }
         match entry.quote {
             IncludeQuote::Angle => {
                 if self.is_standard_header(header.as_str()) {
-                    "standard"
+                    IncludeGroup::Standard
                 } else {
-                    "third_party"
+                    IncludeGroup::ThirdParty
                 }
             }
             IncludeQuote::Double => {
                 if self.is_project_header(header.as_str()) {
-                    "project"
+                    IncludeGroup::Project
                 } else {
-                    "local"
+                    IncludeGroup::Local
                 }
             }
         }
@@ -341,12 +364,7 @@ impl Policy for IncludeOrderPolicy {
         // Structural-safe policy: per-policy checkpoint validates tree-sitter after edits.
         // Only macro regions are skipped; diagnostic error lines are not a concern.
 
-        let mut groups: FxHashMap<&'static str, Vec<IncludeEntry>> = FxHashMap::default();
-        groups.insert("main", Vec::new());
-        groups.insert("standard", Vec::new());
-        groups.insert("third_party", Vec::new());
-        groups.insert("project", Vec::new());
-        groups.insert("local", Vec::new());
+        let mut groups: [Vec<IncludeEntry>; 5] = Default::default();
 
         let is_header = Self::is_header_file(context.path_str());
         let main_candidates = self.main_header_candidates(context.path_str());
@@ -355,18 +373,17 @@ impl Policy for IncludeOrderPolicy {
                 continue;
             };
             let group = self.classify_group(entry, is_header, &main_candidates);
-            if let Some(items) = groups.get_mut(group) {
-                items.push((*entry).clone());
-            }
+            groups[group as usize].push((*entry).clone());
         }
 
         let mut ordered_block: Vec<Cow<'_, str>> = Vec::new();
         let mut emitted_group = false;
         for group in self.order_for_path(context.path_str()) {
             let normalized = group.trim().to_lowercase();
-            let Some(items) = groups.get_mut(normalized.as_str()) else {
+            let Some(group_idx) = IncludeGroup::from_str(normalized.as_str()) else {
                 continue;
             };
+            let items = &mut groups[group_idx as usize];
             if items.is_empty() {
                 continue;
             }

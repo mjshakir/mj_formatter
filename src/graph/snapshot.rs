@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::graph::types::GraphEdgeKind;
 #[cfg(test)]
 use crate::graph::types::GraphNode;
-use crate::graph::types::GraphNodeKind;
+use crate::graph::types::GRAPH_NODE_KIND_FILE;
 use crate::graph::types::NodeMetrics;
 use crate::graph::state::ProjectGraphState;
 #[cfg(test)]
@@ -77,7 +77,7 @@ impl ProjectGraphSnapshot {
             }
         }
         for (symbol_id, node) in &self.state.nodes {
-            if node.kind != GraphNodeKind::File || node.file_path.is_empty() {
+            if node.kind != GRAPH_NODE_KIND_FILE || node.file_path.is_empty() {
                 continue;
             }
             let node_key = Self::path_key(Path::new(node.file_path.as_str()));
@@ -98,7 +98,7 @@ impl ProjectGraphSnapshot {
             let Some(from_node) = self.state.nodes.get(&edge.from) else {
                 continue;
             };
-            if from_node.kind != GraphNodeKind::File {
+            if from_node.kind != GRAPH_NODE_KIND_FILE {
                 continue;
             }
             let weight = edge.weight.max(1);
@@ -120,7 +120,6 @@ impl ProjectGraphSnapshot {
 
         let mut visited = changed_file_ids.clone();
         let mut frontier = changed_file_ids.into_iter().collect::<Vec<_>>();
-        frontier.sort();
         let mut file_scores: FxHashMap<SymbolId, f64> = FxHashMap::default();
         let mut file_hops: FxHashMap<SymbolId, usize> = FxHashMap::default();
         for file_id in &frontier {
@@ -190,7 +189,6 @@ impl ProjectGraphSnapshot {
                     frontier.push(candidate_file_id);
                 }
             }
-            frontier.sort();
         }
 
         let mut impacted_ranked = Vec::<(PathBuf, usize, f64, String)>::new();
@@ -198,7 +196,7 @@ impl ProjectGraphSnapshot {
             let Some(node) = self.state.nodes.get(&file_id) else {
                 continue;
             };
-            if node.kind != GraphNodeKind::File || node.file_path.is_empty() {
+            if node.kind != GRAPH_NODE_KIND_FILE || node.file_path.is_empty() {
                 continue;
             }
             let key = Self::path_key(Path::new(node.file_path.as_str()));
@@ -293,7 +291,7 @@ mod tests {
     use crate::graph::types::GraphEdge;
     use crate::graph::types::GraphEdgeKind;
     use crate::graph::types::GraphNode;
-    use crate::graph::types::GraphNodeKind;
+    use crate::graph::types::GRAPH_NODE_KIND_FILE;
     use crate::graph::types::NodeMetrics;
     use crate::graph::snapshot::ProjectGraphSnapshot;
     use crate::graph::state::ProjectGraphState;
@@ -315,7 +313,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             file_a_id.clone(),
             "a.hpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             file_a.to_string_lossy(),
             0,
             0,
@@ -323,7 +321,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             file_b_id.clone(),
             "b.cpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             file_b.to_string_lossy(),
             0,
             0,
@@ -331,7 +329,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             file_c_id.clone(),
             "c.cpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             file_c.to_string_lossy(),
             0,
             0,
@@ -369,7 +367,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             changed_id.clone(),
             "changed.hpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             changed.to_string_lossy(),
             0,
             0,
@@ -385,7 +383,7 @@ mod tests {
             state.upsert_node(GraphNode::new(
                 file_id.clone(),
                 path.to_string_lossy(),
-                GraphNodeKind::File,
+                GRAPH_NODE_KIND_FILE,
                 path.to_string_lossy(),
                 0,
                 0,
@@ -414,7 +412,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             changed_id.clone(),
             "changed.hpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             changed.to_string_lossy(),
             0,
             0,
@@ -422,7 +420,7 @@ mod tests {
         state.upsert_node(GraphNode::new(
             focused_id.clone(),
             "focused.cpp",
-            GraphNodeKind::File,
+            GRAPH_NODE_KIND_FILE,
             focused_neighbor.to_string_lossy(),
             0,
             0,
@@ -458,7 +456,7 @@ mod tests {
             state.upsert_node(GraphNode::new(
                 noisy_id.clone(),
                 noisy_path.to_string_lossy(),
-                GraphNodeKind::File,
+                GRAPH_NODE_KIND_FILE,
                 noisy_path.to_string_lossy(),
                 0,
                 0,

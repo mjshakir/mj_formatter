@@ -57,14 +57,4 @@ impl From<PolicyName> for String {
     }
 }
 
-impl PartialEq<&str> for PolicyName {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl PartialEq<PolicyName> for &str {
-    fn eq(&self, other: &PolicyName) -> bool {
-        *self == other.as_str()
-    }
-}
+impl_str_partial_eq!(PolicyName);

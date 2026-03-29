@@ -1,3 +1,18 @@
+macro_rules! impl_str_partial_eq {
+    ($type:ty) => {
+        impl PartialEq<&str> for $type {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+        impl PartialEq<$type> for &str {
+            fn eq(&self, other: &$type) -> bool {
+                *self == other.as_str()
+            }
+        }
+    };
+}
+
 pub mod edit;
 pub mod file_result;
 pub mod pass_result;

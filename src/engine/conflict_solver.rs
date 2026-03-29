@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::catalog::policy_catalog;
 use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
@@ -335,7 +335,7 @@ impl GlobalConflictSolver {
             suffix_upper_bound[idx] = suffix_upper_bound[idx + 1] + weights[idx];
         }
 
-        let mut index_by_node = BTreeMap::<usize, usize>::new();
+        let mut index_by_node = FxHashMap::<usize, usize>::default();
         for (position, node) in ordered.iter().enumerate() {
             index_by_node.insert(*node, position);
         }
@@ -472,7 +472,7 @@ impl GlobalConflictSolver {
                 .then_with(|| left_candidate.policy.cmp(&right_candidate.policy))
         });
         let mut selected = Vec::<usize>::new();
-        let mut blocked = BTreeSet::<usize>::new();
+        let mut blocked = FxHashSet::<usize>::default();
         for index in ordered {
             if blocked.contains(&index) {
                 continue;
