@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
@@ -36,7 +37,7 @@ impl PolicyCapabilities {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyConvergenceDefaults {
-    pub domain: String,
+    pub domain: Cow<'static, str>,
     pub priority: u16,
     pub impact_radius: usize,
     pub priority_weight_bp: u16,
@@ -101,19 +102,6 @@ pub struct PolicyCatalog {
     default_behavior: PolicyBehavior,
 }
 
-pub trait CatalogKey {
-    fn to_policy_id(&self) -> PolicyId;
-}
-impl CatalogKey for &str {
-    fn to_policy_id(&self) -> PolicyId { PolicyId::from_str_lossy(self) }
-}
-impl CatalogKey for &PolicyId {
-    fn to_policy_id(&self) -> PolicyId { (*self).clone() }
-}
-impl CatalogKey for PolicyId {
-    fn to_policy_id(&self) -> PolicyId { self.clone() }
-}
-
 impl PolicyCatalog {
     fn build() -> Self {
         let mut known: FxHashMap<PolicyId, PolicyCatalogEntry> = FxHashMap::default();
@@ -155,19 +143,21 @@ impl PolicyCatalog {
         }
     }
 
-    pub fn capabilities(&self, key: impl CatalogKey) -> PolicyCapabilities {
-        let id = key.to_policy_id();
+    pub fn capabilities(&self, id: &PolicyId) -> PolicyCapabilities {
         self.known
-            .get(&id)
+            .get(id)
             .map(|entry| entry.capabilities)
             .unwrap_or(self.default_capabilities)
     }
 
-    pub fn convergence(&self, key: impl CatalogKey) -> PolicyConvergenceDefaults {
-        let id = key.to_policy_id();
-        if let Some(entry) = self.known.get(&id) {
+    pub fn capabilities_by_name(&self, name: &str) -> PolicyCapabilities {
+        self.capabilities(&PolicyId::from_str_lossy(name))
+    }
+
+    pub fn convergence(&self, id: &PolicyId) -> PolicyConvergenceDefaults {
+        if let Some(entry) = self.known.get(id) {
             return PolicyConvergenceDefaults {
-                domain: entry.name.to_string(),
+                domain: Cow::Borrowed(entry.name),
                 priority: entry.convergence.priority,
                 impact_radius: entry.convergence.impact_radius,
                 priority_weight_bp: entry.convergence.priority_weight_bp,
@@ -175,7 +165,7 @@ impl PolicyCatalog {
             };
         }
         PolicyConvergenceDefaults {
-            domain: id.as_str().to_string(),
+            domain: Cow::Owned(id.as_str().to_string()),
             priority: self.default_convergence.priority,
             impact_radius: self.default_convergence.impact_radius,
             priority_weight_bp: self.default_convergence.priority_weight_bp,
@@ -183,20 +173,27 @@ impl PolicyCatalog {
         }
     }
 
-    pub fn behavior(&self, key: impl CatalogKey) -> PolicyBehavior {
-        let id = key.to_policy_id();
+    pub fn convergence_by_name(&self, name: &str) -> PolicyConvergenceDefaults {
+        self.convergence(&PolicyId::from_str_lossy(name))
+    }
+
+    pub fn behavior(&self, id: &PolicyId) -> PolicyBehavior {
         self.known
-            .get(&id)
+            .get(id)
             .map(|entry| entry.behavior)
             .unwrap_or(self.default_behavior)
     }
 
-    pub fn bypasses_line_conflict(&self, policy_name: &str) -> bool {
-        self.behavior(policy_name).bypasses_line_conflict
+    pub fn behavior_by_name(&self, name: &str) -> PolicyBehavior {
+        self.behavior(&PolicyId::from_str_lossy(name))
     }
 
-    pub fn is_semantic_rewrite(&self, key: impl CatalogKey) -> bool {
-        self.capabilities(key).semantic_rewrite
+    pub fn bypasses_line_conflict(&self, policy_name: &str) -> bool {
+        self.behavior_by_name(policy_name).bypasses_line_conflict
+    }
+
+    pub fn is_semantic_rewrite(&self, policy_name: &str) -> bool {
+        self.capabilities_by_name(policy_name).semantic_rewrite
     }
 
     fn entry_for_known_policy(policy_id: PolicyId) -> PolicyCatalogEntry {
@@ -390,13 +387,6 @@ pub fn policy_catalog() -> &'static PolicyCatalog {
     POLICY_CATALOG.get_or_init(PolicyCatalog::build)
 }
 
-pub struct PolicyCapabilityMatrix;
-
-impl PolicyCapabilityMatrix {
-    pub fn for_policy(policy_name: &str) -> PolicyCapabilities {
-        policy_catalog().capabilities(policy_name)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -444,32 +434,32 @@ mod tests {
         let catalog = policy_catalog();
         assert!(
             catalog
-                .behavior("clang_format")
+                .behavior_by_name("clang_format")
                 .needs_exact_compdb
         );
         assert_eq!(
             catalog
-                .behavior("naming_conventions")
+                .behavior_by_name("naming_conventions")
                 .execution_priority,
             10
         );
         assert_eq!(
-            catalog.behavior("clang_format").execution_priority,
+            catalog.behavior_by_name("clang_format").execution_priority,
             90
         );
         assert!(
             catalog
-                .behavior("clang_format")
+                .behavior_by_name("clang_format")
                 .keeps_nonlocal_batch
         );
         assert!(
             catalog
-                .behavior("clang_format")
+                .behavior_by_name("clang_format")
                 .advisory_on_retry
         );
         assert!(
             !catalog
-                .behavior("dash_comment_normalizer")
+                .behavior_by_name("dash_comment_normalizer")
                 .keeps_nonlocal_batch
         );
     }
@@ -477,11 +467,11 @@ mod tests {
     #[test]
     fn rewrite_flag_truth() {
         let catalog = policy_catalog();
-        let semantic = catalog.capabilities("naming_conventions");
+        let semantic = catalog.capabilities_by_name("naming_conventions");
         assert!(semantic.semantic_rewrite);
         assert_eq!(semantic.risk_tier, CandidateRiskTier::High);
 
-        let stable = catalog.capabilities("dash_comment_normalizer");
+        let stable = catalog.capabilities_by_name("dash_comment_normalizer");
         assert!(!stable.semantic_rewrite);
         assert_eq!(stable.risk_tier, CandidateRiskTier::Low);
     }
@@ -489,16 +479,16 @@ mod tests {
     #[test]
     fn defaults_stable_anchors() {
         let catalog = policy_catalog();
-        let clang = catalog.convergence("clang_format");
+        let clang = catalog.convergence_by_name("clang_format");
         assert_eq!(clang.priority, 1_000);
         assert_eq!(clang.impact_radius, 2);
         assert_eq!(clang.risk_tier, ConvergenceRiskTier::Stabilizer);
 
-        let naming = catalog.convergence("naming_conventions");
+        let naming = catalog.convergence_by_name("naming_conventions");
         assert_eq!(naming.priority_weight_bp, 420);
         assert_eq!(naming.risk_tier, ConvergenceRiskTier::Rewrite);
 
-        let unknown = catalog.convergence("custom_policy");
+        let unknown = catalog.convergence_by_name("custom_policy");
         assert_eq!(unknown.priority, 700);
         assert_eq!(unknown.risk_tier, ConvergenceRiskTier::Balanced);
     }

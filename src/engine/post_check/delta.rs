@@ -84,14 +84,13 @@ pub(super) fn validate(
         match clang_result {
             Ok(parse) => {
                 let after_count = PostEditChecker::clang_error_count(&parse);
-                let after_summary = parse.diagnostic_summary();
-                if let Some(before_summary) = baseline.before_clang_summary {
-                    let before_weight = PostEditChecker::diagnostic_weighted_score_impl(before_summary, adaptive);
-                    let after_weight = PostEditChecker::diagnostic_weighted_score_impl(after_summary, adaptive);
+                let after_counts = parse.diagnostic_counts();
+                if let Some(before_counts) = baseline.before_clang_summary {
+                    let before_weight = PostEditChecker::diagnostic_weighted_score_impl(before_counts, adaptive);
+                    let after_weight = PostEditChecker::diagnostic_weighted_score_impl(after_counts, adaptive);
                     let weighted_delta = after_weight.saturating_sub(before_weight);
-                    let severe_delta = after_summary
-                        .error_total()
-                        .saturating_sub(before_summary.error_total());
+                    let severe_delta = crate::parser::clang_result::diagnostic_error_total(&after_counts)
+                        .saturating_sub(crate::parser::clang_result::diagnostic_error_total(&before_counts));
                     clang_weighted_delta = weighted_delta;
                     clang_severe_delta = severe_delta;
                     if weighted_delta > 0 || severe_delta > 0 {
@@ -137,8 +136,8 @@ pub(super) fn validate(
                                 "post-edit check warning: tolerated non-local clang diagnostic delta under consensus semantic context (weight {} -> {}, summary {} -> {}, lines={})",
                                 before_weight,
                                 after_weight,
-                                PostEditChecker::diagnostic_summary_label(before_summary),
-                                PostEditChecker::diagnostic_summary_label(after_summary),
+                                PostEditChecker::diagnostic_summary_label(before_counts),
+                                PostEditChecker::diagnostic_summary_label(after_counts),
                                 PostEditChecker::line_hint(delta_lines.iter().copied(), 6)
                             ));
                         } else {
@@ -147,8 +146,8 @@ pub(super) fn validate(
                                 "post-edit check failed: clang diagnostic weight increased ({} -> {}, summary {} -> {})",
                                 before_weight,
                                 after_weight,
-                                PostEditChecker::diagnostic_summary_label(before_summary),
-                                PostEditChecker::diagnostic_summary_label(after_summary)
+                                PostEditChecker::diagnostic_summary_label(before_counts),
+                                PostEditChecker::diagnostic_summary_label(after_counts)
                             ));
                             culprit_lines.extend(delta_lines);
                         }

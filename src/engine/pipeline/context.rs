@@ -133,7 +133,7 @@ impl PolicyPipeline {
     pub(super) fn needs_exact_compdb(policy_name: &str) -> bool {
         use crate::engine::catalog::policy_catalog;
         policy_catalog()
-            .behavior(policy_name)
+            .behavior_by_name(policy_name)
             .needs_exact_compdb
     }
 }

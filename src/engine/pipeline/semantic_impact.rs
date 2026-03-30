@@ -17,7 +17,7 @@ use crate::model::context_query::SemanticContextQuery;
 use crate::model::violation::Violation;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::manager::SemanticCompdbContextKind;
-use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
+use crate::parser::semantic_region::{SemanticRegion, REGION_DIAGNOSTIC};
 use crate::policy::zone::PolicyZone;
 
 use super::{
@@ -119,10 +119,10 @@ impl PolicyPipeline {
             if !context.tree_has_error {
                 semantic_confidence_bp = semantic_confidence_bp.saturating_add(150);
             }
-            if context.diagnostic_summary.error_total() == 0 {
+            if crate::parser::clang_result::diagnostic_error_total(&context.diagnostic_counts) == 0 {
                 semantic_confidence_bp = semantic_confidence_bp.saturating_add(150);
             } else {
-                let penalty = context.diagnostic_summary.error_total().min(10) as u16 * 20;
+                let penalty = crate::parser::clang_result::diagnostic_error_total(&context.diagnostic_counts).min(10) as u16 * 20;
                 semantic_confidence_bp = semantic_confidence_bp.saturating_sub(penalty);
             }
             if summary.usr_backed_declaration_count > 0 {
@@ -428,7 +428,7 @@ impl PolicyPipeline {
     pub(super) fn semantic_error_lines(regions: &[SemanticRegion]) -> BTreeSet<usize> {
         let mut error_lines = BTreeSet::new();
         for region in regions {
-            if region.has_diagnostic_error && region.kind == SemanticRegionKind::Diagnostic {
+            if region.has_diagnostic_error && region.kind_id == REGION_DIAGNOSTIC {
                 for line in region.start_line..=region.end_line {
                     error_lines.insert(line);
                 }

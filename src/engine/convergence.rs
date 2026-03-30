@@ -223,25 +223,25 @@ impl ConvergenceController {
 
     pub fn default_priority_for(policy_name: &str) -> u16 {
         policy_catalog()
-            .convergence(policy_name)
+            .convergence_by_name(policy_name)
             .priority
     }
 
     pub fn default_risk_tier_for(policy_name: &str) -> ConvergenceRiskTier {
         policy_catalog()
-            .convergence(policy_name)
+            .convergence_by_name(policy_name)
             .risk_tier
     }
 
     pub fn default_impact_radius_for(policy_name: &str) -> usize {
         policy_catalog()
-            .convergence(policy_name)
+            .convergence_by_name(policy_name)
             .impact_radius
     }
 
     pub fn default_priority_weight_bp_for(policy_name: &str) -> u16 {
         policy_catalog()
-            .convergence(policy_name)
+            .convergence_by_name(policy_name)
             .priority_weight_bp
     }
 
@@ -258,9 +258,9 @@ impl ConvergenceController {
             .get(policy_name)
             .cloned()
             .unwrap_or_else(|| {
-                let defaults = policy_catalog().convergence(policy_name);
+                let defaults = policy_catalog().convergence_by_name(policy_name);
                 ConvergencePolicyProfile::with_risk_tier(
-                    defaults.domain,
+                    defaults.domain.into_owned(),
                     defaults.priority,
                     defaults.impact_radius,
                     defaults.priority_weight_bp,

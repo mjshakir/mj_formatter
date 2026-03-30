@@ -12,7 +12,6 @@ use crate::engine::semantic_contract::{SemanticContract, SemanticInvariantClause
 use crate::model::policy_result::PolicyResult;
 use crate::model::project_query::ProjectContextQuery;
 use crate::parser::file_context::is_preprocessor_scope;
-use crate::parser::semantic_region::SemanticRegionKind;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuardianAssessment {
@@ -161,13 +160,13 @@ impl ProposerController {
         if project_query
             .regions_for_line(line)
             .iter()
-            .any(|region| region.kind == SemanticRegionKind::Preprocessor)
+            .any(|region| is_preprocessor_scope(region.kind_id))
         {
             return PolicyZone::Preprocessor;
         }
         if project_query
             .region_at(line, 1)
-            .is_some_and(|region| region.kind == SemanticRegionKind::Preprocessor)
+            .is_some_and(|region| is_preprocessor_scope(region.kind_id))
         {
             return PolicyZone::Preprocessor;
         }
@@ -215,7 +214,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::engine::convergence::ConvergencePolicySignal;
-    use crate::engine::catalog::PolicyCapabilityMatrix;
+    use crate::engine::catalog::policy_catalog;
     use crate::engine::proposer::ProposerController;
     use crate::model::edit::Edit;
     use crate::model::policy_result::PolicyResult;
@@ -250,7 +249,7 @@ mod tests {
             warnings: Vec::new(),
             changed: true,
         };
-        let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
+        let capability = policy_catalog().capabilities_by_name("compact_declarations");
         let adaptive = crate::engine::certainty_filter::CertaintyFilterState::new();
         let candidates = ProposerController::new().propose(
             "compact_declarations",

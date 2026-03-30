@@ -25,7 +25,7 @@ use crate::engine::convergence::ConvergencePolicyProfile;
 use crate::engine::convergence::ConvergencePolicySignal;
 use crate::engine::conflict_solver::GlobalConflictSolver;
 use crate::engine::catalog::PolicyCapabilities;
-use crate::engine::catalog::PolicyCapabilityMatrix;
+use crate::engine::catalog::policy_catalog;
 use crate::engine::conflict_detector::PolicyConflictDetector;
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
 use crate::engine::edit_candidate::PolicyEditCandidate;
@@ -49,7 +49,6 @@ use crate::parser::query_cache::TsQueryCache;
 use crate::parser::manager::SemanticCompdbContextKind;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::file_context::SemanticSummary;
-use crate::engine::catalog::policy_catalog;
 use crate::policy::Policy;
 use crate::runtime::adaptive_telemetry::AdaptiveTelemetry;
 use crate::runtime::cluster_telemetry::PolicyClusterTelemetry;
@@ -738,7 +737,7 @@ impl PolicyPipeline {
         policy_name: &str,
         _policy_started: Instant,
     ) -> Option<PreparedPolicyStage> {
-        let capability = PolicyCapabilityMatrix::for_policy(policy_name);
+        let capability = policy_catalog().capabilities_by_name(policy_name);
         let guidance_mode = self
             .policy_settings
             .get(policy_name)
@@ -1082,7 +1081,7 @@ impl PolicyPipeline {
                     solve_result.dropped_lines.len()
                 ));
             } else if policy_catalog()
-                .behavior(policy_name)
+                .behavior_by_name(policy_name)
                 .keeps_nonlocal_batch
                 && Self::has_nonlocal_change(
                     &state.current,
@@ -1324,7 +1323,7 @@ mod tests {
     use crate::engine::certainty_filter::CertaintyFilterState;
     use crate::engine::conflict_solver::GlobalConflictSolver;
     use crate::engine::catalog::{
-        PolicyCapabilities, PolicyCapabilityMatrix,
+        PolicyCapabilities, policy_catalog,
     };
     use crate::engine::edit_candidate::{CandidateRiskTier, PolicyEditCandidate};
     use crate::engine::pipeline::PolicyPipeline;
@@ -1336,7 +1335,7 @@ mod tests {
     use crate::model::context_query::SemanticContextQuery;
     use crate::model::violation::Violation;
     use crate::parser::clang_result::ClangDiagnosticEntry;
-    use crate::parser::clang_result::ClangDiagnosticSummary;
+
     use crate::parser::manager::SemanticCompdbContextKind;
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
@@ -1376,7 +1375,7 @@ mod tests {
             warnings: Vec::new(),
             changed: true,
         };
-        let capability = PolicyCapabilityMatrix::for_policy("sample");
+        let capability = policy_catalog().capabilities_by_name("sample");
 
         let adjusted = PolicyPipeline::apply_semantic_mode(
             before,
@@ -1437,7 +1436,7 @@ mod tests {
             warnings: Vec::new(),
             changed: true,
         };
-        let capability = PolicyCapabilityMatrix::for_policy("sample");
+        let capability = policy_catalog().capabilities_by_name("sample");
 
         let adjusted = PolicyPipeline::apply_semantic_mode(
             before,
@@ -1485,7 +1484,7 @@ mod tests {
             warnings: Vec::new(),
             changed: true,
         };
-        let capability = PolicyCapabilityMatrix::for_policy("include_order");
+        let capability = policy_catalog().capabilities_by_name("include_order");
 
         let adjusted = PolicyPipeline::apply_semantic_mode(
             before,
@@ -1542,7 +1541,7 @@ mod tests {
                     semantic_rewrite: false,
                     structural_safe: true,
                     whitespace_safe: false,
-                    ..PolicyCapabilityMatrix::for_policy("sample")
+                    ..policy_catalog().capabilities_by_name("sample")
                 },
             },
         );
@@ -1590,7 +1589,7 @@ mod tests {
                     semantic_rewrite: true,
                     structural_safe: false,
                     whitespace_safe: false,
-                    ..PolicyCapabilityMatrix::for_policy("naming_conventions")
+                    ..policy_catalog().capabilities_by_name("naming_conventions")
                 },
             },
         );
@@ -1632,7 +1631,7 @@ mod tests {
                     semantic_rewrite: false,
                     structural_safe: true,
                     whitespace_safe: false,
-                    ..PolicyCapabilityMatrix::for_policy("class_layout")
+                    ..policy_catalog().capabilities_by_name("class_layout")
                 },
             },
         );
@@ -1707,7 +1706,7 @@ mod tests {
         let semantic = SemanticFileContext {
             clang_success: true,
             tree_has_error: false,
-            diagnostic_summary: ClangDiagnosticSummary::default(),
+            diagnostic_counts: [0; 5],
             declarations: vec![],
             references: (0..2_100)
                 .map(|offset| SemanticReference {
@@ -1723,7 +1722,7 @@ mod tests {
             ..SemanticFileContext::default()
         };
         let summary = semantic.summary();
-        let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
+        let capability = policy_catalog().capabilities_by_name("compact_declarations");
         let signal = PolicyPipeline::build_convergence_signal(ConvergenceSignalInput {
             result: &result,
             semantic: Some(&semantic),
@@ -1790,10 +1789,10 @@ mod tests {
                 start_line: 8,
                 end_line: 20,
             }],
-            diagnostic_summary: ClangDiagnosticSummary::default(),
+            diagnostic_counts: [0; 5],
             ..SemanticFileContext::default()
         };
-        let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
+        let capability = policy_catalog().capabilities_by_name("compact_declarations");
         let signal = PolicyPipeline::build_convergence_signal(ConvergenceSignalInput {
             result: &result,
             semantic: Some(&semantic),
@@ -1848,10 +1847,10 @@ mod tests {
         let semantic = SemanticFileContext {
             clang_success: true,
             tree_has_error: false,
-            diagnostic_summary: ClangDiagnosticSummary::default(),
+            diagnostic_counts: [0; 5],
             ..SemanticFileContext::default()
         };
-        let capability = PolicyCapabilityMatrix::for_policy("compact_declarations");
+        let capability = policy_catalog().capabilities_by_name("compact_declarations");
         let base = PolicyPipeline::build_convergence_signal(ConvergenceSignalInput {
             result: &result,
             semantic: Some(&semantic),

@@ -7,7 +7,7 @@ use crate::engine::semantic_contract::{
     SemanticContract, SemanticContractSnapshot,
 };
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
+    ClangDiagnosticEntry, ClangParseResult, DiagnosticCounts,
 };
 use crate::parser::manager::{ParserManager, SemanticCompdbContextKind};
 use crate::parser::ts_traversal;
@@ -43,7 +43,7 @@ pub struct CheckBaseline {
     before_tree_error_ratio: Option<f64>,
     before_clang_error_count: Option<usize>,
     before_clang_fatal_count: Option<usize>,
-    before_clang_summary: Option<ClangDiagnosticSummary>,
+    before_clang_summary: Option<DiagnosticCounts>,
     before_clang_diagnostic_entries: Option<Vec<ClangDiagnosticEntry>>,
     before_clang_error_lines: Option<BTreeSet<usize>>,
     before_semantic_snapshot: Option<SemanticContractSnapshot>,
@@ -131,7 +131,7 @@ impl PostEditChecker {
     }
 
     fn clang_fatal_count(parse: &ClangParseResult) -> usize {
-        parse.diagnostic_summary().fatal
+        parse.diagnostic_counts()[clang_sys::CXDiagnostic_Fatal as usize]
     }
 
     fn tree_error_ratio_and_lines(tree: &Tree) -> (f64, BTreeSet<usize>) {
@@ -140,22 +140,25 @@ impl PostEditChecker {
     }
 
     #[cfg(test)]
-    fn diagnostic_weighted_score(summary: ClangDiagnosticSummary, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> u32 {
+    fn diagnostic_weighted_score(summary: DiagnosticCounts, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> u32 {
         Self::diagnostic_weighted_score_impl(summary, adaptive)
     }
 
-    fn diagnostic_weighted_score_impl(summary: ClangDiagnosticSummary, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> u32 {
+    fn diagnostic_weighted_score_impl(counts: DiagnosticCounts, adaptive: &crate::engine::certainty_filter::CertaintyFilterState) -> u32 {
         let (note_w, warn_w, err_w, fatal_w) = adaptive.diagnostic_weights();
-        (summary.note as u32).saturating_mul(note_w)
-            .saturating_add((summary.warning as u32).saturating_mul(warn_w))
-            .saturating_add((summary.error as u32).saturating_mul(err_w))
-            .saturating_add((summary.fatal as u32).saturating_mul(fatal_w))
+        (counts[clang_sys::CXDiagnostic_Note as usize] as u32).saturating_mul(note_w)
+            .saturating_add((counts[clang_sys::CXDiagnostic_Warning as usize] as u32).saturating_mul(warn_w))
+            .saturating_add((counts[clang_sys::CXDiagnostic_Error as usize] as u32).saturating_mul(err_w))
+            .saturating_add((counts[clang_sys::CXDiagnostic_Fatal as usize] as u32).saturating_mul(fatal_w))
     }
 
-    fn diagnostic_summary_label(summary: ClangDiagnosticSummary) -> String {
+    fn diagnostic_summary_label(counts: DiagnosticCounts) -> String {
         format!(
             "fatal={} error={} warning={} note={}",
-            summary.fatal, summary.error, summary.warning, summary.note
+            counts[clang_sys::CXDiagnostic_Fatal as usize],
+            counts[clang_sys::CXDiagnostic_Error as usize],
+            counts[clang_sys::CXDiagnostic_Warning as usize],
+            counts[clang_sys::CXDiagnostic_Note as usize]
         )
     }
 
@@ -422,7 +425,7 @@ impl CheckBaseline {
         self.before_tree_error_ratio
     }
 
-    pub fn before_clang_summary(&self) -> Option<ClangDiagnosticSummary> {
+    pub fn before_clang_summary(&self) -> Option<DiagnosticCounts> {
         self.before_clang_summary
     }
 }
@@ -506,13 +509,7 @@ mod tests {
             before_tree_error_ratio: Some(0.0),
             before_clang_error_count: Some(0),
             before_clang_fatal_count: Some(0),
-            before_clang_summary: Some(crate::parser::clang_result::ClangDiagnosticSummary {
-                ignored: 0,
-                note: 0,
-                warning: 0,
-                error: 0,
-                fatal: 0,
-            }),
+            before_clang_summary: Some([0; 5]),
             before_clang_diagnostic_entries: Some(Vec::new()),
             before_clang_error_lines: Some(BTreeSet::new()),
             before_semantic_snapshot: Some(SemanticContractSnapshot {
@@ -648,27 +645,30 @@ mod tests {
     fn weighting_prioritizes_severity() {
         let adaptive = CertaintyFilterState::new();
         let empty = PostEditChecker::diagnostic_weighted_score(
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             &adaptive,
         );
         let warning = PostEditChecker::diagnostic_weighted_score(
-            crate::parser::clang_result::ClangDiagnosticSummary {
-                warning: 1,
-                ..crate::parser::clang_result::ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Warning as usize] = 1;
+                c
             },
             &adaptive,
         );
         let error = PostEditChecker::diagnostic_weighted_score(
-            crate::parser::clang_result::ClangDiagnosticSummary {
-                error: 1,
-                ..crate::parser::clang_result::ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Error as usize] = 1;
+                c
             },
             &adaptive,
         );
         let fatal = PostEditChecker::diagnostic_weighted_score(
-            crate::parser::clang_result::ClangDiagnosticSummary {
-                fatal: 1,
-                ..crate::parser::clang_result::ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Fatal as usize] = 1;
+                c
             },
             &adaptive,
         );

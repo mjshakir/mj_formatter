@@ -4,7 +4,7 @@ use tree_sitter::Tree;
 
 use crate::model::project_query::ProjectContextQuery;
 use crate::model::context_query::SemanticContextQuery;
-use crate::parser::clang_result::ClangDiagnosticSummary;
+use crate::parser::clang_result::DiagnosticCounts;
 use crate::parser::file_context::SemanticFileContext;
 use crate::parser::query_cache::TsQueryCache;
 use crate::graph::snapshot::ProjectGraphSnapshot;
@@ -86,14 +86,14 @@ impl<'a> PolicyContext<'a> {
         ProjectContextQuery::new(self.semantic_query(), self.project_graph_snapshot)
     }
 
-    pub fn clang_diagnostic_summary(&self) -> Option<ClangDiagnosticSummary> {
+    pub fn clang_diagnostic_counts(&self) -> Option<DiagnosticCounts> {
         self.semantic_file_context
-            .map(|ctx| ctx.diagnostic_summary)
+            .map(|ctx| ctx.diagnostic_counts)
     }
 
     pub fn fatal_diag_count(&self) -> usize {
-        self.clang_diagnostic_summary()
-            .map(|summary| summary.fatal)
+        self.clang_diagnostic_counts()
+            .map(|c| c[clang_sys::CXDiagnostic_Fatal as usize])
             .unwrap_or(0)
     }
 

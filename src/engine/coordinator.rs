@@ -12,7 +12,7 @@ use crate::config::types::RetryConfig;
 use crate::engine::accuracy_gate::{
     AccuracyGate, AccuracyGateFailure, AccuracyGateInput, AccuracyGateStatus,
 };
-use crate::engine::catalog::{PolicyCapabilities, PolicyCapabilityMatrix};
+use crate::engine::catalog::{PolicyCapabilities, policy_catalog};
 use crate::engine::pipeline::PolicyPipeline;
 use crate::engine::run_options::PolicyRunOptions;
 use crate::engine::post_check::CheckBaseline;
@@ -260,7 +260,7 @@ impl FormatterEngine {
             && edits.iter().all(|edit| {
                 let cap = *cap_cache
                     .entry(edit.policy.as_str())
-                    .or_insert_with(|| PolicyCapabilityMatrix::for_policy(edit.policy.as_str()));
+                    .or_insert_with(|| policy_catalog().capabilities_by_name(edit.policy.as_str()));
                 cap.structural_safe && !cap.semantic_rewrite
             })
     }
@@ -358,7 +358,7 @@ impl FormatterEngine {
         _context_kind: SemanticCompdbContextKind,
     ) -> Option<(f64, Option<()>)> {
         let has_rewrite_edits = pass.policy_result.edits.iter().any(|edit| {
-            PolicyCapabilityMatrix::for_policy(edit.policy.as_str()).semantic_rewrite
+            policy_catalog().capabilities_by_name(edit.policy.as_str()).semantic_rewrite
         });
         if has_rewrite_edits {
             warnings.extend(
@@ -501,7 +501,7 @@ impl FormatterEngine {
 
         let semantic_obs = baseline
             .and_then(|b| b.before_clang_summary())
-            .map(|s| 1.0 - ((s.error as f64) * 0.1 + (s.warning as f64) * 0.02).min(1.0))
+            .map(|s| 1.0 - ((s[clang_sys::CXDiagnostic_Error as usize] as f64) * 0.1 + (s[clang_sys::CXDiagnostic_Warning as usize] as f64) * 0.02).min(1.0))
             .unwrap_or(0.50);
 
         let (coverage_obs, richness_obs) = baseline

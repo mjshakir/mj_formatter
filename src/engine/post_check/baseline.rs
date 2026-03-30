@@ -51,7 +51,7 @@ pub(super) fn build(
                     Some(PostEditChecker::clang_error_count(&parse));
                 baseline.before_clang_fatal_count =
                     Some(PostEditChecker::clang_fatal_count(&parse));
-                baseline.before_clang_summary = Some(parse.diagnostic_summary());
+                baseline.before_clang_summary = Some(parse.diagnostic_counts());
                 baseline.before_clang_diagnostic_entries =
                     Some(parse.diagnostic_entries().to_vec());
                 baseline.before_clang_error_lines = Some(parse.error_diagnostic_lines());

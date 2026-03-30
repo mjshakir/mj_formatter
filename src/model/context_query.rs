@@ -5,7 +5,7 @@ use crate::parser::file_context::{
     SemanticDeclaration, SemanticFileContext, SemanticReference, SemanticScope, SourceLocation,
     is_function_scope, is_namespace_scope, is_preprocessor_scope, is_type_scope,
 };
-use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
+use crate::parser::semantic_region::{SemanticRegion, REGION_DIAGNOSTIC, REGION_DECLARATION, REGION_REFERENCE};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticLineRole {
@@ -129,10 +129,18 @@ impl<'a> SemanticContextQuery<'a> {
     }
 
     pub fn decl_by_id(&self, stable_id: &str) -> Option<&'a SemanticDeclaration> {
-        self.semantic?
-            .declarations
-            .iter()
-            .find(|declaration| declaration.stable_id == stable_id)
+        let semantic = self.semantic?;
+        if !semantic.decl_index_by_stable_id.is_empty() {
+            semantic
+                .decl_index_by_stable_id
+                .get(stable_id)
+                .and_then(|&idx| semantic.declarations.get(idx))
+        } else {
+            semantic
+                .declarations
+                .iter()
+                .find(|d| d.stable_id == stable_id)
+        }
     }
 
     pub fn references_of(&self, stable_id: &str) -> Vec<&'a SemanticReference> {
@@ -327,17 +335,12 @@ impl<'a> SemanticContextQuery<'a> {
                 _ => {}
             }
             if let Some(region) = self.region_at(*line, 1) {
-                match region.kind {
-                    SemanticRegionKind::Diagnostic => {
-                        diagnostic_region_lines = diagnostic_region_lines.saturating_add(1)
-                    }
-                    SemanticRegionKind::Declaration => {
-                        declaration_region_lines = declaration_region_lines.saturating_add(1)
-                    }
-                    SemanticRegionKind::Reference => {
-                        reference_region_lines = reference_region_lines.saturating_add(1)
-                    }
-                    _ => {}
+                if region.kind_id == REGION_DIAGNOSTIC {
+                    diagnostic_region_lines = diagnostic_region_lines.saturating_add(1);
+                } else if region.kind_id == REGION_DECLARATION {
+                    declaration_region_lines = declaration_region_lines.saturating_add(1);
+                } else if region.kind_id == REGION_REFERENCE {
+                    reference_region_lines = reference_region_lines.saturating_add(1);
                 }
             }
         }
@@ -412,13 +415,13 @@ mod tests {
     use crate::model::context_query::SemanticLineRole;
     use crate::model::context_query::SemanticLineScope;
     use crate::parser::clang_result::{
-        ClangDiagnosticEntry, ClangDiagnosticSummary,
+        ClangDiagnosticEntry,
     };
     use crate::parser::file_context::{
         SemanticDeclaration, SemanticFileContext, SemanticIdProvenance, SemanticReference,
         SemanticScope,
     };
-    use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
+    use crate::parser::semantic_region::{SemanticRegion, REGION_DIAGNOSTIC, REGION_DECLARATION, REGION_REFERENCE, REGION_FILE};
     #[test]
     fn queries_resolve_stable() {
         let semantic = SemanticFileContext {
@@ -476,9 +479,10 @@ mod tests {
     #[test]
     fn blocks_preprocessor_diag() {
         let semantic = SemanticFileContext {
-            diagnostic_summary: ClangDiagnosticSummary {
-                error: 2,
-                ..ClangDiagnosticSummary::default()
+            diagnostic_counts: {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Error as usize] = 2;
+                c
             },
             diagnostic_entries: vec![
                 ClangDiagnosticEntry {
@@ -531,9 +535,10 @@ mod tests {
     #[test]
     fn profile_reports_role() {
         let semantic = SemanticFileContext {
-            diagnostic_summary: ClangDiagnosticSummary {
-                error: 1,
-                ..ClangDiagnosticSummary::default()
+            diagnostic_counts: {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Error as usize] = 1;
+                c
             },
             diagnostic_entries: vec![ClangDiagnosticEntry {
                 line: 9,
@@ -656,7 +661,7 @@ mod tests {
             regions: vec![
                 SemanticRegion::new(
                     "file.cpp",
-                    SemanticRegionKind::File,
+                    REGION_FILE,
                     1,
                     20,
                     0,
@@ -666,7 +671,7 @@ mod tests {
                 ),
                 SemanticRegion::new(
                     "file.cpp",
-                    SemanticRegionKind::Function,
+                    crate::parser::ts_cpp_symbols::sym_function_definition,
                     5,
                     12,
                     40,
@@ -676,7 +681,7 @@ mod tests {
                 ),
                 SemanticRegion::new(
                     "file.cpp",
-                    SemanticRegionKind::Declaration,
+                    REGION_DECLARATION,
                     7,
                     7,
                     70,
@@ -689,7 +694,7 @@ mod tests {
         };
         let query = SemanticContextQuery::from_semantic(Some(&semantic));
         let region = query.region_at(7, 1).expect("region");
-        assert_eq!(region.kind, SemanticRegionKind::Declaration);
+        assert_eq!(region.kind_id, REGION_DECLARATION);
         assert!(!query.regions_for_line(7).is_empty());
     }
 }

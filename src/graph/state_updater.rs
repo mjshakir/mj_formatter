@@ -378,7 +378,7 @@ mod tests {
                 column: 4,
                 ..Default::default()
             }],
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let mut state = ProjectGraphState::new();
@@ -410,7 +410,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let second = ClangParseResult::new(
@@ -423,7 +423,7 @@ mod tests {
                 column: 4,
                 ..Default::default()
             }],
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -467,7 +467,7 @@ mod tests {
             Vec::new(),
             FxHashMap::default(),
             references,
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -481,7 +481,7 @@ mod tests {
                 column: 3,
                 ..Default::default()
             }],
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -514,7 +514,7 @@ mod tests {
             Vec::new(),
             FxHashMap::default(),
             FxHashMap::from_iter([(key_a.clone(), vec![3, 9])]),
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let parse_b = ClangParseResult::with_semantic_offsets(
@@ -523,7 +523,7 @@ mod tests {
             Vec::new(),
             FxHashMap::default(),
             FxHashMap::from_iter([(key_b.clone(), vec![5])]),
-            crate::parser::clang_result::ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 

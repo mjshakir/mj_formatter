@@ -275,7 +275,7 @@ impl SemanticContract {
             return PolicyGuidanceMode::HardInvariant;
         }
         if policy_catalog()
-            .behavior(policy_name)
+            .behavior_by_name(policy_name)
             .hard_invariant
         {
             return PolicyGuidanceMode::HardInvariant;
@@ -436,7 +436,6 @@ mod tests {
 
     fn policy_config() -> PolicyConfig {
         PolicyConfig {
-            name: "test_policy".to_string(),
             enabled: true,
             enforcement: crate::config::enums::Enforcement::Hard,
             raw: toml::Table::new(),
