@@ -59,7 +59,15 @@ impl OperatorOverloadSpacingPolicy {
         let semantic = context.semantic_file_context?;
         let decl = semantic.symbol_on_line_by_kinds(line, &[])
             .filter(|d| {
-                crate::parser::clang_types::is_function_like_kind(d.kind)
+                matches!(
+                    d.kind,
+                    clang_sys::CXCursor_FunctionDecl
+                        | clang_sys::CXCursor_FunctionTemplate
+                        | clang_sys::CXCursor_CXXMethod
+                        | clang_sys::CXCursor_Constructor
+                        | clang_sys::CXCursor_Destructor
+                        | clang_sys::CXCursor_ConversionFunction
+                )
             })?;
         if decl.name.starts_with("operator") {
             Some(decl.name.clone())

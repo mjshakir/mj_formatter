@@ -154,7 +154,15 @@ impl Policy for SnakeCasePolicy {
                         let Some(symbol) = semantic_query
                             .symbol_at(line, column, &[])
                             .filter(|decl| {
-                                crate::parser::clang_types::is_function_like_kind(decl.kind)
+                                matches!(
+                                    decl.kind,
+                                    clang_sys::CXCursor_FunctionDecl
+                                        | clang_sys::CXCursor_FunctionTemplate
+                                        | clang_sys::CXCursor_CXXMethod
+                                        | clang_sys::CXCursor_Constructor
+                                        | clang_sys::CXCursor_Destructor
+                                        | clang_sys::CXCursor_ConversionFunction
+                                )
                             })
                         else {
                             continue;
@@ -197,7 +205,12 @@ impl Policy for SnakeCasePolicy {
                     if semantic_query
                         .symbol_at(line, column, &[])
                         .filter(|decl| {
-                            crate::parser::clang_types::is_variable_like_kind(decl.kind)
+                            matches!(
+                                decl.kind,
+                                clang_sys::CXCursor_VarDecl
+                                    | clang_sys::CXCursor_FieldDecl
+                                    | clang_sys::CXCursor_ParmDecl
+                            )
                         })
                         .is_none()
                     {
@@ -247,7 +260,7 @@ mod tests {
 
     use super::*;
     use crate::model::policy_context::PolicyContext;
-    use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
+    use crate::parser::clang_result::ClangParseResult;
     use crate::parser::file_context::SemanticDeclaration;
     use crate::parser::manager::ParserManager;
     use crate::parser::file_context::SemanticFileContext;
@@ -319,7 +332,7 @@ mod tests {
                 column: 5,
                 ..Default::default()
             }],
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let path = PathBuf::from("sample.cpp");

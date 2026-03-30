@@ -411,7 +411,7 @@ mod tests {
 
     use super::*;
     use crate::model::policy_context::PolicyContext;
-    use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
+    use crate::parser::clang_result::ClangParseResult;
     use crate::parser::file_context::SemanticDeclaration;
 
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
@@ -443,7 +443,7 @@ mod tests {
             true,
             Vec::new(),
             symbols,
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         )
     }

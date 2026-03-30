@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 use crate::graph::types::GraphEdge;
 use crate::graph::types::GraphEdgeKind;
 use crate::graph::types::GraphNode;
@@ -62,7 +62,7 @@ pub struct RetryStats {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename = "PolicyClusterLearningSnapshotEntry")]
 pub struct ClusterSnapshot {
-    pub policy: PolicyName,
+    pub policy: PolicyId,
     pub cluster: u64,
     pub stats: PolicyClusterLearningStats,
 }
@@ -70,8 +70,8 @@ pub struct ClusterSnapshot {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename = "RetryCulpritPairSnapshotEntry")]
 pub struct CulpritSnapshot {
-    pub culprit_policy: PolicyName,
-    pub peer_policy: PolicyName,
+    pub culprit_policy: PolicyId,
+    pub peer_policy: PolicyId,
     pub count: u64,
 }
 
@@ -646,7 +646,7 @@ impl ProjectGraphState {
         format!("{policy}|{cluster}")
     }
 
-    fn parse_policy_cluster_key(value: &str) -> Option<(PolicyName, u64)> {
+    fn parse_policy_cluster_key(value: &str) -> Option<(PolicyId, u64)> {
         let (policy, cluster) = value.split_once('|')?;
         if policy.is_empty() {
             return None;
@@ -671,7 +671,7 @@ impl ProjectGraphState {
         format!("{culprit}|{peer}")
     }
 
-    fn parse_retry_culprit_pair_key(value: &str) -> Option<(PolicyName, PolicyName)> {
+    fn parse_retry_culprit_pair_key(value: &str) -> Option<(PolicyId, PolicyId)> {
         let (culprit, peer) = value.split_once('|')?;
         if culprit.is_empty() || peer.is_empty() {
             return None;

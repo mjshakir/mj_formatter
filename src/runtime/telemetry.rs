@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::gate_decision::ConfidenceReasonCode;
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PolicyTelemetryEntry {
@@ -53,7 +53,7 @@ impl PolicyTelemetryEntry {
 
 #[derive(Clone, Debug)]
 pub struct PolicyExecutionSample {
-    pub policy: PolicyName,
+    pub policy: PolicyId,
     pub elapsed: Duration,
     pub edits: usize,
     pub violations: usize,
@@ -162,8 +162,8 @@ impl PolicyExecutionSample {
     }
 }
 
-fn state() -> &'static DashMap<PolicyName, PolicyTelemetryEntry> {
-    static STATE: OnceLock<DashMap<PolicyName, PolicyTelemetryEntry>> = OnceLock::new();
+fn state() -> &'static DashMap<PolicyId, PolicyTelemetryEntry> {
+    static STATE: OnceLock<DashMap<PolicyId, PolicyTelemetryEntry>> = OnceLock::new();
     STATE.get_or_init(DashMap::new)
 }
 
@@ -171,7 +171,7 @@ pub struct PolicyTelemetry;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PolicyTelemetrySnapshotEntry {
-    pub policy: PolicyName,
+    pub policy: PolicyId,
     pub entry: PolicyTelemetryEntry,
 }
 
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn sorts_policy_telemetry() {
         let _guard = test_guard();
-        let suffix = format!("{:?}", std::thread::current().id());
+        let suffix = format!("{:?}", std::thread::current().id()).to_ascii_lowercase();
         let policy_a = format!("policy_a_records_and_sorts_{suffix}");
         let policy_b = format!("policy_b_records_and_sorts_{suffix}");
         PolicyTelemetry::reset();
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn merges_entries() {
         let _guard = test_guard();
-        let suffix = format!("{:?}", std::thread::current().id());
+        let suffix = format!("{:?}", std::thread::current().id()).to_ascii_lowercase();
         let policy_a = format!("policy_a_merges_entries_{suffix}");
         PolicyTelemetry::reset();
         PolicyTelemetry::merge_entries(&[

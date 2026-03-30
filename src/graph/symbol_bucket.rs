@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::parser::clang_types::{self, ClangDeclKey};
+use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::file_context::SemanticDeclaration;
 use crate::graph::symbol_id::SymbolId;
 
@@ -29,9 +29,10 @@ impl ToSymbolId for SemanticDeclaration {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
+            crate::parser::clang_types::ensure_clang_loaded();
             return SymbolId::new(format!(
                 "scoped|{}|{}|{}",
-                clang_types::cursor_kind_spelling(self.kind),
+                crate::parser::clang_types::cxstring_to_string(unsafe { clang_sys::clang_getCursorKindSpelling(self.kind) }),
                 sanitize_id_component(scope_usr),
                 sanitize_id_component(self.name.as_str())
             ));
@@ -43,9 +44,10 @@ impl ToSymbolId for SemanticDeclaration {
 
 impl ToSymbolId for ClangDeclKey {
     fn symbol_id(&self) -> SymbolId {
+        crate::parser::clang_types::ensure_clang_loaded();
         SymbolId::new(format!(
             "decl|{}|{}|{}|{}",
-            clang_types::cursor_kind_spelling(self.kind),
+            crate::parser::clang_types::cxstring_to_string(unsafe { clang_sys::clang_getCursorKindSpelling(self.kind) }),
             sanitize_id_component(self.path.as_str()),
             self.line,
             self.column
@@ -54,9 +56,10 @@ impl ToSymbolId for ClangDeclKey {
 }
 
 pub fn legacy_id(decl: &SemanticDeclaration) -> SymbolId {
+    crate::parser::clang_types::ensure_clang_loaded();
     SymbolId::new(format!(
         "bucket|{}|{}",
-        clang_types::cursor_kind_spelling(decl.kind),
+        crate::parser::clang_types::cxstring_to_string(unsafe { clang_sys::clang_getCursorKindSpelling(decl.kind) }),
         sanitize_id_component(decl.name.as_str())
     ))
 }

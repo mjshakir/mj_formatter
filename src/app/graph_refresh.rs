@@ -13,7 +13,7 @@ use crate::app::runner::App;
 use crate::config::app_config::AppConfig;
 use crate::files::file_io::FileIo;
 use crate::model::file_result::FileResult;
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 use crate::parser::clang_result::ClangParseResult;
 use crate::parser::manager::ParserManager;
 use crate::graph::store::PersistStats;
@@ -219,7 +219,7 @@ impl App {
         current: &[PolicyClusterSnapshotEntry],
     ) -> Vec<PolicyClusterSnapshotEntry> {
         let mut baseline_map: FxHashMap<
-            (PolicyName, u64),
+            (PolicyId, u64),
             crate::graph::state::PolicyClusterLearningStats,
         > = FxHashMap::default();
         for entry in baseline {
@@ -324,7 +324,7 @@ impl App {
                 .then(left.failure_context.cmp(&right.failure_context))
         });
 
-        let mut baseline_pairs: FxHashMap<(PolicyName, PolicyName), u64> = FxHashMap::default();
+        let mut baseline_pairs: FxHashMap<(PolicyId, PolicyId), u64> = FxHashMap::default();
         for entry in &baseline.culprit_pairs {
             baseline_pairs.insert(
                 (entry.culprit_policy.clone(), entry.peer_policy.clone()),

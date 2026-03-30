@@ -5,7 +5,7 @@ use crate::engine::edit_candidate::CandidateRiskTier;
 use crate::engine::run_options::RetryScopeStage;
 use crate::policy::zone::PolicyZone;
 use crate::engine::semantic_contract::SemanticInvariantClause;
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum PolicyCandidateOutcome {
@@ -77,7 +77,7 @@ pub struct PolicyCandidateTrace {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PolicyExecutionTrace {
-    pub policy: PolicyName,
+    pub policy: PolicyId,
     /// "hybrid" for semantic-rewrite policies, "tree-sitter" for syntactic policies.
     pub parse_mode: String,
     pub context_cluster: u64,
@@ -107,6 +107,7 @@ mod tests {
     use crate::engine::run_options::RetryScopeStage;
     use crate::policy::zone::PolicyZone;
     use crate::engine::semantic_contract::SemanticInvariantClause;
+    use crate::policy::id::PolicyId;
     use crate::model::exec_trace::{
         PolicyCandidateOutcome, PolicyCandidateTrace, PolicyExecutionTrace,
     };
@@ -114,7 +115,7 @@ mod tests {
     #[test]
     fn serde_serializes_legacy() {
         let trace = PolicyExecutionTrace {
-            policy: "naming_conventions".into(),
+            policy: PolicyId::from_str_lossy("naming_conventions"),
             parse_mode: "hybrid".to_string(),
             context_cluster: 9,
             candidate_line_count: 2,

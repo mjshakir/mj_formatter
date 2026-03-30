@@ -2,8 +2,6 @@
 use rustc_hash::FxHashSet;
 
 use crate::model::context_query::SemanticContextQuery;
-#[cfg(test)]
-use crate::parser::clang_types;
 use crate::parser::file_context::{
     SemanticDeclaration, SemanticReference, SemanticScope,
 };
@@ -158,6 +156,7 @@ impl<'a> ProjectContextQuery<'a> {
 
     #[cfg(test)]
     pub(crate) fn symbol_ids_for_declaration(declaration: &SemanticDeclaration) -> Vec<SymbolId> {
+        crate::parser::clang_types::ensure_clang_loaded();
         let mut ids = Vec::<SymbolId>::new();
         if let Some(usr) = declaration
             .usr
@@ -178,14 +177,14 @@ impl<'a> ProjectContextQuery<'a> {
         {
             ids.push(SymbolId::new(format!(
                 "scoped|{}|{}|{}",
-                clang_types::cursor_kind_spelling(declaration.kind),
+                crate::parser::clang_types::cxstring_to_string(unsafe { clang_sys::clang_getCursorKindSpelling(declaration.kind) }),
                 Self::sanitize_component(scope_usr),
                 Self::sanitize_component(declaration.name.as_str())
             )));
         }
         ids.push(SymbolId::new(format!(
             "bucket|{}|{}",
-            clang_types::cursor_kind_spelling(declaration.kind),
+            crate::parser::clang_types::cxstring_to_string(unsafe { clang_sys::clang_getCursorKindSpelling(declaration.kind) }),
             Self::sanitize_component(declaration.name.as_str())
         )));
         ids.extend(Self::symbol_ids_for_stable_id(

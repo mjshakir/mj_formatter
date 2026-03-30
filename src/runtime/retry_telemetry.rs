@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 use crate::model::retry_strategy::RetryStrategyName;
 use crate::graph::state::RetryStats;
 
@@ -16,8 +16,8 @@ pub struct RetryStrategySnapshotEntry {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CulpritSnapshot {
-    pub culprit_policy: PolicyName,
-    pub peer_policy: PolicyName,
+    pub culprit_policy: PolicyId,
+    pub peer_policy: PolicyId,
     pub count: u64,
 }
 

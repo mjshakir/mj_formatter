@@ -12,7 +12,6 @@ use crate::model::policy_context::PolicyContext;
 use crate::model::policy_result::PolicyResult;
 use crate::model::rename_plan::SemanticRenamePlan;
 use crate::model::violation::Violation;
-use crate::parser::clang_types;
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::file_context::{SemanticDeclaration, SemanticFileContext};
 use crate::parser::ts_traversal;
@@ -75,7 +74,7 @@ pub struct NamingConventionsPolicy {
 
 impl NamingConventionsPolicy {
     fn semantic_parse_clean(semantic: &SemanticFileContext) -> bool {
-        if semantic.diagnostic_summary.fatal > 0 {
+        if semantic.diagnostic_counts[clang_sys::CXDiagnostic_Fatal as usize] > 0 {
             return false;
         }
         if !semantic.declarations.is_empty() {
@@ -299,7 +298,7 @@ impl Policy for NamingConventionsPolicy {
             return PolicyResult::unchanged_with_warning("naming_conventions: tree-sitter context unavailable".to_string());
         };
 
-        let policy_name: crate::model::policy_name::PolicyName = self.name().into();
+        let policy_id = crate::policy::id::PolicyId::from_str_lossy(self.name());
         let mut violations = Vec::with_capacity(64);
         let mut warnings = Vec::with_capacity(8);
         let mut strict_issues = StrictIssues::new(self.semantic_mode && self.semantic_strict);
@@ -323,14 +322,14 @@ impl Policy for NamingConventionsPolicy {
                     if has_candidate_nodes
                         && !Self::semantic_parse_clean(ctx) =>
                 {
-                    let summary = ctx.diagnostic_summary;
+                    let counts = ctx.diagnostic_counts;
                     warnings.push(
                         format!(
                             "naming_conventions: semantic rename skipped due insufficient semantic parse reliability (success={}, symbols={}, errors={}, fatals={})",
                             ctx.clang_success,
                             ctx.declarations.len(),
-                            summary.error,
-                            summary.fatal
+                            counts[clang_sys::CXDiagnostic_Error as usize],
+                            counts[clang_sys::CXDiagnostic_Fatal as usize]
                         ),
                     );
                 }
@@ -385,7 +384,15 @@ impl Policy for NamingConventionsPolicy {
                             let matched_symbol = semantic_file_context
                                 .and_then(|ctx| ctx.symbol_on_line(short, line, &[]))
                                 .filter(|decl| {
-                                    clang_types::is_function_like_kind(decl.kind)
+                                    matches!(
+                                        decl.kind,
+                                        clang_sys::CXCursor_FunctionDecl
+                                            | clang_sys::CXCursor_FunctionTemplate
+                                            | clang_sys::CXCursor_CXXMethod
+                                            | clang_sys::CXCursor_Constructor
+                                            | clang_sys::CXCursor_Destructor
+                                            | clang_sys::CXCursor_ConversionFunction
+                                    )
                                 })
                                 .map(|decl| (decl.kind, decl.column));
                             if matched_symbol.is_none() && name_node.kind_id() == ts_cpp_symbols::alias_sym_type_identifier {
@@ -414,7 +421,7 @@ impl Policy for NamingConventionsPolicy {
                                 }
                                 Self::to_snake_case_into(short, &mut upper_pos_buf, &mut snake_buf);
                                 violations.push(Violation {
-                                    policy: policy_name.clone(),
+                                    policy: policy_id.clone(),
                                     message: format!(
                                         "function '{}' is not snake_case; suggested '{}'",
                                         short, &snake_buf
@@ -461,7 +468,15 @@ impl Policy for NamingConventionsPolicy {
                             if decl.line < error_start_line || decl.line > error_end_line {
                                 continue;
                             }
-                            if !clang_types::is_function_like_kind(decl.kind) {
+                            if !matches!(
+                                decl.kind,
+                                clang_sys::CXCursor_FunctionDecl
+                                    | clang_sys::CXCursor_FunctionTemplate
+                                    | clang_sys::CXCursor_CXXMethod
+                                    | clang_sys::CXCursor_Constructor
+                                    | clang_sys::CXCursor_Destructor
+                                    | clang_sys::CXCursor_ConversionFunction
+                            ) {
                                 continue;
                             }
                             let short = decl.name.as_str();
@@ -474,7 +489,7 @@ impl Policy for NamingConventionsPolicy {
                             let source_column = decl.column;
                             Self::to_snake_case_into(short, &mut upper_pos_buf, &mut snake_buf);
                             violations.push(Violation {
-                                policy: policy_name.clone(),
+                                policy: policy_id.clone(),
                                 message: format!(
                                     "function '{}' is not snake_case; suggested '{}'",
                                     short, &snake_buf
@@ -515,7 +530,12 @@ impl Policy for NamingConventionsPolicy {
                         let sym = semantic_file_context
                             .and_then(|ctx| ctx.symbol_on_line(name, line, &[]))
                             .filter(|decl| {
-                                clang_types::is_variable_like_kind(decl.kind)
+                                matches!(
+                                        decl.kind,
+                                        clang_sys::CXCursor_VarDecl
+                                            | clang_sys::CXCursor_FieldDecl
+                                            | clang_sys::CXCursor_ParmDecl
+                                    )
                             });
                         if sym.is_some_and(|d| d.kind == clang_sys::CXCursor_ParmDecl) {
                             break 'process;
@@ -550,7 +570,7 @@ impl Policy for NamingConventionsPolicy {
                             format!("local/member-like identifier '{name}' missing prefix; suggested '{}'", &snake_buf)
                         };
                         violations.push(Violation {
-                            policy: policy_name.clone(),
+                            policy: policy_id.clone(),
                             message: msg,
                             line,
                             column: Some(source_column),
@@ -683,7 +703,7 @@ mod tests {
 
     use super::*;
     use crate::model::policy_context::PolicyContext;
-    use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
+    use crate::parser::clang_result::ClangParseResult;
     use crate::parser::file_context::SemanticDeclaration;
     use crate::parser::clang_types::ClangSymbolKey;
     fn parse_cpp(text: &str) -> tree_sitter::Tree {
@@ -718,7 +738,7 @@ mod tests {
                 column: 5,
                 ..Default::default()
             }],
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let path = PathBuf::from("sample.cpp");
@@ -773,7 +793,7 @@ mod tests {
             vec![symbol],
             rename_offsets,
             reference_offsets,
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -823,7 +843,7 @@ mod tests {
             Vec::new(),
             vec![camel_symbol, existing_symbol],
             rename_offsets,
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -851,9 +871,10 @@ mod tests {
             false,
             vec!["sample.cpp:1:1: Error: unresolved include".to_string()],
             Vec::new(),
-            ClangDiagnosticSummary {
-                error: 1,
-                ..ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Error as usize] = 1;
+                c
             },
             vec![crate::parser::clang_result::ClangDiagnosticEntry {
                 line: 1,
@@ -903,9 +924,10 @@ mod tests {
             vec!["header-consensus:10:4:Fatal".to_string()],
             vec![symbol],
             rename_offsets,
-            ClangDiagnosticSummary {
-                fatal: 1,
-                ..ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Fatal as usize] = 1;
+                c
             },
             vec![crate::parser::clang_result::ClangDiagnosticEntry {
                 line: 10,
@@ -945,7 +967,7 @@ mod tests {
                 column: 3,
                 ..Default::default()
             }],
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let path = PathBuf::from("sample.cpp");
@@ -1031,7 +1053,7 @@ mod tests {
             true,
             Vec::new(),
             Vec::new(),
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let path = PathBuf::from("HashSet.cpp");

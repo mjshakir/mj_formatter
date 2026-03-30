@@ -18,7 +18,6 @@ pub mod file_result;
 pub mod pass_result;
 pub mod policy_context;
 pub mod exec_trace;
-pub mod policy_name;
 pub mod policy_result;
 pub mod project_query;
 pub mod report_record;

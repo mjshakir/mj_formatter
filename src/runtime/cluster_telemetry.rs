@@ -6,7 +6,7 @@ use dashmap::DashMap;
 
 use crate::engine::edit_candidate::PolicyDecisionOutcome;
 use crate::model::exec_trace::PolicyExecutionTrace;
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 use crate::graph::state::PolicyClusterLearningStats;
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ impl Default for ClusterAdaptiveControls {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PolicyClusterSnapshotEntry {
-    pub policy: PolicyName,
+    pub policy: PolicyId,
     pub cluster: u64,
     pub stats: PolicyClusterLearningStats,
 }
@@ -111,7 +111,7 @@ impl PolicyClusterTelemetry {
 
     pub fn record_decision(policy: &str, cluster: u64, outcome: PolicyDecisionOutcome) {
         let s = Self::global();
-        let key = (policy.to_string(), cluster);
+        let key = (policy.trim().to_ascii_lowercase(), cluster);
         let mut combined = s.entries.entry(key).or_default();
         combined.stats.decisions = combined.stats.decisions.saturating_add(1);
         match outcome {
@@ -151,7 +151,7 @@ impl PolicyClusterTelemetry {
 
     pub fn adaptive_controls(policy: &str, cluster: u64, kalman: &crate::engine::certainty_filter::CertaintyFilterState) -> ClusterAdaptiveControls {
         let s = Self::global();
-        let key = (policy.to_string(), cluster);
+        let key = (policy.trim().to_ascii_lowercase(), cluster);
         let model = s.read_model.load();
         if let Some(model) = model.as_deref() {
             let Some(combined) = model.get(&key) else {
@@ -221,7 +221,7 @@ impl PolicyClusterTelemetry {
     #[cfg(test)]
     pub fn snapshot_entry(policy: &str, cluster: u64) -> Option<PolicyClusterLearningStats> {
         let s = Self::global();
-        let key = (policy.to_string(), cluster);
+        let key = (policy.trim().to_ascii_lowercase(), cluster);
         s.entries.get(&key).map(|combined| {
             let mut resolved = combined.stats.clone();
             Self::write_adaptive_hints(&mut resolved, &combined.adaptive);
@@ -498,7 +498,7 @@ mod tests {
     fn dedup_same_cluster() {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
-        let policy = format!("snake_case_{:?}", std::thread::current().id());
+        let policy = format!("snake_case_{:?}", std::thread::current().id()).to_ascii_lowercase();
         let cluster = 9u64;
         let traces = vec![
             PolicyExecutionTrace {
@@ -523,7 +523,7 @@ mod tests {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
 
-        let stable_policy = format!("stable_policy_{:?}", std::thread::current().id());
+        let stable_policy = format!("stable_policy_{:?}", std::thread::current().id()).to_ascii_lowercase();
         let stable_cluster = 111u64;
         for _ in 0..24 {
             PolicyClusterTelemetry::record_decision(
@@ -544,7 +544,7 @@ mod tests {
             PolicyClusterTelemetry::adaptive_controls(stable_policy.as_str(), stable_cluster, &CertaintyFilterState::new());
         assert!(stable_controls.enforcement_bias != ClusterEnforcementBias::Harden);
 
-        let unstable_policy = format!("unstable_policy_{:?}", std::thread::current().id());
+        let unstable_policy = format!("unstable_policy_{:?}", std::thread::current().id()).to_ascii_lowercase();
         let unstable_cluster = 222u64;
         for _ in 0..24 {
             PolicyClusterTelemetry::record_decision(
@@ -587,7 +587,7 @@ mod tests {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
 
-        let policy = format!("persisted_cluster_{:?}", std::thread::current().id());
+        let policy = format!("persisted_cluster_{:?}", std::thread::current().id()).to_ascii_lowercase();
         let cluster = 555u64;
         for _ in 0..18 {
             PolicyClusterTelemetry::record_decision(
@@ -635,7 +635,7 @@ mod tests {
         let _guard = test_guard();
         PolicyClusterTelemetry::reset();
 
-        let policy = format!("deterministic_cluster_{:?}", std::thread::current().id());
+        let policy = format!("deterministic_cluster_{:?}", std::thread::current().id()).to_ascii_lowercase();
         let cluster = 901u64;
         for _ in 0..20 {
             PolicyClusterTelemetry::record_decision(

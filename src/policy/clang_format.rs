@@ -297,10 +297,10 @@ impl Policy for ClangFormatPolicy {
     }
     fn apply(&self, context: &PolicyContext<'_>) -> PolicyResult {
         if let Some(semantic) = context.semantic_file_context {
-            if semantic.diagnostic_summary.fatal > 0 {
+            if semantic.diagnostic_counts[clang_sys::CXDiagnostic_Fatal as usize] > 0 {
                 return PolicyResult::unchanged_with_warning(format!(
                     "clang_format: skipped due fatal clang diagnostics (fatal={})",
-                    semantic.diagnostic_summary.fatal
+                    semantic.diagnostic_counts[clang_sys::CXDiagnostic_Fatal as usize]
                 ));
             }
         }
@@ -418,7 +418,7 @@ mod tests {
     use super::ClangFormatPolicy;
     use crate::model::policy_context::PolicyContext;
     use crate::parser::clang_result::{
-        ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
+        ClangDiagnosticEntry, ClangParseResult,
     };
     use crate::parser::file_context::SemanticFileContext;
     use crate::policy::Policy;
@@ -464,9 +464,10 @@ mod tests {
             false,
             vec!["fatal".to_string()],
             Vec::new(),
-            ClangDiagnosticSummary {
-                fatal: 1,
-                ..ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Fatal as usize] = 1;
+                c
             },
             vec![ClangDiagnosticEntry {
                 line: 1,

@@ -1,9 +1,9 @@
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Edit {
-    pub policy: PolicyName,
+    pub policy: PolicyId,
     pub line: usize,
     pub before: String,
     pub after: String,
@@ -12,11 +12,12 @@ pub struct Edit {
 #[cfg(test)]
 mod tests {
     use super::Edit;
+    use crate::policy::id::PolicyId;
 
     #[test]
     fn serde_roundtrip_legacy() {
         let edit = Edit {
-            policy: "naming_conventions".into(),
+            policy: PolicyId::from_str_lossy("naming_conventions"),
             line: 12,
             before: "Value".to_string(),
             after: "value".to_string(),
