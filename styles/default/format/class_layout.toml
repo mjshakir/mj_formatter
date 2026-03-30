@@ -1,5 +1,0 @@
-[policy]
-name = "class_layout"
-source_extensions = [".cpp", ".cc", ".cxx"]
-header_extensions = [".hpp", ".h", ".hh", ".hxx"]
-header_search_roots = ["include"]

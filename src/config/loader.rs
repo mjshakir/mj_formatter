@@ -1,9 +1,8 @@
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use toml::Value;
 
 use crate::cli::args::CliArgs;
 use crate::config::rollout_profile::AccuracyRolloutProfile;
@@ -12,7 +11,8 @@ use crate::config::enums::BackupMode;
 use crate::config::enums::ClangArgsMode;
 use crate::config::enums::Enforcement;
 use crate::config::policy_config::PolicyConfig;
-use crate::config::raw::{RawConfig, RawEnableFile};
+use crate::config::policy_defaults;
+use crate::config::raw::RawConfig;
 use crate::config::types::AccuracyBenchmarkConfig;
 use crate::config::types::AccuracyGateConfig;
 use crate::config::types::ConfidenceConfig;
@@ -20,8 +20,7 @@ use crate::config::types::ProjectGraphConfig;
 use crate::config::types::RetryConfig;
 use crate::config::types::RetryOptimizerConfig;
 
-/// Legacy: kept so worker_execution.rs can still pass the env var to subprocesses.
-/// The adaptive calibrator has been removed; workers no longer read this env var.
+/// Environment variable used by worker subprocesses to locate the adaptive state file.
 pub const ADAPTIVE_CONFIDENCE_STATE_PATH_ENV: &str = "FMT_ADAPTIVE_STATE_PATH";
 pub const RETRY_STRATEGY_OPTIMIZER_STATE_PATH_ENV: &str = "FMT_RETRY_OPTIMIZER_PATH";
 
@@ -77,22 +76,13 @@ impl ConfigLoader {
 
     pub fn load(&self, args: &CliArgs) -> Result<AppConfig> {
         let config_path = self.resolve_config_path(args)?;
-        let config_root = config_path
-            .parent()
-            .ok_or_else(|| anyhow!("config path has no parent: {}", config_path.display()))?
-            .to_path_buf();
-        let project_root = config_root
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config file {}", config_path.display()))?;
         let raw = toml::from_str::<RawConfig>(&content)
             .with_context(|| format!("failed to parse TOML {}", config_path.display()))?;
 
-        let (style_name, policy_settings, policy_order) =
-            self.load_policy_config(args, &raw, &project_root)?;
+        let (policy_settings, policy_order) =
+            self.load_policy_config(args, &raw)?;
         let (root, include_patterns, exclude_patterns, processes, jobs, check, verbose,
              backup, backup_mode, backup_suffix, backup_dir, run_journal_dir, report_path,
              cache_enabled, cache_path, cache_l1_size, tracker_path) =
@@ -125,7 +115,6 @@ impl ConfigLoader {
             cache_path,
             cache_l1_size,
             tracker_path,
-            style_name,
             policy_settings,
             policy_order,
             cpp_standard,
@@ -156,31 +145,22 @@ impl ConfigLoader {
         &self,
         args: &CliArgs,
         raw: &RawConfig,
-        project_root: &Path,
-    ) -> Result<(String, FxHashMap<String, PolicyConfig>, Vec<String>)> {
-        let style_name = args
-            .style
-            .clone()
-            .or(raw.policies.style.clone())
-            .unwrap_or_else(|| "default".to_string());
-        let style_root = project_root.join("styles").join(&style_name);
-        let mut policy_settings = self.load_policy_settings(&style_root)?;
+    ) -> Result<(FxHashMap<String, PolicyConfig>, Vec<String>)> {
+        let mut policy_settings = policy_defaults::default_policy_configs();
 
-        let (enable_set, disable_set) = self.load_style_sets(&style_root)?;
-        for policy in policy_settings.values_mut() {
-            policy.enabled =
-                enable_set.contains(&policy.name) && !disable_set.contains(&policy.name);
+        for (name, table) in &raw.policies.settings {
+            if let Some(policy) = policy_settings.get_mut(name) {
+                policy.merge(table);
+            }
         }
 
-        let config_enabled = raw.policies.enabled.clone();
-        let config_disabled = raw.policies.disabled.clone();
-        for name in config_enabled {
-            if let Some(policy) = policy_settings.get_mut(&name) {
+        for name in &raw.policies.enabled {
+            if let Some(policy) = policy_settings.get_mut(name) {
                 policy.enabled = true;
             }
         }
-        for name in config_disabled {
-            if let Some(policy) = policy_settings.get_mut(&name) {
+        for name in &raw.policies.disabled {
+            if let Some(policy) = policy_settings.get_mut(name) {
                 policy.enabled = false;
             }
         }
@@ -197,7 +177,7 @@ impl ConfigLoader {
         }
 
         let policy_order = raw.policies.order.clone();
-        Ok((style_name, policy_settings, policy_order))
+        Ok((policy_settings, policy_order))
     }
 
     #[allow(clippy::type_complexity)]
@@ -852,65 +832,6 @@ impl ConfigLoader {
                 ci_require_benchmark: false,
             },
         }
-    }
-
-    fn load_policy_settings(&self, style_root: &Path) -> Result<FxHashMap<String, PolicyConfig>> {
-        let mut result: FxHashMap<String, PolicyConfig> = FxHashMap::default();
-        let format_dir = style_root.join("format");
-        if !format_dir.exists() {
-            return Err(anyhow!(
-                "style format directory does not exist: {}",
-                format_dir.display()
-            ));
-        }
-
-        let mut files: Vec<PathBuf> = fs::read_dir(&format_dir)
-            .with_context(|| format!("failed to read style format dir {}", format_dir.display()))?
-            .filter_map(|entry| entry.ok().map(|item| item.path()))
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("toml"))
-            .collect();
-        files.sort();
-
-        for path in files {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read policy file {}", path.display()))?;
-            let parsed = toml::from_str::<Value>(&content)
-                .with_context(|| format!("failed to parse policy file {}", path.display()))?;
-            let table = parsed
-                .as_table()
-                .ok_or_else(|| anyhow!("policy file must be table: {}", path.display()))?;
-            let policy_table = table
-                .get("policy")
-                .and_then(Value::as_table)
-                .ok_or_else(|| anyhow!("policy file missing [policy] table: {}", path.display()))?;
-
-            let incoming = PolicyConfig::from_policy_table(policy_table)
-                .with_context(|| format!("invalid policy table in {}", path.display()))?;
-            if let Some(existing) = result.get_mut(&incoming.name) {
-                existing.merge(policy_table);
-            } else {
-                result.insert(incoming.name.clone(), incoming);
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn load_style_sets(
-        &self,
-        style_root: &Path,
-    ) -> Result<(FxHashSet<String>, FxHashSet<String>)> {
-        let enable_path = style_root.join("enable").join("enable.toml");
-        if !enable_path.exists() {
-            return Ok((FxHashSet::default(), FxHashSet::default()));
-        }
-        let content = fs::read_to_string(&enable_path)
-            .with_context(|| format!("failed to read enable file {}", enable_path.display()))?;
-        let parsed = toml::from_str::<RawEnableFile>(&content)
-            .with_context(|| format!("failed to parse enable file {}", enable_path.display()))?;
-        let enabled = parsed.enable.enabled.into_iter().collect();
-        let disabled = parsed.enable.disabled.into_iter().collect();
-        Ok((enabled, disabled))
     }
 
     fn resolve_config_path(&self, args: &CliArgs) -> Result<PathBuf> {

@@ -218,25 +218,12 @@ pub struct RawFormatter {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RawPolicies {
-    pub style: Option<String>,
     #[serde(default)]
     pub enabled: Vec<String>,
     #[serde(default)]
     pub disabled: Vec<String>,
     #[serde(default)]
     pub order: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RawEnableFile {
     #[serde(default)]
-    pub enable: RawEnable,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RawEnable {
-    #[serde(default)]
-    pub enabled: Vec<String>,
-    #[serde(default)]
-    pub disabled: Vec<String>,
+    pub settings: std::collections::HashMap<String, toml::Table>,
 }

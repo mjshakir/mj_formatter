@@ -1,3 +1,0 @@
-[policy]
-name = "namespace_end_comments"
-control_block_kinds = ["if", "while", "for", "switch", "catch"]

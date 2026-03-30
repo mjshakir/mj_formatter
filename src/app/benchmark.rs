@@ -165,9 +165,6 @@ impl App {
         if let Some(config_path) = args.config.as_ref() {
             command.arg("--config").arg(config_path);
         }
-        if let Some(style) = args.style.as_ref() {
-            command.arg("--style").arg(style);
-        }
         if let Some(root) = args.root.as_ref() {
             command.arg("--root").arg(root);
         }

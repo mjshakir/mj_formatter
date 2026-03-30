@@ -1,7 +1,0 @@
-[policy]
-name = "numeric_literal_suffix"
-enforcement = "soft"
-
-[policy.convergence]
-domain = "literal.suffix"
-priority = 1001

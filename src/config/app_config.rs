@@ -30,7 +30,6 @@ pub struct AppConfig {
     pub cache_path: PathBuf,
     pub cache_l1_size: usize,
     pub tracker_path: PathBuf,
-    pub style_name: String,
     pub policy_settings: FxHashMap<String, PolicyConfig>,
     pub policy_order: Vec<String>,
     pub cpp_standard: String,

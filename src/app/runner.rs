@@ -23,14 +23,14 @@ use crate::files::file_io::FileIo;
 use crate::model::edit::Edit;
 use crate::model::file_result::FileResult;
 use crate::model::exec_trace::PolicyExecutionTrace;
-use crate::model::policy_name::PolicyName;
+use crate::policy::id::PolicyId;
 use crate::model::run_summary::RunSummary;
 use crate::model::rename_plan::SemanticRenamePlan;
 use crate::model::violation::Violation;
 use crate::parser::clang_service::ClangParseService;
 use crate::parser::manager::ParserManager;
 use crate::engine::certainty_filter::CertaintyFilterState;
-use crate::engine::catalog::PolicyCapabilityMatrix;
+use crate::engine::catalog::policy_catalog;
 use crate::policy::registry::PolicyRegistry;
 use crate::runtime::rollout_state::AccuracyRolloutState;
 use crate::runtime::adaptive_telemetry::{AdaptiveTelemetry, AdaptiveSnapshot};
@@ -171,8 +171,8 @@ pub(crate) struct SyntheticCompileCommand {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct WorkerConvergencePair {
-    pub(crate) loser: PolicyName,
-    pub(crate) winner: PolicyName,
+    pub(crate) loser: PolicyId,
+    pub(crate) winner: PolicyId,
     pub(crate) count: usize,
 }
 
@@ -288,12 +288,11 @@ impl App {
         }
         let policies = PolicyRegistry::build_enabled(&ctx.config);
         if ctx.args.list_policies {
-            println!("style: {}", ctx.config.style_name);
             for policy in &policies {
                 println!(
                     "policy: {:30} parse={}",
                     policy.name(),
-                    if PolicyCapabilityMatrix::for_policy(policy.name()).semantic_rewrite { "hybrid" } else { "tree-sitter" }
+                    if policy_catalog().capabilities_by_name(policy.name()).semantic_rewrite { "hybrid" } else { "tree-sitter" }
                 );
             }
             return Ok(());
@@ -1298,9 +1297,6 @@ impl App {
         if let Some(config_path) = args.config.as_ref() {
             command.arg("--config").arg(config_path);
         }
-        if let Some(style) = args.style.as_ref() {
-            command.arg("--style").arg(style);
-        }
         if let Some(root) = args.root.as_ref() {
             command.arg("--root").arg(root);
         }
@@ -1429,7 +1425,6 @@ impl App {
     pub(crate) fn cache_fingerprint(config: &AppConfig) -> String {
         let mut lines = Vec::<String>::new();
         lines.push(format!("root={}", config.root.display()));
-        lines.push(format!("style={}", config.style_name));
         lines.push(format!("check={}", config.check));
         lines.push(format!("clang_binary={}", config.clang_binary));
         lines.push(format!(

@@ -1,3 +1,0 @@
-[policy]
-name = "include_guards"
-header_extensions = [".h", ".hpp", ".hh", ".hxx"]

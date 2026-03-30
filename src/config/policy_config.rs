@@ -7,7 +7,6 @@ use crate::config::enums::Enforcement;
 
 #[derive(Clone, Debug)]
 pub struct PolicyConfig {
-    pub name: String,
     pub enabled: bool,
     pub enforcement: Enforcement,
     pub raw: Table,
@@ -15,11 +14,9 @@ pub struct PolicyConfig {
 
 impl PolicyConfig {
     pub fn from_policy_table(table: &Table) -> Result<Self> {
-        let name = table
-            .get("name")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow!("policy table missing required 'name'"))?
-            .to_string();
+        if table.get("name").and_then(|v| v.as_str()).is_none() {
+            return Err(anyhow!("policy table missing required 'name'"));
+        }
 
         let enabled = table
             .get("enabled")
@@ -32,7 +29,6 @@ impl PolicyConfig {
             .unwrap_or(Enforcement::Hard);
 
         Ok(Self {
-            name,
             enabled,
             enforcement,
             raw: table.clone(),

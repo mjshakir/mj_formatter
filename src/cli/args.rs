@@ -8,9 +8,6 @@ pub struct CliArgs {
     pub config: Option<String>,
 
     #[arg(long)]
-    pub style: Option<String>,
-
-    #[arg(long)]
     pub root: Option<String>,
 
     #[arg(long = "include")]
