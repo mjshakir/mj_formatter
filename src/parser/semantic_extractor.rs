@@ -4,10 +4,9 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::parser::clang_types;
 use crate::parser::clang_types::{cxstring_to_option, cxstring_to_string, ClangDeclKey};
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSummary,
+    ClangDiagnosticEntry, DiagnosticCounts,
 };
 use crate::parser::clang_types::ClangSymbolKey;
 use crate::parser::file_context::{SemanticDeclaration, SemanticFileContext};
@@ -97,12 +96,12 @@ impl SemanticExtractor {
     ) -> (
         bool,
         Vec<String>,
-        ClangDiagnosticSummary,
+        DiagnosticCounts,
         Vec<ClangDiagnosticEntry>,
     ) {
         let mut success = true;
         let mut diagnostics = Vec::new();
-        let mut diagnostic_summary = ClangDiagnosticSummary::default();
+        let mut diagnostic_counts: DiagnosticCounts = [0; 5];
         let mut diagnostic_entries = Vec::new();
 
         let num_diags = unsafe { clang_sys::clang_getNumDiagnostics(tu) };
@@ -117,28 +116,9 @@ impl SemanticExtractor {
                 success = false;
             }
 
-            let mapped_severity = match severity {
-                clang_sys::CXDiagnostic_Ignored => {
-                    diagnostic_summary.ignored = diagnostic_summary.ignored.saturating_add(1);
-                    clang_sys::CXDiagnostic_Ignored as u32
-                }
-                clang_sys::CXDiagnostic_Note => {
-                    diagnostic_summary.note = diagnostic_summary.note.saturating_add(1);
-                    clang_sys::CXDiagnostic_Note as u32
-                }
-                clang_sys::CXDiagnostic_Warning => {
-                    diagnostic_summary.warning = diagnostic_summary.warning.saturating_add(1);
-                    clang_sys::CXDiagnostic_Warning as u32
-                }
-                clang_sys::CXDiagnostic_Error => {
-                    diagnostic_summary.error = diagnostic_summary.error.saturating_add(1);
-                    clang_sys::CXDiagnostic_Error as u32
-                }
-                _ => {
-                    diagnostic_summary.fatal = diagnostic_summary.fatal.saturating_add(1);
-                    clang_sys::CXDiagnostic_Fatal as u32
-                }
-            };
+            let clamped = (severity as usize).min(clang_sys::CXDiagnostic_Fatal as usize);
+            diagnostic_counts[clamped] = diagnostic_counts[clamped].saturating_add(1);
+            let mapped_severity = clamped as u32;
 
             let loc = unsafe { clang_sys::clang_getDiagnosticLocation(diag) };
             let mut presumed_file = clang_sys::CXString::default();
@@ -209,7 +189,7 @@ impl SemanticExtractor {
                 clang_sys::clang_disposeDiagnostic(diag);
             }
         }
-        (success, diagnostics, diagnostic_summary, diagnostic_entries)
+        (success, diagnostics, diagnostic_counts, diagnostic_entries)
     }
 
     #[allow(clippy::type_complexity)]
@@ -431,7 +411,7 @@ impl SemanticExtractor {
             return None;
         }
 
-        let canonical_type_kind = if clang_types::is_declaration_kind(kind) {
+        let canonical_type_kind = if unsafe { clang_sys::clang_isDeclaration(kind) != 0 } {
             let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
             let canonical = unsafe { clang_sys::clang_getCanonicalType(ty) };
             canonical.kind as i32
@@ -465,7 +445,7 @@ impl SemanticExtractor {
                     (!trimmed.is_empty()).then_some(trimmed.to_string())
                 });
 
-        let pointee_type_kind = if clang_types::is_declaration_kind(kind) {
+        let pointee_type_kind = if unsafe { clang_sys::clang_isDeclaration(kind) != 0 } {
             let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
             let pointee = unsafe { clang_sys::clang_getPointeeType(ty) };
             if pointee.kind != clang_sys::CXType_Invalid {
@@ -477,13 +457,13 @@ impl SemanticExtractor {
             None
         };
 
-        let storage_class = if clang_types::is_declaration_kind(kind) {
+        let storage_class = if unsafe { clang_sys::clang_isDeclaration(kind) != 0 } {
             unsafe { clang_sys::clang_Cursor_getStorageClass(cursor) }
         } else {
             clang_sys::CX_SC_Invalid
         };
 
-        let (is_const_qualified, is_volatile_qualified) = if clang_types::is_declaration_kind(kind) {
+        let (is_const_qualified, is_volatile_qualified) = if unsafe { clang_sys::clang_isDeclaration(kind) != 0 } {
             let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
             let canonical = unsafe { clang_sys::clang_getCanonicalType(ty) };
             (
@@ -494,9 +474,18 @@ impl SemanticExtractor {
             (false, false)
         };
 
-        let num_template_args = clang_types::num_template_arguments(cursor);
+        let num_template_args = {
+            let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
+            unsafe { clang_sys::clang_Type_getNumTemplateArguments(ty) }
+        };
         let template_base_name = if num_template_args > 0 {
-            clang_types::type_declaration_name(cursor)
+            let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
+            let decl_cursor = unsafe { clang_sys::clang_getTypeDeclaration(ty) };
+            if unsafe { clang_sys::clang_Cursor_isNull(decl_cursor) } != 0 {
+                None
+            } else {
+                cxstring_to_option(unsafe { clang_sys::clang_getCursorSpelling(decl_cursor) })
+            }
         } else {
             None
         };
@@ -533,7 +522,8 @@ impl SemanticExtractor {
     }
 
     pub(crate) fn is_relevant_kind(kind: i32) -> bool {
-        clang_types::is_declaration_kind(kind) || clang_types::is_preprocessing_kind(kind)
+        (unsafe { clang_sys::clang_isDeclaration(kind) != 0 })
+            || (unsafe { clang_sys::clang_isPreprocessing(kind) != 0 })
     }
 
 }

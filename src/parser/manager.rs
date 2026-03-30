@@ -472,7 +472,7 @@ mod tests {
     use super::{ParserManager, SemanticCompdbContextKind};
     use crate::config::enums::ClangArgsMode;
     use crate::parser::clang_result::{
-        ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
+        ClangDiagnosticEntry, ClangParseResult,
     };
     use crate::parser::file_context::SemanticDeclaration;
 
@@ -509,9 +509,10 @@ mod tests {
             false,
             vec!["fatal".to_string()],
             Vec::new(),
-            ClangDiagnosticSummary {
-                fatal: 1,
-                ..ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Fatal as usize] = 1;
+                c
             },
             vec![ClangDiagnosticEntry {
                 line: 10,
@@ -525,7 +526,7 @@ mod tests {
             true,
             Vec::new(),
             Vec::new(),
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -533,7 +534,7 @@ mod tests {
             vec![fatal_parse, clean_parse],
             Vec::new(),
         );
-        assert_eq!(merged.diagnostic_summary().fatal, 0);
+        assert_eq!(merged.diagnostic_counts()[clang_sys::CXDiagnostic_Fatal as usize], 0);
         assert_eq!(merged.diagnostic_total(), 0);
     }
 
@@ -554,9 +555,10 @@ mod tests {
             vec![failed_symbol],
             FxHashMap::default(),
             FxHashMap::default(),
-            ClangDiagnosticSummary {
-                fatal: 2,
-                ..ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Fatal as usize] = 2;
+                c
             },
             vec![
                 ClangDiagnosticEntry {
@@ -579,7 +581,7 @@ mod tests {
             true,
             Vec::new(),
             Vec::new(),
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 
@@ -610,9 +612,10 @@ mod tests {
             vec![failed_symbol.clone()],
             FxHashMap::default(),
             FxHashMap::default(),
-            ClangDiagnosticSummary {
-                fatal: 1,
-                ..ClangDiagnosticSummary::default()
+            {
+                let mut c: [usize; 5] = [0; 5];
+                c[clang_sys::CXDiagnostic_Fatal as usize] = 1;
+                c
             },
             vec![ClangDiagnosticEntry {
                 line: 7,
@@ -626,7 +629,7 @@ mod tests {
             true,
             Vec::new(),
             Vec::new(),
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
 

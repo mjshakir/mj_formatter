@@ -8,9 +8,9 @@ use tree_sitter::{StreamingIterator, Tree};
 
 use crate::parser::clang_types::{ClangDeclKey, ClangSymbolKey};
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
+    ClangDiagnosticEntry, ClangParseResult, DiagnosticCounts, diagnostic_error_total,
 };
-use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
+use crate::parser::semantic_region::{SemanticRegion, REGION_FILE, REGION_DECLARATION, REGION_REFERENCE, REGION_DIAGNOSTIC};
 use crate::parser::text_scan;
 use crate::parser::ts_cpp_symbols;
 
@@ -47,11 +47,6 @@ pub(crate) fn is_function_scope(node_kind_id: u16) -> bool {
 
 pub(crate) fn is_template_scope(node_kind_id: u16) -> bool {
     node_kind_id == ts_cpp_symbols::sym_template_declaration
-}
-
-#[allow(dead_code)]
-pub(crate) fn is_attribute_scope(node_kind_id: u16) -> bool {
-    node_kind_id == ts_cpp_symbols::sym_attribute_declaration
 }
 
 #[derive(Clone, Debug, Default)]
@@ -116,7 +111,7 @@ pub struct SemanticFileContext {
     pub canonical_path: String,
     pub clang_success: bool,
     pub tree_has_error: bool,
-    pub diagnostic_summary: ClangDiagnosticSummary,
+    pub diagnostic_counts: DiagnosticCounts,
     pub diagnostic_entries: Vec<ClangDiagnosticEntry>,
     pub diagnostics: Vec<String>,
     pub declarations: Vec<SemanticDeclaration>,
@@ -125,6 +120,8 @@ pub struct SemanticFileContext {
     pub regions: Vec<SemanticRegion>,
     pub(crate) declarations_by_line: FxHashMap<usize, SmallVec<[usize; 4]>>,
     pub(crate) name_lines: FxHashMap<String, SmallVec<[usize; 4]>>,
+    pub(crate) decl_index_by_stable_id: FxHashMap<String, usize>,
+    pub(crate) ref_indices_by_stable_id: FxHashMap<String, SmallVec<[usize; 4]>>,
     pub(crate) rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
     pub(crate) reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
 }
@@ -177,7 +174,7 @@ impl SemanticFileContext {
             return context;
         };
         context.clang_success = parse.success;
-        context.diagnostic_summary = parse.diagnostic_summary();
+        context.diagnostic_counts = parse.diagnostic_counts();
         context.diagnostic_entries = parse.diagnostic_entries().to_vec();
 
         Self::build_scopes_and_regions(text, &canonical_path, parse, &mut context);
@@ -306,6 +303,11 @@ impl SemanticFileContext {
         for (index, decl) in context.declarations.iter().enumerate() {
             context.declarations_by_line.entry(decl.line).or_default().push(index);
             context.name_lines.entry(decl.name.clone()).or_default().push(decl.line);
+            context.decl_index_by_stable_id.entry(decl.stable_id.clone()).or_insert(index);
+        }
+
+        for (index, reference) in context.references.iter().enumerate() {
+            context.ref_indices_by_stable_id.entry(reference.stable_id.clone()).or_default().push(index);
         }
 
         context.regions = Self::build_regions(text, context);
@@ -332,10 +334,17 @@ impl SemanticFileContext {
     }
 
     pub fn refs_by_id(&self, stable_id: &str) -> Vec<&SemanticReference> {
-        self.references
-            .iter()
-            .filter(|reference| reference.stable_id == stable_id)
-            .collect()
+        if !self.ref_indices_by_stable_id.is_empty() {
+            self.ref_indices_by_stable_id
+                .get(stable_id)
+                .map(|indices| indices.iter().filter_map(|&i| self.references.get(i)).collect())
+                .unwrap_or_default()
+        } else {
+            self.references
+                .iter()
+                .filter(|r| r.stable_id == stable_id)
+                .collect()
+        }
     }
 
     pub fn scope_at_location(&self, location: SourceLocation) -> Option<&SemanticScope> {
@@ -508,13 +517,12 @@ impl SemanticFileContext {
         for region in &self.regions {
             signature ^= Self::hash64(
                 format!(
-                    "{}:{}:{}:{}:{}:{:?}:{}",
+                    "{}:{}:{}:{}:{}:{}",
                     region.id,
-                    region.kind.as_str(),
+                    region.kind_id,
                     region.start_line,
                     region.end_line,
                     region.start_offset,
-                    region.stable_id,
                     region.has_diagnostic_error
                 )
                 .as_str(),
@@ -529,7 +537,7 @@ impl SemanticFileContext {
             preprocessor_scope_count,
             usr_backed_declaration_count,
             diagnostics_count: self.diagnostic_entries.len(),
-            diagnostic_error_count: self.diagnostic_summary.error_total(),
+            diagnostic_error_count: diagnostic_error_total(&self.diagnostic_counts),
             semantic_signature: signature,
         }
     }
@@ -619,7 +627,7 @@ impl SemanticFileContext {
         let text_len = text.len();
         regions.push(SemanticRegion::new(
             context.canonical_path.as_str(),
-            SemanticRegionKind::File,
+            REGION_FILE,
             1,
             total_lines,
             0,
@@ -631,7 +639,7 @@ impl SemanticFileContext {
         for scope in &context.scopes {
             regions.push(SemanticRegion::new(
                 context.canonical_path.as_str(),
-                Self::region_kind_for_scope(scope.node_kind_id),
+                scope.node_kind_id,
                 scope.start_line,
                 scope.end_line.max(scope.start_line),
                 scope.start_offset,
@@ -646,7 +654,7 @@ impl SemanticFileContext {
                 Self::line_bounds_for_line(line_starts.as_slice(), text_len, declaration.line);
             regions.push(SemanticRegion::new(
                 context.canonical_path.as_str(),
-                SemanticRegionKind::Declaration,
+                REGION_DECLARATION,
                 declaration.line.max(1),
                 declaration.line.max(1),
                 start_offset,
@@ -661,7 +669,7 @@ impl SemanticFileContext {
                 Self::line_bounds_for_line(line_starts.as_slice(), text_len, reference.line);
             regions.push(SemanticRegion::new(
                 context.canonical_path.as_str(),
-                SemanticRegionKind::Reference,
+                REGION_REFERENCE,
                 reference.line.max(1),
                 reference.line.max(1),
                 start_offset,
@@ -681,7 +689,7 @@ impl SemanticFileContext {
                 || diagnostic.severity == clang_sys::CXDiagnostic_Fatal as u32;
             regions.push(SemanticRegion::new(
                 context.canonical_path.as_str(),
-                SemanticRegionKind::Diagnostic,
+                REGION_DIAGNOSTIC,
                 diagnostic.line,
                 diagnostic.line,
                 start_offset,
@@ -695,31 +703,20 @@ impl SemanticFileContext {
         regions
     }
 
-    fn region_kind_for_scope(node_kind_id: u16) -> SemanticRegionKind {
-        if is_preprocessor_scope(node_kind_id) { SemanticRegionKind::Preprocessor }
-        else if is_namespace_scope(node_kind_id) { SemanticRegionKind::Namespace }
-        else if is_type_scope(node_kind_id) { SemanticRegionKind::Type }
-        else if is_function_scope(node_kind_id) { SemanticRegionKind::Function }
-        else if is_template_scope(node_kind_id) { SemanticRegionKind::Template }
-        else { SemanticRegionKind::Attribute }
-    }
-
     fn dedup_and_sort_regions(regions: &mut Vec<SemanticRegion>) {
         regions.sort_by(|left, right| {
             left.start_offset
                 .cmp(&right.start_offset)
                 .then(left.end_offset.cmp(&right.end_offset))
-                .then(left.kind.cmp(&right.kind))
-                .then(left.stable_id.cmp(&right.stable_id))
+                .then(left.kind_id.cmp(&right.kind_id))
                 .then(left.id.cmp(&right.id))
         });
         regions.dedup_by(|left, right| {
-            left.kind == right.kind
+            left.kind_id == right.kind_id
                 && left.start_line == right.start_line
                 && left.end_line == right.end_line
                 && left.start_offset == right.start_offset
                 && left.end_offset == right.end_offset
-                && left.stable_id == right.stable_id
                 && left.has_diagnostic_error == right.has_diagnostic_error
         });
     }
@@ -865,12 +862,12 @@ mod tests {
     use tree_sitter::Parser;
 
     use crate::parser::clang_types::ClangDeclKey;
-    use crate::parser::clang_result::{ClangDiagnosticSummary, ClangParseResult};
+    use crate::parser::clang_result::ClangParseResult;
     use super::SemanticDeclaration;
     use crate::parser::file_context::{
         is_preprocessor_scope, SemanticFileContext, SemanticIdProvenance, SourceLocation,
     };
-    use crate::parser::semantic_region::{SemanticRegion, SemanticRegionKind};
+    use crate::parser::semantic_region::{SemanticRegion, REGION_FILE, REGION_DECLARATION, REGION_REFERENCE, REGION_DIAGNOSTIC};
     #[test]
     fn stable_prefers_usr() {
         let path = PathBuf::from("semantic_usr.cpp");
@@ -886,7 +883,7 @@ mod tests {
                 scope_usr: None,
                 ..Default::default()
             }],
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let context = SemanticFileContext::from_parses("int Foo();\n", &path, None, Some(&parse));
@@ -922,7 +919,7 @@ mod tests {
             }],
             FxHashMap::default(),
             reference_map,
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let text = "int Foo = 0;\nFoo++;\n";
@@ -951,7 +948,7 @@ mod tests {
             Vec::new(),
             FxHashMap::default(),
             reference_map,
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         );
         let text = "int Foo = 0;\nFoo++;\n";
@@ -1053,7 +1050,7 @@ mod tests {
             regions: vec![
                 SemanticRegion::new(
                     "demo.cpp",
-                    SemanticRegionKind::File,
+                    REGION_FILE,
                     1,
                     20,
                     0,
@@ -1063,7 +1060,7 @@ mod tests {
                 ),
                 SemanticRegion::new(
                     "demo.cpp",
-                    SemanticRegionKind::Function,
+                    crate::parser::ts_cpp_symbols::sym_function_definition,
                     5,
                     10,
                     40,
@@ -1073,7 +1070,7 @@ mod tests {
                 ),
                 SemanticRegion::new(
                     "demo.cpp",
-                    SemanticRegionKind::Declaration,
+                    REGION_DECLARATION,
                     7,
                     7,
                     70,
@@ -1087,7 +1084,7 @@ mod tests {
         let region = context
             .region_at_location(SourceLocation::new(7, 1))
             .expect("region");
-        assert_eq!(region.kind, SemanticRegionKind::Declaration);
+        assert_eq!(region.kind_id, REGION_DECLARATION);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::files::ecc_frame;
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
+    ClangDiagnosticEntry, ClangParseResult, DiagnosticCounts,
 };
 use crate::parser::semantic_extractor::SemanticExtractor;
 
@@ -41,7 +41,7 @@ struct ClangParseHelperRequest {
 struct ClangParseHelperResponse {
     success: bool,
     diagnostics: Vec<String>,
-    diagnostic_summary: ClangDiagnosticSummary,
+    diagnostic_counts: DiagnosticCounts,
     diagnostic_entries: Vec<ClangDiagnosticEntry>,
     tu_ecc_data: Option<Vec<u8>>,
     tu_source_path: Option<String>,
@@ -151,7 +151,7 @@ impl ClangParseService {
             return ClangParseHelperResponse {
                 success: false,
                 diagnostics: Vec::new(),
-                diagnostic_summary: ClangDiagnosticSummary::default(),
+                diagnostic_counts: [0; 5],
                 diagnostic_entries: Vec::new(),
                 tu_ecc_data: None,
                 tu_source_path: None,
@@ -192,7 +192,7 @@ impl ClangParseService {
             Ok(data) => ClangParseHelperResponse {
                 success,
                 diagnostics,
-                diagnostic_summary,
+                diagnostic_counts: diagnostic_summary,
                 diagnostic_entries,
                 tu_ecc_data: Some(data),
                 tu_source_path: Some(source_path.to_string()),
@@ -201,7 +201,7 @@ impl ClangParseService {
             Err(err) => ClangParseHelperResponse {
                 success,
                 diagnostics,
-                diagnostic_summary,
+                diagnostic_counts: diagnostic_summary,
                 diagnostic_entries,
                 tu_ecc_data: None,
                 tu_source_path: None,
@@ -409,7 +409,7 @@ impl ClangParseService {
                 Vec::new(),
                 Default::default(),
                 Default::default(),
-                response.diagnostic_summary,
+                response.diagnostic_counts,
                 response.diagnostic_entries.clone(),
             ));
         };
@@ -452,7 +452,7 @@ impl ClangParseService {
                         symbols,
                         rename_offsets,
                         reference_offsets,
-                        response.diagnostic_summary,
+                        response.diagnostic_counts,
                         response.diagnostic_entries.clone(),
                     )
                 })
@@ -658,7 +658,7 @@ namespace test_ns {
         assert!(has_helper_fn, "should find helper_fn");
 
         assert_eq!(
-            result.diagnostic_summary().total(),
+            crate::parser::clang_result::diagnostic_total(&result.diagnostic_counts()),
             result.diagnostics.len(),
             "diagnostic count mismatch"
         );

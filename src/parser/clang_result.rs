@@ -12,7 +12,7 @@ pub struct ClangParseResult {
     pub success: bool,
     pub diagnostics: Vec<String>,
     pub(crate) symbols: Vec<SemanticDeclaration>,
-    diagnostic_summary: ClangDiagnosticSummary,
+    diagnostic_counts: DiagnosticCounts,
     diagnostic_entries: Vec<ClangDiagnosticEntry>,
     rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
     reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
@@ -36,27 +36,17 @@ pub struct ClangDiagnosticEntry {
     pub fix_its: Vec<ClangFixIt>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ClangDiagnosticSummary {
-    pub ignored: usize,
-    pub note: usize,
-    pub warning: usize,
-    pub error: usize,
-    pub fatal: usize,
+/// Diagnostic severity counts indexed directly by `clang_sys::CXDiagnostic_*` constants:
+/// `[0]=Ignored  [1]=Note  [2]=Warning  [3]=Error  [4]=Fatal`
+pub type DiagnosticCounts = [usize; 5];
+
+pub fn diagnostic_total(counts: &DiagnosticCounts) -> usize {
+    counts.iter().sum()
 }
 
-impl ClangDiagnosticSummary {
-    pub fn total(self) -> usize {
-        self.ignored
-            .saturating_add(self.note)
-            .saturating_add(self.warning)
-            .saturating_add(self.error)
-            .saturating_add(self.fatal)
-    }
-
-    pub fn error_total(self) -> usize {
-        self.error.saturating_add(self.fatal)
-    }
+pub fn diagnostic_error_total(counts: &DiagnosticCounts) -> usize {
+    counts[clang_sys::CXDiagnostic_Error as usize]
+        .saturating_add(counts[clang_sys::CXDiagnostic_Fatal as usize])
 }
 
 impl Default for ClangParseResult {
@@ -65,7 +55,7 @@ impl Default for ClangParseResult {
             false,
             Vec::new(),
             Vec::new(),
-            ClangDiagnosticSummary::default(),
+            [0; 5],
             Vec::new(),
         )
     }
@@ -76,7 +66,7 @@ impl ClangParseResult {
         success: bool,
         diagnostics: Vec<String>,
         symbols: Vec<SemanticDeclaration>,
-        diagnostic_summary: ClangDiagnosticSummary,
+        diagnostic_counts: DiagnosticCounts,
         diagnostic_entries: Vec<ClangDiagnosticEntry>,
     ) -> Self {
         Self::with_semantic_offsets(
@@ -85,7 +75,7 @@ impl ClangParseResult {
             symbols,
             FxHashMap::default(),
             FxHashMap::default(),
-            diagnostic_summary,
+            diagnostic_counts,
             diagnostic_entries,
         )
     }
@@ -96,7 +86,7 @@ impl ClangParseResult {
         diagnostics: Vec<String>,
         symbols: Vec<SemanticDeclaration>,
         rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
-        diagnostic_summary: ClangDiagnosticSummary,
+        diagnostic_counts: DiagnosticCounts,
         diagnostic_entries: Vec<ClangDiagnosticEntry>,
     ) -> Self {
         Self::with_semantic_offsets(
@@ -105,7 +95,7 @@ impl ClangParseResult {
             symbols,
             rename_offsets_by_symbol,
             FxHashMap::default(),
-            diagnostic_summary,
+            diagnostic_counts,
             diagnostic_entries,
         )
     }
@@ -116,11 +106,11 @@ impl ClangParseResult {
         symbols: Vec<SemanticDeclaration>,
         rename_offsets_by_symbol: FxHashMap<ClangSymbolKey, Vec<usize>>,
         reference_offsets_by_decl: FxHashMap<ClangDeclKey, Vec<usize>>,
-        diagnostic_summary: ClangDiagnosticSummary,
+        diagnostic_counts: DiagnosticCounts,
         diagnostic_entries: Vec<ClangDiagnosticEntry>,
     ) -> Self {
         assert_eq!(
-            diagnostic_summary.total(),
+            diagnostic_total(&diagnostic_counts),
             diagnostics.len(),
             "clang diagnostic summary count must match diagnostic payload size"
         );
@@ -133,7 +123,7 @@ impl ClangParseResult {
             success,
             diagnostics,
             symbols,
-            diagnostic_summary,
+            diagnostic_counts,
             diagnostic_entries,
             rename_offsets_by_symbol,
             reference_offsets_by_decl,
@@ -142,11 +132,11 @@ impl ClangParseResult {
 
     #[cfg(test)]
     pub fn diagnostic_total(&self) -> usize {
-        self.diagnostic_summary.total()
+        diagnostic_total(&self.diagnostic_counts)
     }
 
-    pub fn diagnostic_summary(&self) -> ClangDiagnosticSummary {
-        self.diagnostic_summary
+    pub fn diagnostic_counts(&self) -> DiagnosticCounts {
+        self.diagnostic_counts
     }
 
     pub fn diagnostic_entries(&self) -> &[ClangDiagnosticEntry] {
@@ -154,7 +144,7 @@ impl ClangParseResult {
     }
 
     pub fn error_diagnostic_count(&self) -> usize {
-        self.diagnostic_summary.error_total()
+        diagnostic_error_total(&self.diagnostic_counts)
     }
 
     pub fn error_diagnostic_lines(&self) -> BTreeSet<usize> {

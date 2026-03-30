@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 
 use crate::parser::clang_types::ClangDeclKey;
 use crate::parser::clang_result::{
-    ClangDiagnosticEntry, ClangDiagnosticSummary, ClangParseResult,
+    ClangDiagnosticEntry, ClangParseResult, DiagnosticCounts, diagnostic_error_total,
 };
 use crate::parser::clang_types::ClangSymbolKey;
 use crate::parser::file_context::SemanticDeclaration;
@@ -19,12 +19,12 @@ impl ParserConsensusSelector {
         };
         let candidate_key = (
             !candidate.success,
-            Self::diagnostic_weight(candidate.diagnostic_summary()),
+            Self::diagnostic_weight(candidate.diagnostic_counts()),
             usize::MAX.saturating_sub(candidate.symbols.len()),
         );
         let current_key = (
             !current.success,
-            Self::diagnostic_weight(current.diagnostic_summary()),
+            Self::diagnostic_weight(current.diagnostic_counts()),
             usize::MAX.saturating_sub(current.symbols.len()),
         );
         candidate_key < current_key
@@ -154,7 +154,7 @@ impl ParserConsensusSelector {
                 .then_with(|| left.severity.cmp(&right.severity))
         });
         let mut diagnostics = Vec::<String>::with_capacity(diagnostic_entries.len());
-        let mut diagnostic_summary = ClangDiagnosticSummary::default();
+        let mut diagnostic_counts: DiagnosticCounts = [0; 5];
         for entry in &diagnostic_entries {
             let key = (entry.line, entry.column, entry.severity);
             if let Some(message) = diag_messages.get(&key) {
@@ -165,23 +165,8 @@ impl ParserConsensusSelector {
                     entry.line, entry.column, entry.severity
                 ));
             }
-            match entry.severity {
-                s if s == clang_sys::CXDiagnostic_Ignored as u32 => {
-                    diagnostic_summary.ignored = diagnostic_summary.ignored.saturating_add(1)
-                }
-                s if s == clang_sys::CXDiagnostic_Note as u32 => {
-                    diagnostic_summary.note = diagnostic_summary.note.saturating_add(1)
-                }
-                s if s == clang_sys::CXDiagnostic_Warning as u32 => {
-                    diagnostic_summary.warning = diagnostic_summary.warning.saturating_add(1)
-                }
-                s if s == clang_sys::CXDiagnostic_Error as u32 => {
-                    diagnostic_summary.error = diagnostic_summary.error.saturating_add(1)
-                }
-                _ => {
-                    diagnostic_summary.fatal = diagnostic_summary.fatal.saturating_add(1)
-                }
-            }
+            let idx = (entry.severity as usize).min(clang_sys::CXDiagnostic_Fatal as usize);
+            diagnostic_counts[idx] = diagnostic_counts[idx].saturating_add(1);
         }
 
         let success = successful_parse_count >= Self::strict_majority_threshold(parse_count)
@@ -192,18 +177,17 @@ impl ParserConsensusSelector {
             symbols,
             rename_offsets_by_symbol,
             reference_offsets_by_decl,
-            diagnostic_summary,
+            diagnostic_counts,
             diagnostic_entries,
         )
     }
 
-    fn diagnostic_weight(summary: ClangDiagnosticSummary) -> u64 {
-        summary
-            .fatal
+    fn diagnostic_weight(counts: DiagnosticCounts) -> u64 {
+        counts[clang_sys::CXDiagnostic_Fatal as usize]
             .saturating_mul(1_000)
-            .saturating_add(summary.error.saturating_mul(100))
-            .saturating_add(summary.warning.saturating_mul(10))
-            .saturating_add(summary.note) as u64
+            .saturating_add(counts[clang_sys::CXDiagnostic_Error as usize].saturating_mul(100))
+            .saturating_add(counts[clang_sys::CXDiagnostic_Warning as usize].saturating_mul(10))
+            .saturating_add(counts[clang_sys::CXDiagnostic_Note as usize]) as u64
     }
 
     fn strict_majority_threshold(voter_count: usize) -> usize {
@@ -220,7 +204,8 @@ impl ParserConsensusSelector {
         if parse.success {
             return true;
         }
-        let summary = parse.diagnostic_summary();
-        summary.fatal <= 1 && summary.error_total() <= 6
+        let counts = parse.diagnostic_counts();
+        counts[clang_sys::CXDiagnostic_Fatal as usize] <= 1
+            && diagnostic_error_total(&counts) <= 6
     }
 }

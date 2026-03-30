@@ -1,45 +1,18 @@
 use std::hash::{Hash, Hasher};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum SemanticRegionKind {
-    File,
-    Preprocessor,
-    Namespace,
-    Type,
-    Function,
-    Declaration,
-    Reference,
-    Diagnostic,
-    Template,
-    Attribute,
-}
-
-impl SemanticRegionKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Preprocessor => "preprocessor",
-            Self::Namespace => "namespace",
-            Self::Type => "type",
-            Self::Function => "function",
-            Self::Declaration => "declaration",
-            Self::Reference => "reference",
-            Self::Diagnostic => "diagnostic",
-            Self::Template => "template",
-            Self::Attribute => "attribute",
-        }
-    }
-}
+pub const REGION_FILE: u16 = u16::MAX;
+pub const REGION_DECLARATION: u16 = u16::MAX - 1;
+pub const REGION_REFERENCE: u16 = u16::MAX - 2;
+pub const REGION_DIAGNOSTIC: u16 = u16::MAX - 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticRegion {
     pub id: u64,
-    pub kind: SemanticRegionKind,
+    pub kind_id: u16,
     pub start_line: usize,
     pub end_line: usize,
     pub start_offset: usize,
     pub end_offset: usize,
-    pub stable_id: Option<String>,
     pub has_diagnostic_error: bool,
 }
 
@@ -47,7 +20,7 @@ impl SemanticRegion {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         canonical_path: &str,
-        kind: SemanticRegionKind,
+        kind_id: u16,
         start_line: usize,
         end_line: usize,
         start_offset: usize,
@@ -57,7 +30,7 @@ impl SemanticRegion {
     ) -> Self {
         let id = Self::stable_region_id(
             canonical_path,
-            kind,
+            kind_id,
             start_line,
             end_line,
             start_offset,
@@ -67,12 +40,11 @@ impl SemanticRegion {
         );
         Self {
             id,
-            kind,
+            kind_id,
             start_line,
             end_line,
             start_offset,
             end_offset,
-            stable_id,
             has_diagnostic_error,
         }
     }
@@ -90,7 +62,7 @@ impl SemanticRegion {
     #[allow(clippy::too_many_arguments)]
     fn stable_region_id(
         canonical_path: &str,
-        kind: SemanticRegionKind,
+        kind_id: u16,
         start_line: usize,
         end_line: usize,
         start_offset: usize,
@@ -100,7 +72,7 @@ impl SemanticRegion {
     ) -> u64 {
         let mut hasher = rustc_hash::FxHasher::default();
         canonical_path.hash(&mut hasher);
-        kind.hash(&mut hasher);
+        kind_id.hash(&mut hasher);
         start_line.hash(&mut hasher);
         end_line.hash(&mut hasher);
         start_offset.hash(&mut hasher);
