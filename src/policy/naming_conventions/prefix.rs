@@ -19,6 +19,8 @@ pub struct PrefixConfig {
     pub(crate) atomic: Box<str>,
     pub(crate) enum_var: Box<str>,
     pub(crate) struct_var: Box<str>,
+    pub(crate) thread: Box<str>,
+    pub(crate) singleton: Box<str>,
 }
 
 impl Default for PrefixConfig {
@@ -41,6 +43,8 @@ impl Default for PrefixConfig {
             atomic: "a_".into(),
             enum_var: "e_".into(),
             struct_var: "t_".into(),
+            thread: "th_".into(),
+            singleton: "sg_".into(),
         }
     }
 }
@@ -54,7 +58,7 @@ impl PrefixConfig {
             &*self.volatile, &*self.pointer, &*self.shared_ptr,
             &*self.unique_ptr, &*self.weak_ptr, &*self.function,
             &*self.reference, &*self.atomic, &*self.enum_var,
-            &*self.struct_var,
+            &*self.struct_var, &*self.thread, &*self.singleton,
         ];
         candidates
             .iter()
@@ -83,7 +87,11 @@ impl NamingConventionsPolicy {
         }
 
         if ctx.ts_static {
-            prefix.push_str(&candidates.static_lower);
+            if ctx.is_method_local {
+                prefix.push_str(&candidates.singleton);
+            } else {
+                prefix.push_str(&candidates.static_lower);
+            }
         }
         if ctx.ts_const {
             prefix.push_str(&candidates.const_lower);
@@ -92,7 +100,7 @@ impl NamingConventionsPolicy {
             prefix.push_str(&candidates.volatile);
         }
         let tmpl = ctx.template_base_name;
-        let type_pfx = if ctx.ts_pointer
+        let mut type_pfx = if ctx.ts_pointer
             || ctx.canonical_type_kind == clang_sys::CXType_Pointer as i32
         {
             match tmpl {
@@ -118,6 +126,23 @@ impl NamingConventionsPolicy {
         } else {
             ""
         };
+        if type_pfx.is_empty() {
+            if let Some(spelling) = ctx.type_spelling {
+                type_pfx = match Self::base_type_name(spelling) {
+                    "thread" | "jthread" => &candidates.thread,
+                    _ => "",
+                };
+            }
+        }
         prefix.push_str(type_pfx);
+    }
+
+    fn base_type_name(spelling: &str) -> &str {
+        let s = spelling
+            .trim_start_matches("const ")
+            .trim_start_matches("volatile ")
+            .trim_start_matches("class ")
+            .trim_start_matches("struct ");
+        s.rsplit("::").next().unwrap_or(s).trim()
     }
 }

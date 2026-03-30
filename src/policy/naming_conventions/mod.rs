@@ -51,6 +51,7 @@ struct StrictIssues {
 struct IdentifierContext<'a> {
     pub(crate) is_field: bool,
     pub(crate) is_global: bool,
+    pub(crate) is_method_local: bool,
     pub(crate) ts_static: bool,
     pub(crate) ts_const: bool,
     pub(crate) ts_volatile: bool,
@@ -59,6 +60,7 @@ struct IdentifierContext<'a> {
     pub(crate) canonical_type_kind: i32,
     pub(crate) num_template_args: i32,
     pub(crate) template_base_name: Option<&'a str>,
+    pub(crate) type_spelling: Option<&'a str>,
 }
 
 struct RenameDiagnostics<'a> {
@@ -137,6 +139,14 @@ impl NamingConventionsPolicy {
         let is_reference = ts_reference
             || decl.canonical_type_kind == clang_sys::CXType_LValueReference as i32
             || decl.canonical_type_kind == clang_sys::CXType_RValueReference as i32;
+        let is_method_local = matches!(
+            decl.semantic_parent_kind,
+            clang_sys::CXCursor_CXXMethod
+                | clang_sys::CXCursor_Constructor
+                | clang_sys::CXCursor_Destructor
+                | clang_sys::CXCursor_FunctionDecl
+                | clang_sys::CXCursor_FunctionTemplate
+        ) && decl.kind == clang_sys::CXCursor_VarDecl as i32;
         IdentifierContext {
             ts_static: decl.storage_class == clang_sys::CX_SC_Static,
             ts_const: decl.is_const_qualified,
@@ -147,6 +157,8 @@ impl NamingConventionsPolicy {
             num_template_args: decl.num_template_args,
             template_base_name: decl.template_base_name.as_deref()
                 .or_else(|| Self::extract_ts_template_name(decl_node, source)),
+            type_spelling: decl.type_spelling.as_deref(),
+            is_method_local,
             ..IdentifierContext::default()
         }
     }
@@ -190,7 +202,29 @@ impl NamingConventionsPolicy {
             }
         }
         ctx.template_base_name = Self::extract_ts_template_name(decl_node, source);
+        ctx.type_spelling = decl_node
+            .child_by_field_id(ts_cpp_symbols::field_type)
+            .and_then(|n| n.utf8_text(source).ok());
+        ctx.is_method_local = Self::ts_is_inside_method(decl_node);
         ctx
+    }
+
+    fn ts_is_inside_method(node: Node<'_>) -> bool {
+        let mut current = node.parent();
+        let mut in_function = false;
+        while let Some(n) = current {
+            if n.kind_id() == ts_cpp_symbols::sym_function_definition {
+                in_function = true;
+            }
+            if in_function
+                && (n.kind_id() == ts_cpp_symbols::sym_class_specifier
+                    || n.kind_id() == ts_cpp_symbols::sym_struct_specifier)
+            {
+                return true;
+            }
+            current = n.parent();
+        }
+        false
     }
 
     const RENAME_CANDIDATE_QUERY: &str = r#"[

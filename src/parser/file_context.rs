@@ -69,6 +69,8 @@ pub struct SemanticDeclaration {
     pub is_volatile_qualified: bool,
     pub template_base_name: Option<String>,
     pub num_template_args: i32,
+    pub type_spelling: Option<String>,
+    pub semantic_parent_kind: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -249,6 +251,8 @@ impl SemanticFileContext {
                     is_volatile_qualified: false,
                     template_base_name: None,
                     num_template_args: 0,
+                    type_spelling: None,
+                    semantic_parent_kind: 0,
                 });
                 declaration_ids.insert(decl_key.clone(), (stable_id, provenance));
             }

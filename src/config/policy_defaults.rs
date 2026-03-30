@@ -37,6 +37,8 @@ fn naming_standard(
     struct_var: &str,
     constexpr_upper: &str,
     static_upper: &str,
+    thread: &str,
+    singleton: &str,
 ) -> Value {
     let mut t = Table::new();
     t.insert("local_prefix".into(), str_val(local));
@@ -56,6 +58,8 @@ fn naming_standard(
     t.insert("struct_var_prefix".into(), str_val(struct_var));
     t.insert("constexpr_prefix_upper".into(), str_val(constexpr_upper));
     t.insert("static_prefix_upper".into(), str_val(static_upper));
+    t.insert("thread_prefix".into(), str_val(thread));
+    t.insert("singleton_prefix".into(), str_val(singleton));
     Value::Table(t)
 }
 
@@ -181,19 +185,19 @@ pub fn default_policy_configs() -> FxHashMap<String, PolicyConfig> {
         let mut standards = Table::new();
         standards.insert("mj".into(), naming_standard(
             "_", "m_", "g_", "s_", "c_", "a_", "p_", "sp_", "up_", "wp_",
-            "f_", "r_", "v_", "e_", "t_", "C_", "S_",
+            "f_", "r_", "v_", "e_", "t_", "C_", "S_", "th_", "sg_",
         ));
         standards.insert("google".into(), naming_standard(
             "", "", "g_", "", "", "", "", "", "", "",
-            "", "", "", "", "", "k", "",
+            "", "", "", "", "", "k", "", "", "",
         ));
         standards.insert("llvm".into(), naming_standard(
             "", "m", "", "", "", "", "", "", "", "",
-            "", "", "", "", "", "k", "",
+            "", "", "", "", "", "k", "", "", "",
         ));
         standards.insert("qt".into(), naming_standard(
             "", "m_", "", "", "", "", "", "", "", "",
-            "", "", "", "", "", "k", "",
+            "", "", "", "", "", "k", "", "", "",
         ));
         t.insert("standards".into(), Value::Table(standards));
         result.insert("naming_conventions".into(), build_policy(t));

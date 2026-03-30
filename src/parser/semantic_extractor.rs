@@ -474,6 +474,16 @@ impl SemanticExtractor {
             (false, false)
         };
 
+        let type_spelling = if unsafe { clang_sys::clang_isDeclaration(kind) != 0 } {
+            let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
+            cxstring_to_option(unsafe { clang_sys::clang_getTypeSpelling(ty) })
+        } else {
+            None
+        };
+
+        let semantic_parent_kind =
+            unsafe { clang_sys::clang_getCursorKind(semantic_parent) } as i32;
+
         let num_template_args = {
             let ty = unsafe { clang_sys::clang_getCursorType(cursor) };
             unsafe { clang_sys::clang_Type_getNumTemplateArguments(ty) }
@@ -518,6 +528,8 @@ impl SemanticExtractor {
             is_volatile_qualified,
             template_base_name,
             num_template_args,
+            type_spelling,
+            semantic_parent_kind,
         })
     }
 

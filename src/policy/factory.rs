@@ -220,6 +220,8 @@ impl PolicyFactory {
                     atomic: get_prefix("atomic_prefix", "a_"),
                     enum_var: get_prefix("enum_var_prefix", "e_"),
                     struct_var: get_prefix("struct_var_prefix", "t_"),
+                    thread: get_prefix("thread_prefix", "th_"),
+                    singleton: get_prefix("singleton_prefix", "sg_"),
                 };
                 Box::new(NamingConventionsPolicy::new(
                     semantic,
