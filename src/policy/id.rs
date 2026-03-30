@@ -21,6 +21,7 @@ pub enum PolicyId {
     NamingConventions,
     SnakeCase,
     NumericLiteralSuffix,
+    DeclarationAlignment,
     Unknown(String),
 }
 
@@ -49,6 +50,7 @@ impl PolicyId {
         if trimmed.eq_ignore_ascii_case("naming_conventions") { return Self::NamingConventions; }
         if trimmed.eq_ignore_ascii_case("snake_case") { return Self::SnakeCase; }
         if trimmed.eq_ignore_ascii_case("numeric_literal_suffix") { return Self::NumericLiteralSuffix; }
+        if trimmed.eq_ignore_ascii_case("declaration_alignment") { return Self::DeclarationAlignment; }
         Self::Unknown(trimmed.to_ascii_lowercase())
     }
 
@@ -77,6 +79,7 @@ impl PolicyId {
             Self::NamingConventions => "naming_conventions",
             Self::SnakeCase => "snake_case",
             Self::NumericLiteralSuffix => "numeric_literal_suffix",
+            Self::DeclarationAlignment => "declaration_alignment",
             Self::Unknown(value) => value.as_str(),
         }
     }

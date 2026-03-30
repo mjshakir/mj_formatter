@@ -78,7 +78,7 @@ pub fn default_policy_configs() -> FxHashMap<String, PolicyConfig> {
         let mut t = Table::new();
         t.insert("name".into(), str_val("clang_format"));
         t.insert("enabled".into(), bool_val(true));
-        t.insert("style".into(), str_val("{BasedOnStyle: LLVM, ColumnLimit: 100, UseTab: Never, IndentWidth: 4, TabWidth: 4, NamespaceIndentation: All, IndentAccessModifiers: true, AccessModifierOffset: 0, BreakBeforeBraces: Attach, AllowShortIfStatementsOnASingleLine: Never, AllowShortBlocksOnASingleLine: Never, AllowShortFunctionsOnASingleLine: Empty, AllowShortLoopsOnASingleLine: true, PointerAlignment: Left, ReferenceAlignment: Left, AlwaysBreakTemplateDeclarations: Yes, IndentPPDirectives: BeforeHash, ReflowComments: false, AlignConsecutiveAssignments: Consecutive, SpaceAfterTemplateKeyword: false, SpaceBeforeParens: Never}"));
+        t.insert("style".into(), str_val("{BasedOnStyle: LLVM, ColumnLimit: 100, UseTab: Never, IndentWidth: 4, TabWidth: 4, NamespaceIndentation: All, IndentAccessModifiers: true, AccessModifierOffset: 0, BreakBeforeBraces: Attach, AllowShortIfStatementsOnASingleLine: Never, AllowShortBlocksOnASingleLine: Never, AllowShortFunctionsOnASingleLine: Empty, AllowShortLoopsOnASingleLine: true, PointerAlignment: Left, ReferenceAlignment: Left, AlwaysBreakTemplateDeclarations: Yes, IndentPPDirectives: BeforeHash, ReflowComments: false, AlignConsecutiveAssignments: Consecutive, AlignConsecutiveDeclarations: Consecutive, SpaceAfterTemplateKeyword: false, SpaceBeforeParens: Never}"));
         t.insert("convergence".into(), convergence_table("layout.whitespace", 1000));
         result.insert("clang_format".into(), build_policy(t));
     }
@@ -237,6 +237,15 @@ pub fn default_policy_configs() -> FxHashMap<String, PolicyConfig> {
         t.insert("mapping".into(), Value::Table(mapping));
         t.insert("convergence".into(), convergence_table("includes.structure", 930));
         result.insert("section_title_normalizer".into(), build_policy(t));
+    }
+
+    // declaration_alignment
+    {
+        let mut t = Table::new();
+        t.insert("name".into(), str_val("declaration_alignment"));
+        t.insert("enabled".into(), bool_val(true));
+        t.insert("convergence".into(), convergence_table("layout.whitespace", 950));
+        result.insert("declaration_alignment".into(), build_policy(t));
     }
 
     // snake_case

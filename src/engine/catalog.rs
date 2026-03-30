@@ -123,6 +123,7 @@ impl PolicyCatalog {
             PolicyId::NamingConventions,
             PolicyId::SnakeCase,
             PolicyId::NumericLiteralSuffix,
+            PolicyId::DeclarationAlignment,
         ] {
             known.insert(id.clone(), Self::entry_for_known_policy(id));
         }
@@ -214,6 +215,7 @@ impl PolicyCatalog {
             PolicyId::NamingConventions => "naming_conventions",
             PolicyId::SnakeCase => "snake_case",
             PolicyId::NumericLiteralSuffix => "numeric_literal_suffix",
+            PolicyId::DeclarationAlignment => "declaration_alignment",
             PolicyId::Unknown(_) => unreachable!("known policy entry cannot be unknown"),
         };
 
@@ -299,6 +301,15 @@ impl PolicyCatalog {
                 allowed_zones: &ZONES_CODE_ONLY,
                 risk_tier: CandidateRiskTier::Medium,
             },
+            PolicyId::DeclarationAlignment => PolicyCapabilities {
+                whitespace_safe: true,
+                structural_safe: true,
+                semantic_rewrite: false,
+                clang_invalidating: false,
+                macro_sensitive: false,
+                allowed_zones: &ZONES_CODE_ONLY,
+                risk_tier: CandidateRiskTier::Low,
+            },
             PolicyId::Unknown(_) => unreachable!("known policy entry cannot be unknown"),
         };
 
@@ -308,7 +319,8 @@ impl PolicyCatalog {
             | PolicyId::SectionTitleNormalizer
             | PolicyId::PragmaOnceSpacing
             | PolicyId::NamespaceEndComments
-            | PolicyId::DashCommentNormalizer => ConvergenceRiskTier::Stabilizer,
+            | PolicyId::DashCommentNormalizer
+            | PolicyId::DeclarationAlignment => ConvergenceRiskTier::Stabilizer,
             PolicyId::NamingConventions
             | PolicyId::SnakeCase
             | PolicyId::FunctionVoidParams
@@ -319,6 +331,7 @@ impl PolicyCatalog {
         let convergence = PolicyConvergenceTemplate {
             priority: match policy_id {
                 PolicyId::ClangFormat => 1_000,
+                PolicyId::DeclarationAlignment => 950,
                 PolicyId::SectionTitleNormalizer => 930,
                 PolicyId::IncludeOrder => 900,
                 PolicyId::PragmaOnceSpacing => 860,
@@ -351,7 +364,9 @@ impl PolicyCatalog {
             hard_invariant: false,
             bypasses_line_conflict: matches!(
                 policy_id,
-                PolicyId::NumericLiteralSuffix | PolicyId::ClangFormat
+                PolicyId::NumericLiteralSuffix
+                    | PolicyId::ClangFormat
+                    | PolicyId::DeclarationAlignment
             ),
             execution_priority: match policy_id {
                 PolicyId::NamingConventions => 10,
@@ -368,6 +383,7 @@ impl PolicyCatalog {
                 | PolicyId::NamespaceEndComments => 60,
                 PolicyId::DashCommentNormalizer | PolicyId::SectionTitleNormalizer => 70,
                 PolicyId::NumericLiteralSuffix => 80,
+                PolicyId::DeclarationAlignment => 85,
                 PolicyId::ClangFormat => 90,
                 PolicyId::Unknown(_) => 80,
             },
@@ -414,6 +430,7 @@ mod tests {
             PolicyId::NamingConventions,
             PolicyId::SnakeCase,
             PolicyId::NumericLiteralSuffix,
+            PolicyId::DeclarationAlignment,
         ]
     }
 

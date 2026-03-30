@@ -16,6 +16,7 @@ use crate::policy::ns_comments::NsCommentsPolicy;
 use crate::policy::naming_conventions::NamingConventionsPolicy;
 use crate::policy::numeric_suffix::NumericLiteralSuffixPolicy;
 use crate::policy::op_spacing::OperatorOverloadSpacingPolicy;
+use crate::policy::decl_align::DeclarationAlignmentPolicy;
 use crate::policy::id::PolicyId;
 use crate::policy::pragma_once::PragmaOnceSpacingPolicy;
 use crate::policy::section_title::SectionTitleNormalizerPolicy;
@@ -240,6 +241,9 @@ impl PolicyFactory {
             }
             PolicyId::NumericLiteralSuffix => {
                 Box::new(NumericLiteralSuffixPolicy::new())
+            }
+            PolicyId::DeclarationAlignment => {
+                Box::new(DeclarationAlignmentPolicy::new())
             }
             PolicyId::Unknown(other) => {
                 Box::new(StubPolicy::new(other, "not ported yet".to_string()))
