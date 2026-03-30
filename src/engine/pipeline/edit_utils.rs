@@ -1,9 +1,9 @@
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::model::edit::Edit;
 use crate::model::policy_result::PolicyResult;
+use crate::policy::id::PolicyId;
 use crate::parser::text_scan;
 
 use super::PolicyPipeline;
@@ -110,7 +110,7 @@ impl PolicyPipeline {
                 continue;
             }
             edits.push(Edit {
-                policy: policy_name.into(),
+                policy: PolicyId::from_str_lossy(policy_name),
                 line: prefix + index + 1,
                 before: left.to_string(),
                 after: right.to_string(),
@@ -201,18 +201,18 @@ impl PolicyPipeline {
         if edits.is_empty() {
             return Some(before_text.to_string());
         }
-        let mut lines: Vec<Cow<'_, str>> = text_scan::TEXT_SCAN
-            .split_lines_as_slices(before_text, true)
-            .into_iter()
-            .map(Cow::Borrowed)
-            .collect();
+        let lines = text_scan::TEXT_SCAN.split_lines_as_slices(before_text, true);
         let mut ordered = edits
             .iter()
             .filter(|edit| edit.line > 0)
             .collect::<Vec<_>>();
         ordered.sort_by_key(|edit| edit.line);
+
+        let mut result = String::with_capacity(before_text.len());
+        let mut src = 0usize;
         let mut offset = 0isize;
-        for edit in ordered {
+
+        for edit in &ordered {
             let base_index = edit.line.saturating_sub(1) as isize + offset;
             if base_index < 0 {
                 continue;
@@ -220,29 +220,43 @@ impl PolicyPipeline {
             let index = base_index as usize;
             let insertion = edit.before.is_empty() && !edit.after.is_empty();
             let deletion = !edit.before.is_empty() && edit.after.is_empty();
+
             if insertion {
                 if index > lines.len() {
                     continue;
                 }
-                lines.insert(index, Cow::Owned(edit.after.clone()));
+                while src < index && src < lines.len() {
+                    result.push_str(lines[src]);
+                    src += 1;
+                }
+                result.push_str(&edit.after);
                 offset = offset.saturating_add(1);
                 continue;
             }
+
             if index >= lines.len() {
                 continue;
             }
+
+            while src < index && src < lines.len() {
+                result.push_str(lines[src]);
+                src += 1;
+            }
+
             if deletion {
-                if lines[index] == edit.before {
-                    lines.remove(index);
+                if src < lines.len() && lines[src] == edit.before {
+                    src += 1;
                     offset = offset.saturating_sub(1);
                 }
-            } else if lines[index] == edit.before {
-                lines[index] = Cow::Owned(edit.after.clone());
+            } else if src < lines.len() && lines[src] == edit.before {
+                result.push_str(&edit.after);
+                src += 1;
             }
         }
-        let mut result = String::with_capacity(before_text.len());
-        for line in &lines {
-            result.push_str(line);
+
+        while src < lines.len() {
+            result.push_str(lines[src]);
+            src += 1;
         }
         Some(result)
     }
