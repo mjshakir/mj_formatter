@@ -1,6 +1,0 @@
-[policy]
-name = "brace_style"
-enabled = false
-type = "python"
-touch_contract = "code_only" # any | code_only | preprocessor_only | whitespace_only
-style = "kr" # kr | allman | stroustrup

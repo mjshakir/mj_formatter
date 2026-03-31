@@ -1,0 +1,1989 @@
+use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+use std::thread;
+use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, Context, Result};
+use clap::Parser;
+use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, warn, Level};
+
+use crate::cli::args::CliArgs;
+use crate::config::app_config::AppConfig;
+use crate::config::loader::ConfigLoader;
+use crate::engine::accuracy_gate::AccuracyGateDecision;
+use crate::engine::retry_optimizer::RetryStrategyOptimizer;
+use crate::files::finder::FileFinder;
+use crate::files::file_io::FileIo;
+use crate::model::edit::Edit;
+use crate::model::file_result::FileResult;
+use crate::model::exec_trace::PolicyExecutionTrace;
+use crate::policy::id::PolicyId;
+use crate::model::run_summary::RunSummary;
+use crate::model::rename_plan::SemanticRenamePlan;
+use crate::model::violation::Violation;
+use crate::parser::clang_service::ClangParseService;
+use crate::parser::manager::ParserManager;
+use crate::engine::certainty_filter::CertaintyFilterState;
+use crate::engine::catalog::policy_catalog;
+use crate::policy::registry::PolicyRegistry;
+use crate::runtime::rollout_state::AccuracyRolloutState;
+use crate::runtime::adaptive_telemetry::{AdaptiveTelemetry, AdaptiveSnapshot};
+use crate::runtime::backup::BackupManifest;
+use crate::runtime::scheduler::{
+    DispatchBatch, DispatchFeatureCache, DispatchHistoryStore, DispatchMode, DispatchObservation,
+    DispatchScheduler,
+};
+use crate::runtime::logging::RuntimeLogging;
+use crate::runtime::cluster_telemetry::{
+    PolicyClusterSnapshotEntry, PolicyClusterTelemetry,
+};
+use crate::runtime::telemetry::{PolicyTelemetry, PolicyTelemetrySnapshotEntry};
+use crate::model::report_record::ReportRecord;
+use crate::runtime::reporter::ReporterProcess;
+use crate::runtime::retry_telemetry::{RetryLearningSnapshot, RetryLearningTelemetry};
+use crate::runtime::journal::RunJournal;
+use crate::runtime::toolchain::ToolchainRequirements;
+
+pub struct App;
+
+pub(crate) struct RunContext {
+    pub(crate) args: CliArgs,
+    pub(crate) config: AppConfig,
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) parser_manager: ParserManager,
+    pub(crate) project_graph_runtime: Option<std::sync::Arc<crate::runtime::graph_runtime::ProjectGraphRuntime>>,
+    pub(crate) file_io: FileIo,
+    pub(crate) effective_jobs: usize,
+    pub(crate) effective_processes: usize,
+    pub(crate) multi_process_enabled: bool,
+    pub(crate) adaptive_state: std::sync::Arc<arc_swap::ArcSwap<CertaintyFilterState>>,
+    pub(crate) adaptive_state_path: PathBuf,
+    pub(crate) interference_state_path: PathBuf,
+    pub(crate) accuracy_rollout_state: AccuracyRolloutState,
+    pub(crate) requested_rollout_profile: crate::config::rollout_profile::AccuracyRolloutProfile,
+    pub(crate) requested_fail_closed: bool,
+    pub(crate) run_journal: Option<RunJournal>,
+}
+
+pub(crate) trait HasPath {
+    fn as_path(&self) -> &Path;
+}
+
+impl HasPath for PathBuf {
+    fn as_path(&self) -> &Path {
+        self
+    }
+}
+
+impl HasPath for WorkerFileResult {
+    fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) struct SemanticPropagationOutcome {
+    pub(crate) index: usize,
+    pub(crate) pending_text: Option<String>,
+    pub(crate) edits: Vec<Edit>,
+    pub(crate) warning: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AccuracyBenchmarkStats {
+    pub(crate) eligible_files: usize,
+    pub(crate) considered_files: usize,
+    pub(crate) exact_matches: usize,
+    pub(crate) true_positive: usize,
+    pub(crate) false_positive: usize,
+    pub(crate) false_negative: usize,
+    pub(crate) true_negative: usize,
+    pub(crate) error_files: usize,
+}
+
+impl AccuracyBenchmarkStats {
+    pub(crate) fn precision(&self) -> f64 {
+        let denom = self.true_positive + self.false_positive;
+        if denom == 0 {
+            1.0
+        } else {
+            (self.true_positive as f64 / denom as f64).clamp(0.0, 1.0)
+        }
+    }
+
+    pub(crate) fn recall(&self) -> f64 {
+        let denom = self.true_positive + self.false_negative;
+        if denom == 0 {
+            1.0
+        } else {
+            (self.true_positive as f64 / denom as f64).clamp(0.0, 1.0)
+        }
+    }
+
+    pub(crate) fn match_ratio(&self) -> f64 {
+        if self.considered_files == 0 {
+            1.0
+        } else {
+            (self.exact_matches as f64 / self.considered_files as f64).clamp(0.0, 1.0)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccuracyProfileThresholds {
+    pub(crate) gate_min_precision: f64,
+    pub(crate) gate_min_recall: f64,
+    pub(crate) gate_min_samples: usize,
+    pub(crate) benchmark_min_precision: f64,
+    pub(crate) benchmark_min_recall: f64,
+    pub(crate) benchmark_min_match_ratio: f64,
+    pub(crate) benchmark_min_samples: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AccuracyGateRolloutSignal {
+    pub(crate) precision: f64,
+    pub(crate) recall: f64,
+    pub(crate) considered_files: usize,
+    pub(crate) failing_files: usize,
+    pub(crate) semantic_required_unmet_files: usize,
+    pub(crate) match_ratio: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkerManifest {
+    pub(crate) shard_index: usize,
+    pub(crate) shard_coverage_fingerprint: String,
+    pub(crate) files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct SyntheticCompileCommand {
+    pub(crate) directory: String,
+    pub(crate) file: String,
+    pub(crate) arguments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkerConvergencePair {
+    pub(crate) loser: PolicyId,
+    pub(crate) winner: PolicyId,
+    pub(crate) count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkerFileResult {
+    pub(crate) path: PathBuf,
+    pub(crate) changed: bool,
+    pub(crate) pending_text: Option<String>,
+    pub(crate) rename_plans: Vec<SemanticRenamePlan>,
+    pub(crate) convergence_pairs: Vec<WorkerConvergencePair>,
+    pub(crate) violations: Vec<Violation>,
+    pub(crate) edits: Vec<Edit>,
+    #[serde(default)]
+    pub(crate) policy_traces: Vec<PolicyExecutionTrace>,
+    #[serde(default)]
+    pub(crate) accuracy_gate: Option<AccuracyGateDecision>,
+    pub(crate) error: Option<String>,
+    pub(crate) warnings: Vec<String>,
+    #[serde(default)]
+    pub(crate) elapsed_engine_ms: f64,
+    #[serde(default)]
+    pub(crate) elapsed_total_ms: f64,
+    #[serde(default)]
+    pub(crate) boot_parse_ms: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkerDispatchObservation {
+    pub(crate) path_identity: String,
+    pub(crate) observed_size: u64,
+    pub(crate) observed_lines: u64,
+    pub(crate) elapsed_wall_ns: u64,
+    #[serde(default)]
+    pub(crate) total_wall_ns: u64,
+    #[serde(default)]
+    pub(crate) retry_effort_units: u64,
+    pub(crate) retry_penalty_ns: u64,
+    pub(crate) error: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkerOutput {
+    pub(crate) shard_index: usize,
+    pub(crate) shard_coverage_fingerprint: String,
+    pub(crate) result_coverage_fingerprint: String,
+    pub(crate) results: Vec<WorkerFileResult>,
+    #[serde(default)]
+    pub(crate) dispatch_observations: Vec<WorkerDispatchObservation>,
+    pub(crate) adaptive_telemetry: AdaptiveSnapshot,
+    pub(crate) policy_telemetry: Vec<PolicyTelemetrySnapshotEntry>,
+    pub(crate) policy_cluster_telemetry: Vec<PolicyClusterSnapshotEntry>,
+    pub(crate) retry_learning: RetryLearningSnapshot,
+}
+
+pub(crate) struct TempDirCleanupGuard {
+    path: PathBuf,
+}
+
+impl TempDirCleanupGuard {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TempDirCleanupGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.path.as_path());
+    }
+}
+
+pub(crate) struct PhaseTiming {
+    pub observation_ms: f64,
+    pub engine_wall_ms: f64,
+    pub write_ms: f64,
+    pub graph_ms: f64,
+    pub engine_wall_started: Instant,
+}
+
+impl App {
+    pub fn run() -> Result<()> {
+        let args = CliArgs::parse();
+        if args.clang_parse_helper {
+            return ClangParseService::run_helper_stdio();
+        }
+        if args.reporter {
+            let report_path = args
+                .reporter_path
+                .as_deref()
+                .unwrap_or("report.ndjson");
+            return crate::runtime::reporter::run_reporter_entry(
+                std::path::Path::new(report_path),
+            );
+        }
+        let mut ctx = match Self::initialize_run(args)? {
+            Some(ctx) => ctx,
+            None => return Ok(()),
+        };
+        let _log_guard = RuntimeLogging::init(ctx.config.verbose);
+
+        if ctx.args.benchmark_only {
+            return Self::run_benchmark(
+                &mut ctx.config,
+                &mut ctx.accuracy_rollout_state,
+                ctx.requested_rollout_profile,
+                ctx.requested_fail_closed,
+            );
+        }
+        if ctx.args.worker_pool {
+            return Self::run_pool_entry(&ctx.args, &ctx.config);
+        }
+        if ctx.args.worker_manifest.is_some() || ctx.args.worker_result.is_some() {
+            return Self::run_worker_entry(&ctx.args, &ctx.config);
+        }
+        let policies = PolicyRegistry::build_enabled(&ctx.config);
+        if ctx.args.list_policies {
+            for policy in &policies {
+                println!(
+                    "policy: {:30} parse={}",
+                    policy.name(),
+                    if policy_catalog().capabilities_by_name(policy.name()).semantic_rewrite { "hybrid" } else { "tree-sitter" }
+                );
+            }
+            return Ok(());
+        }
+
+        let (mut results, observation_ms, engine_wall_started) =
+            Self::run_observation_and_engine(&mut ctx)?;
+        let engine_wall_ms = engine_wall_started.elapsed().as_secs_f64() * 1000.0;
+
+        let (write_ms, graph_ms, project_graph_stats) =
+            Self::run_write_and_graph_phase(&ctx, &mut results)?;
+
+        let (summary, _total_edits, contract_violation_count) =
+            Self::build_and_print_summary(
+                &ctx.config,
+                &results,
+                &PhaseTiming {
+                    observation_ms,
+                    engine_wall_ms,
+                    write_ms,
+                    graph_ms,
+                    engine_wall_started,
+                },
+                project_graph_stats,
+            );
+
+        Self::finalize_run(&mut ctx, &results, &summary, contract_violation_count)?;
+
+        Ok(())
+    }
+
+    fn initialize_run(args: CliArgs) -> Result<Option<RunContext>> {
+        let loader = ConfigLoader;
+        let mut config = loader.load(&args)?;
+        PolicyTelemetry::reset();
+        AdaptiveTelemetry::reset();
+        PolicyClusterTelemetry::reset();
+        RetryLearningTelemetry::reset();
+        let accuracy_rollout_state =
+            AccuracyRolloutState::open(config.accuracy_gate.rollout_state_path.as_path());
+        let requested_rollout_profile = config.accuracy_gate.profile;
+        let effective_rollout_profile =
+            accuracy_rollout_state.effective_profile(requested_rollout_profile);
+        config.accuracy_gate.profile = effective_rollout_profile;
+        Self::apply_profile(&mut config);
+        let requested_fail_closed = config.accuracy_gate.fail_closed;
+        let effective_fail_closed = accuracy_rollout_state.effective_fail_closed(
+            requested_rollout_profile,
+            requested_fail_closed,
+            config.accuracy_gate.rollout_defer_fail_closed_until_stable,
+        );
+        config.accuracy_gate.fail_closed = effective_fail_closed;
+        if Self::is_ci_environment()
+            && config.accuracy_gate.ci_require_benchmark
+            && !config.accuracy_benchmark.enabled
+        {
+            return Err(anyhow!(
+                "accuracy rollout profile '{}' requires accuracy_benchmark_enabled=true in CI",
+                config.accuracy_gate.profile.as_str()
+            ));
+        }
+        if args.undo {
+            BackupManifest::restore(
+                config.backup_dir.as_path(),
+                args.undo_run.as_deref(),
+            )?;
+            return Ok(None);
+        }
+
+        ToolchainRequirements::verify(&config.clang_binary, &config.clang_format_binary)?;
+
+        let mut run_journal = RunJournal::start(&config);
+
+        if config.backup && !config.check && std::env::var("FORMATTER_BACKUP_RUN").is_err() {
+            std::env::set_var("FORMATTER_BACKUP_RUN", Self::backup_run_id());
+        }
+
+        let finder = FileFinder::new(&config)?;
+        let mut files = finder.collect()?;
+        if files.is_empty() {
+            println!("No files matched include/exclude patterns.");
+            if let Some(journal) = run_journal.as_mut() {
+                journal.finish_success(&RunSummary::default());
+            }
+            return Ok(None);
+        }
+        files.sort();
+
+        let parser_manager = ParserManager::with_full_config(
+            config.clang_binary.clone(),
+            config.clang_args.clone(),
+            config.clang_compdb_path.clone(),
+            config.clang_args_mode,
+            config.cpp_standard.clone(),
+            config.semantic_require_compdb,
+            !config.semantic_no_inferred,
+        );
+        let project_graph_runtime = Self::open_project_graph_runtime(&config)?;
+        let file_io = FileIo::new(&config);
+
+        let effective_jobs = Self::resolve_effective_jobs(config.jobs);
+        let effective_processes =
+            Self::resolve_multiprocess_worker_count(config.processes, effective_jobs, files.len());
+        let multi_process_enabled = effective_processes > 1 && files.len() > 1;
+        if config.verbose {
+            let worker_job_plan = if multi_process_enabled {
+                Self::distribute_worker_jobs(effective_jobs, effective_processes)
+            } else {
+                vec![effective_jobs]
+            };
+            debug!(
+                files = files.len(),
+                requested_processes = config.processes,
+                requested_jobs = config.jobs,
+                effective_processes,
+                effective_jobs,
+                worker_job_plan = ?worker_job_plan,
+                multiprocess = multi_process_enabled,
+                "execution plan"
+            );
+        }
+
+        let cache_dir = config
+            .retry_strategy_optimizer
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("var/cache"));
+        let adaptive_state_path = cache_dir.join("certainty_filter_state.bin");
+        let interference_state_path = cache_dir.join("policy_interference_state.bin");
+        let loaded_state = CertaintyFilterState::load_from_path(&adaptive_state_path)
+            .unwrap_or_default();
+        if config.verbose && loaded_state.observation_count > 0 {
+            info!(
+                observation_count = loaded_state.observation_count,
+                path = %adaptive_state_path.display(),
+                "loaded adaptive state from disk"
+            );
+        }
+        let adaptive_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            loaded_state,
+        )));
+
+        Ok(Some(RunContext {
+            args,
+            config,
+            files,
+            parser_manager,
+            project_graph_runtime,
+            file_io,
+            effective_jobs,
+            effective_processes,
+            multi_process_enabled,
+            adaptive_state,
+            adaptive_state_path,
+            interference_state_path,
+            accuracy_rollout_state,
+            requested_rollout_profile,
+            requested_fail_closed,
+            run_journal,
+        }))
+    }
+
+    fn run_observation_and_engine(
+        ctx: &mut RunContext,
+    ) -> Result<(Vec<FileResult>, f64, Instant)> {
+        let observation_ms = 0.0;
+        if ctx.config.verbose {
+            let adaptive_snapshot = ctx.adaptive_state.load();
+            info!(
+                files = ctx.files.len(),
+                observation_count = adaptive_snapshot.observation_count,
+                "observation fused into engine boot parse"
+            );
+        }
+
+        let engine_wall_started = Instant::now();
+        let mut results = if ctx.multi_process_enabled {
+            Self::run_multiprocess_pass(
+                &ctx.args,
+                &ctx.config,
+                ctx.files.clone(),
+                ctx.effective_processes,
+                false,
+                ctx.adaptive_state.clone(),
+            )?
+        } else {
+            Self::run_processing_pass(
+                &ctx.config,
+                ctx.files.clone(),
+                ctx.project_graph_runtime.clone(),
+                true,
+                true,
+                ctx.adaptive_state.clone(),
+            )?
+        };
+
+        results.sort_by(|left, right| left.meta.path.cmp(&right.meta.path));
+        Ok((results, observation_ms, engine_wall_started))
+    }
+
+    fn run_write_and_graph_phase(
+        ctx: &RunContext,
+        results: &mut Vec<FileResult>,
+    ) -> Result<(f64, f64, Option<crate::graph::store::PersistStats>)> {
+        let parallel_pool = if ctx.effective_jobs > 1 {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(ctx.effective_jobs)
+                .build()
+                .ok()
+        } else {
+            None
+        };
+
+        let write_started = Instant::now();
+        let adaptive_snapshot = ctx.adaptive_state.load();
+        let population_edit_success = adaptive_snapshot.edit_success();
+        let population_observation_count = adaptive_snapshot.observation_count;
+
+        let include_parse_updates = !ctx.config.check;
+        let should_graph_refresh = ctx.project_graph_runtime.is_some()
+            && (include_parse_updates || ctx.config.convergence_learn_on_check);
+        let (graph_input, graph_input_warnings) = if should_graph_refresh {
+            let pg = ctx.project_graph_runtime.as_ref().unwrap();
+            let (input, warnings) = Self::extract_graph_refresh_input(
+                results,
+                pg,
+                &ctx.config.project_graph,
+                include_parse_updates,
+                population_observation_count,
+            );
+            (Some(input), warnings)
+        } else {
+            (None, Vec::new())
+        };
+
+        if !ctx.config.check {
+            Self::apply_project_wide_semantic_renames(
+                &ctx.file_io,
+                &ctx.parser_manager,
+                results,
+                parallel_pool.as_ref(),
+                population_edit_success,
+            );
+            Self::apply_write_phase(&ctx.file_io, results, parallel_pool.as_ref());
+        }
+
+        if let Some(ref input) = graph_input {
+            let need_parse = input.targets.iter().filter(|t| t.cached_clang.is_none()).count();
+            if need_parse > 0 {
+                ClangParseService::configure(need_parse);
+            }
+        }
+
+        let graph_started = Instant::now();
+        let (project_graph_stats, graph_warnings) =
+            Self::execute_graph_refresh_and_backup(
+                &ctx.config,
+                graph_input,
+                ctx.project_graph_runtime.as_ref(),
+                &ctx.file_io,
+                &ctx.parser_manager,
+                parallel_pool.as_ref(),
+                results,
+            );
+
+        for (index, warning) in graph_input_warnings.into_iter().chain(graph_warnings) {
+            match index {
+                Some(idx) if idx < results.len() => {
+                    results[idx].warnings.push(warning);
+                }
+                _ => {
+                    if let Some(result) = results.iter_mut().find(|r| r.error.is_none()) {
+                        result.warnings.push(warning);
+                    }
+                }
+            }
+        }
+
+        let write_ms = write_started.elapsed().as_secs_f64() * 1000.0;
+        let graph_ms = graph_started.elapsed().as_secs_f64() * 1000.0;
+        Ok((write_ms, graph_ms, project_graph_stats))
+    }
+
+    fn execute_graph_refresh_and_backup(
+        config: &AppConfig,
+        graph_input: Option<crate::app::graph_refresh::GraphRefreshInput>,
+        project_graph_runtime: Option<&std::sync::Arc<crate::runtime::graph_runtime::ProjectGraphRuntime>>,
+        file_io: &FileIo,
+        parser_manager: &ParserManager,
+        parallel_pool: Option<&rayon::ThreadPool>,
+        results: &[FileResult],
+    ) -> (Option<crate::graph::store::PersistStats>, Vec<(Option<usize>, String)>) {
+        std::thread::scope(|s| {
+            let graph_handle = if let (Some(input), Some(project_graph)) =
+                (graph_input, project_graph_runtime)
+            {
+                Some(s.spawn(|| {
+                    Self::refresh_project_graph_owned(
+                        input,
+                        project_graph,
+                        file_io,
+                        parser_manager,
+                        parallel_pool,
+                    )
+                }))
+            } else {
+                None
+            };
+
+            if !config.check {
+                if let Err(err) = BackupManifest::write(config, results) {
+                    tracing::warn!("failed writing backup manifest: {err:#}");
+                }
+            }
+
+            match graph_handle {
+                Some(handle) => match handle.join() {
+                    Ok(output) => (output.stats, output.warnings),
+                    Err(_) => {
+                        tracing::error!("graph refresh thread panicked");
+                        (None, Vec::new())
+                    }
+                },
+                None => (None, Vec::new()),
+            }
+        })
+    }
+
+    fn build_and_print_summary(
+        config: &AppConfig,
+        results: &[FileResult],
+        timing: &PhaseTiming,
+        project_graph_stats: Option<crate::graph::store::PersistStats>,
+    ) -> (RunSummary, usize, usize) {
+        let mut summary = RunSummary::default();
+        let mut total_edits = 0usize;
+        let mut backup_writes = 0usize;
+        for result in results {
+            summary.merge_file(
+                result.outcome.changed,
+                result.outcome.violations.len(),
+                result.error.is_some(),
+                result.warnings.iter().filter(|w| !w.starts_with("internal:")).count(),
+            );
+            total_edits += result.outcome.edits.len();
+            if result.meta.backup_path.is_some() {
+                backup_writes += 1;
+            }
+
+            if config.verbose {
+                if let Some(error) = &result.error {
+                    error!(path = %result.meta.path.display(), error = %error, "file failed");
+                }
+                for warning in &result.warnings {
+                    if warning.starts_with("internal:") {
+                        continue;
+                    }
+                    warn!(path = %result.meta.path.display(), warning = %warning, "file warning");
+                }
+                for violation in &result.outcome.violations {
+                    let column = violation.column.unwrap_or(1);
+                    println!(
+                        "VIOLATION {}:{}:{} [{}] {}",
+                        result.meta.path.display(),
+                        violation.line,
+                        column,
+                        violation.policy,
+                        violation.message
+                    );
+                }
+                for edit in &result.outcome.edits {
+                    println!(
+                        "EDIT {}:{} [{}] '{}' -> '{}'",
+                        result.meta.path.display(),
+                        edit.line,
+                        edit.policy,
+                        edit.before,
+                        edit.after
+                    );
+                }
+                if let Some(backup_path) = &result.meta.backup_path {
+                    println!(
+                        "BACKUP {} -> {}",
+                        result.meta.path.display(),
+                        backup_path.display()
+                    );
+                }
+            }
+        }
+
+        let elapsed = timing.engine_wall_started.elapsed();
+        let throughput = summary.files_processed as f64 / elapsed.as_secs_f64().max(0.000_1);
+        let contract_violation_count = Self::contract_violation_count(results);
+
+        println!("files processed: {}", summary.files_processed);
+        println!("files changed: {}", summary.files_changed);
+        println!("violations: {}", summary.violations);
+        println!("contract violations: {}", contract_violation_count);
+        println!("errors: {}", summary.errors);
+        println!("warnings: {}", summary.warnings);
+        println!("edits: {}", total_edits);
+        println!("backups: {}", backup_writes);
+        println!("elapsed: {:.3}s", elapsed.as_secs_f64());
+        println!("throughput: {:.2} files/s", throughput);
+        println!(
+            "phases: observation={:.1}ms engine={:.1}ms write={:.1}ms graph={:.1}ms",
+            timing.observation_ms, timing.engine_wall_ms, timing.write_ms, timing.graph_ms,
+        );
+        if let Some(stats) = project_graph_stats {
+            println!(
+                "project_graph: generation={} prune={} tombstone={} nodes {}->{} edges {}->{} metrics {}->{} tombstones {}->{}",
+                stats.generation,
+                stats.prune_enabled,
+                stats.tombstone_enabled,
+                stats.before.nodes,
+                stats.after.nodes,
+                stats.before.edges,
+                stats.after.edges,
+                stats.before.metrics,
+                stats.after.metrics,
+                stats.before.tombstones,
+                stats.after.tombstones
+            );
+            if stats.changed() {
+                println!(
+                    "project_graph_pruned: nodes={} edges={} metrics={} tombstones_added={} tombstones_removed={}",
+                    stats.nodes_removed(),
+                    stats.edges_removed(),
+                    stats.metrics_removed(),
+                    stats.tombstones_added(),
+                    stats.tombstones_removed()
+                );
+            }
+        }
+
+        Self::print_telemetry();
+
+        (summary, total_edits, contract_violation_count)
+    }
+
+    fn print_telemetry() {
+        if tracing::enabled!(Level::INFO) {
+            let telemetry = PolicyTelemetry::snapshot_sorted();
+            if !telemetry.is_empty() {
+                info!(policies = telemetry.len(), "policy telemetry summary");
+                for item in telemetry.iter().take(8) {
+                    info!(
+                        policy = %item.policy,
+                        runs = item.entry.runs,
+                        failures = item.entry.failures,
+                        fatals = item.entry.fatals,
+                        blocked = item.entry.blocked,
+                        confidence_decisions = item.entry.confidence_decisions,
+                        confidence_apply = item.entry.confidence_apply,
+                        confidence_apply_partial = item.entry.confidence_apply_partial,
+                        confidence_advisory_only = item.entry.confidence_advisory_only,
+                        confidence_block = item.entry.confidence_block,
+                        reason_low_consensus = item.entry.reason_low_consensus,
+                        reason_parser_disagreement = item.entry.reason_parser_disagreement,
+                        reason_clang_diagnostics = item.entry.reason_clang_diagnostics,
+                        edits = item.entry.total_edits,
+                        violations = item.entry.total_violations,
+                        avg_ms = item.entry.avg_elapsed_ms(),
+                        total_ms = item.entry.total_elapsed_ms(),
+                        max_ms = item.entry.max_elapsed_ns as f64 / 1_000_000.0,
+                        "policy telemetry"
+                    );
+                }
+            }
+
+            let adaptive = AdaptiveTelemetry::snapshot();
+            if adaptive.threshold_evaluations > 0 || adaptive.outcomes_total() > 0 {
+                info!(
+                    threshold_evaluations = adaptive.threshold_evaluations,
+                    threshold_applied = adaptive.threshold_applied,
+                    threshold_canary = adaptive.threshold_canary,
+                    threshold_suspended = adaptive.threshold_suspended,
+                    confidence_decisions = adaptive.confidence_decisions,
+                    confidence_apply = adaptive.confidence_apply,
+                    confidence_apply_partial = adaptive.confidence_apply_partial,
+                    confidence_advisory_only = adaptive.confidence_advisory_only,
+                    confidence_block = adaptive.confidence_block,
+                    reason_low_consensus = adaptive.reason_low_consensus,
+                    reason_parser_strict = adaptive.reason_parser_strict,
+                    reason_parser_hardened =
+                        adaptive.reason_parser_hardened,
+                    reason_parser_relaxed =
+                        adaptive.reason_parser_relaxed,
+                    reason_coverage_low = adaptive.reason_coverage_low,
+                    reason_semantic_low = adaptive.reason_semantic_low,
+                    reason_parser_disagreement = adaptive.reason_parser_disagreement,
+                    reason_clang_diagnostics = adaptive.reason_clang_diagnostics,
+                    first_pass = adaptive.outcomes_first_pass,
+                    after_retry = adaptive.outcomes_after_retry,
+                    reverted = adaptive.outcomes_reverted,
+                    rollback_events = adaptive.rollback_events,
+                    last_threshold = adaptive.last_threshold,
+                    last_delta = adaptive.last_delta,
+                    ema_failure = adaptive.last_ema_failure_rate,
+                    ema_revert = adaptive.last_ema_revert_rate,
+                    max_abs_drift = adaptive.max_abs_drift,
+                    "adaptive confidence telemetry"
+                );
+            }
+        }
+
+        let adaptive = AdaptiveTelemetry::snapshot();
+        if adaptive.threshold_evaluations > 0 || adaptive.outcomes_total() > 0 {
+            println!(
+                "adaptive_confidence: outcomes(first_pass={}, after_retry={}, reverted={}) threshold(apply={}, canary={}, suspended={}) confidence(decisions={}, apply={}, partial={}, advisory={}, block={}) reasons(low_consensus={}, parser_disagreement={}, clang_diagnostics={}) rollbacks={} drift(max={:.3}, last={:.3}) ema(failure={:.3}, revert={:.3}) delta(last={:.3})",
+                adaptive.outcomes_first_pass,
+                adaptive.outcomes_after_retry,
+                adaptive.outcomes_reverted,
+                adaptive.threshold_applied,
+                adaptive.threshold_canary,
+                adaptive.threshold_suspended,
+                adaptive.confidence_decisions,
+                adaptive.confidence_apply,
+                adaptive.confidence_apply_partial,
+                adaptive.confidence_advisory_only,
+                adaptive.confidence_block,
+                adaptive.reason_low_consensus,
+                adaptive.reason_parser_disagreement,
+                adaptive.reason_clang_diagnostics,
+                adaptive.rollback_events,
+                adaptive.max_abs_drift,
+                adaptive.last_drift,
+                adaptive.last_ema_failure_rate,
+                adaptive.last_ema_revert_rate,
+                adaptive.last_delta
+            );
+        }
+    }
+
+    fn finalize_run(
+        ctx: &mut RunContext,
+        results: &[FileResult],
+        summary: &RunSummary,
+        contract_violation_count: usize,
+    ) -> Result<()> {
+        let report_dir = ctx.config.report_path.parent().unwrap_or(Path::new("."));
+        let report_name = ctx
+            .config
+            .report_path
+            .file_name()
+            .unwrap_or("report.ndjson".as_ref());
+        let run_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let run_report_path = report_dir.join(run_ts.to_string()).join(report_name);
+        let reporter = ReporterProcess::spawn(run_report_path)
+            .context("failed spawning reporter process")?;
+        for result in results {
+            reporter.try_send(ReportRecord::from(result));
+        }
+        reporter.finish().with_context(|| {
+            format!(
+                "failed finishing reporter process at {}",
+                report_dir.display()
+            )
+        })?;
+
+        let gate_rollout_signal = if ctx.config.accuracy_gate.enabled {
+            Self::collect_accuracy_gate_rollout_signal(results)
+        } else {
+            None
+        };
+        let benchmark_spawned = Self::spawn_benchmark(&ctx.args, &ctx.config)?;
+        if benchmark_spawned {
+            println!("accuracy_benchmark: scheduled async");
+        } else {
+            Self::finalize_accuracy_validation(
+                &mut ctx.config,
+                &mut ctx.accuracy_rollout_state,
+                ctx.requested_rollout_profile,
+                ctx.requested_fail_closed,
+                gate_rollout_signal,
+            )?;
+        }
+        if Self::is_ci_environment()
+            && ctx.config.accuracy_gate.ci_require_benchmark
+            && ctx.config.accuracy_gate.enabled
+            && contract_violation_count > 0
+        {
+            return Err(anyhow!(
+                "accuracy gate CI contract violation threshold exceeded: {} > 0",
+                contract_violation_count
+            ));
+        }
+        if let Some(journal) = ctx.run_journal.as_mut() {
+            journal.finish_success(summary);
+        }
+
+        if let Some(final_state) = CertaintyFilterState::load_from_path(&ctx.adaptive_state_path) {
+            if ctx.config.verbose {
+                info!(
+                    observation_count = final_state.observation_count,
+                    path = %ctx.adaptive_state_path.display(),
+                    "adaptive state persisted"
+                );
+            }
+        } else {
+            let fallback = ctx.adaptive_state.load();
+            if let Err(err) = fallback.save_to_path(&ctx.adaptive_state_path) {
+                warn!(error = %err, path = %ctx.adaptive_state_path.display(), "failed to persist adaptive state");
+            } else if ctx.config.verbose {
+                info!(
+                    observation_count = fallback.observation_count,
+                    path = %ctx.adaptive_state_path.display(),
+                    "saved adaptive state to disk (no worker shards)"
+                );
+            }
+        }
+
+        // Persist interference state (merge shards if multi-process, or load from IPC)
+        {
+            use crate::engine::policy_interference::PolicyInterferenceState;
+            if let Some(state) = PolicyInterferenceState::load_from_path(&ctx.interference_state_path) {
+                if ctx.config.verbose {
+                    let count: u32 = state.interference.values().map(|s| s.observation_count).sum();
+                    info!(
+                        total_interference_observations = count,
+                        path = %ctx.interference_state_path.display(),
+                        "interference state persisted"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn is_benchmark_source_file(path: &Path) -> bool {
+        matches!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("c")
+                | Some("cc")
+                | Some("cpp")
+                | Some("cxx")
+                | Some("h")
+                | Some("hh")
+                | Some("hpp")
+                | Some("hxx")
+                | Some("ipp")
+                | Some("inl")
+        )
+    }
+
+    pub(crate) fn write_synthetic_compile_commands(
+        output_path: &Path,
+        files: &[PathBuf],
+        include_root: &Path,
+        cpp_standard: &str,
+    ) -> Result<()> {
+        let include_root =
+            fs::canonicalize(include_root).unwrap_or_else(|_| include_root.to_path_buf());
+        let include_root_arg = format!("-I{}", include_root.to_string_lossy());
+        let std_flag = format!("-std={cpp_standard}");
+        let mut commands = Vec::<SyntheticCompileCommand>::with_capacity(files.len());
+        for file in files {
+            let canonical = fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+            let directory = canonical
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| include_root.clone());
+            let file_arg = canonical.to_string_lossy().to_string();
+            commands.push(SyntheticCompileCommand {
+                directory: directory.to_string_lossy().to_string(),
+                file: file_arg.clone(),
+                arguments: vec![
+                    "clang++".to_string(),
+                    std_flag.clone(),
+                    "-x".to_string(),
+                    "c++".to_string(),
+                    "-fsyntax-only".to_string(),
+                    include_root_arg.clone(),
+                    file_arg,
+                ],
+            });
+        }
+        let payload = serde_json::to_vec(commands.as_slice())
+            .context("failed serializing synthetic benchmark compile_commands")?;
+        fs::write(output_path, payload).with_context(|| {
+            format!(
+                "failed writing synthetic benchmark compile_commands {}",
+                output_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn to_worker_file_result(result: FileResult) -> WorkerFileResult {
+        let mut convergence_pairs = Vec::with_capacity(result.outcome.convergence_pairs.len());
+        for ((loser, winner), count) in result.outcome.convergence_pairs {
+            convergence_pairs.push(WorkerConvergencePair {
+                loser: loser.into(),
+                winner: winner.into(),
+                count,
+            });
+        }
+        WorkerFileResult {
+            path: result.meta.path,
+            changed: result.outcome.changed,
+            pending_text: result.outcome.pending_text,
+            rename_plans: result.outcome.rename_plans,
+            convergence_pairs,
+            violations: result.outcome.violations,
+            edits: result.outcome.edits,
+            policy_traces: result.traces,
+            accuracy_gate: result.outcome.accuracy_gate,
+            error: result.error,
+            warnings: result.warnings,
+            elapsed_engine_ms: result.meta.engine_ms,
+            elapsed_total_ms: result.meta.total_ms,
+            boot_parse_ms: result.meta.boot_parse_ms,
+        }
+    }
+
+    pub(crate) fn from_worker_file_result(result: WorkerFileResult) -> FileResult {
+        let mut convergence_pairs = BTreeMap::new();
+        for pair in result.convergence_pairs {
+            if pair.count == 0 {
+                continue;
+            }
+            *convergence_pairs
+                .entry((pair.loser.to_string(), pair.winner.to_string()))
+                .or_insert(0usize) += pair.count;
+        }
+        FileResult {
+            meta: crate::model::file_result::FileMeta {
+                path: result.path,
+                backup_path: None,
+                engine_ms: result.elapsed_engine_ms,
+                total_ms: result.elapsed_total_ms,
+                boot_parse_ms: result.boot_parse_ms,
+            },
+            outcome: crate::model::file_result::FormatOutcome {
+                changed: result.changed,
+                pending_text: result.pending_text,
+                rename_plans: result.rename_plans,
+                convergence_pairs,
+                violations: result.violations,
+                edits: result.edits,
+                accuracy_gate: result.accuracy_gate,
+                clang_parse: None,
+            },
+            traces: result.policy_traces,
+            error: result.error,
+            warnings: result.warnings,
+        }
+    }
+
+    pub(crate) fn to_worker_dispatch_observation(
+        observation: DispatchObservation,
+    ) -> WorkerDispatchObservation {
+        WorkerDispatchObservation {
+            path_identity: observation.path_identity,
+            observed_size: observation.observed_size,
+            observed_lines: observation.observed_lines,
+            elapsed_wall_ns: observation.elapsed_wall_ns,
+            total_wall_ns: observation.total_wall_ns,
+            retry_effort_units: observation.retry_effort_units,
+            retry_penalty_ns: observation.retry_penalty_ns,
+            error: observation.error,
+        }
+    }
+
+    pub(crate) fn from_worker_dispatch_observation(
+        observation: WorkerDispatchObservation,
+    ) -> DispatchObservation {
+        DispatchObservation {
+            path_identity: observation.path_identity,
+            observed_size: observation.observed_size,
+            observed_lines: observation.observed_lines,
+            elapsed_wall_ns: observation.elapsed_wall_ns,
+            total_wall_ns: observation.total_wall_ns,
+            retry_effort_units: observation.retry_effort_units,
+            retry_penalty_ns: observation.retry_penalty_ns,
+            error: observation.error,
+        }
+    }
+
+    pub(crate) fn validate_worker_shard_coverage(
+        index: usize,
+        results: &[WorkerFileResult],
+        expected_paths: &[PathBuf],
+    ) -> Result<()> {
+        let expected_counts = Self::path_counts(expected_paths);
+        let actual_counts = Self::path_counts(results);
+        if expected_counts == actual_counts {
+            return Ok(());
+        }
+        let mut missing = Vec::<String>::new();
+        let mut extras = Vec::<String>::new();
+        for (key, expected) in &expected_counts {
+            let actual = actual_counts.get(key).copied().unwrap_or(0);
+            if actual < *expected {
+                missing.push(format!("{key} ({actual}/{expected})"));
+            }
+        }
+        for (key, actual) in &actual_counts {
+            let expected = expected_counts.get(key).copied().unwrap_or(0);
+            if *actual > expected {
+                extras.push(format!("{key} ({actual}/{expected})"));
+            }
+        }
+        missing.sort();
+        extras.sort();
+        Err(anyhow!(
+            "worker {} produced non-deterministic shard coverage: missing [{}]; extras [{}]",
+            index + 1,
+            missing.join(", "),
+            extras.join(", ")
+        ))
+    }
+
+    fn path_counts<T: HasPath>(items: &[T]) -> FxHashMap<String, usize> {
+        let mut counts = FxHashMap::default();
+        for item in items {
+            let key = Self::path_identity(item.as_path());
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    pub(crate) fn coverage_fingerprint<T: HasPath>(items: &[T]) -> String {
+        let counts = Self::path_counts(items);
+        Self::fingerprint_from_counts(&counts)
+    }
+
+    fn fingerprint_from_counts(counts: &FxHashMap<String, usize>) -> String {
+        let mut entries = counts
+            .iter()
+            .map(|(path, count)| format!("{path}:{count}"))
+            .collect::<Vec<_>>();
+        entries.sort();
+        let payload = entries.join("|");
+        let checksum = crate::files::crc::hash(payload.as_bytes());
+        format!("{checksum:08x}-{:x}", payload.len())
+    }
+
+    pub(crate) fn validate_and_order_multiprocess_results(
+        results: Vec<FileResult>,
+        expected_paths: &[PathBuf],
+    ) -> Result<Vec<FileResult>> {
+        let mut expected_counts = FxHashMap::default();
+        for path in expected_paths {
+            let key = Self::path_identity(path.as_path());
+            *expected_counts.entry(key).or_insert(0) += 1;
+        }
+        let mut keyed = Vec::<(String, FileResult)>::with_capacity(results.len());
+        for result in results {
+            let key = Self::path_identity(result.meta.path.as_path());
+            keyed.push((key, result));
+        }
+
+        let mut actual_counts = FxHashMap::default();
+        for (key, _) in &keyed {
+            *actual_counts.entry(key.clone()).or_insert(0) += 1;
+        }
+        if expected_counts != actual_counts {
+            let mut missing = Vec::<String>::new();
+            let mut extras = Vec::<String>::new();
+            for (key, expected) in &expected_counts {
+                let actual = actual_counts.get(key).copied().unwrap_or(0);
+                if actual < *expected {
+                    missing.push(format!("{key} ({actual}/{expected})"));
+                }
+            }
+            for (key, actual) in &actual_counts {
+                let expected = expected_counts.get(key).copied().unwrap_or(0);
+                if *actual > expected {
+                    extras.push(format!("{key} ({actual}/{expected})"));
+                }
+            }
+            missing.sort();
+            extras.sort();
+            return Err(anyhow!(
+                "multiprocess deterministic merge mismatch: missing [{}]; extras [{}]",
+                missing.join(", "),
+                extras.join(", ")
+            ));
+        }
+
+        keyed.sort_by(|(left_key, left_result), (right_key, right_result)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_result.meta.path.cmp(&right_result.meta.path))
+        });
+        Ok(keyed.into_iter().map(|(_, result)| result).collect())
+    }
+
+    pub(crate) fn wait_worker_output_with_timeout(
+        mut child: Child,
+        timeout: Duration,
+        kill_grace: Duration,
+    ) -> Result<std::process::Output> {
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    return child
+                        .wait_with_output()
+                        .context("failed collecting worker output");
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(anyhow!("failed polling worker process: {err}"));
+                }
+            }
+
+            if started.elapsed() >= timeout {
+                let _ = child.kill();
+                let kill_started = Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) => {
+                            if kill_started.elapsed() >= kill_grace {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let stderr = child
+                    .wait_with_output()
+                    .map(|output| Self::worker_log_excerpt(output.stderr.as_slice(), 48))
+                    .unwrap_or_else(|_| "<stderr unavailable>".to_string());
+                return Err(anyhow!(
+                    "worker timed out after {}s (kill grace {}s); stderr: {}",
+                    timeout.as_secs(),
+                    kill_grace.as_secs(),
+                    stderr
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    pub(crate) fn merge_worker_learning_states(
+        config: &AppConfig,
+        adaptive_state_shards: &[PathBuf],
+        retry_optimizer_state_shards: &[PathBuf],
+    ) -> Result<()> {
+        let loaded_shards: Vec<CertaintyFilterState> = adaptive_state_shards
+            .iter()
+            .filter_map(|p| CertaintyFilterState::load_from_path(p))
+            .collect();
+        if !loaded_shards.is_empty() {
+            let merged = CertaintyFilterState::merge_shards(&loaded_shards);
+            let dest = config
+                .retry_strategy_optimizer
+                .path
+                .parent()
+                .unwrap_or_else(|| Path::new("var/cache"))
+                .join("certainty_filter_state.bin");
+            if let Err(err) = merged.save_to_path(&dest) {
+                warn!(error = %err, "failed to persist merged adaptive state shards");
+            }
+        }
+        if config.retry_strategy_optimizer.enabled {
+            RetryStrategyOptimizer::merge_state_files(
+                config.retry_strategy_optimizer.path.as_path(),
+                retry_optimizer_state_shards,
+                &config.retry_strategy_optimizer,
+            )
+            .with_context(|| {
+                format!(
+                    "failed merging retry strategy optimizer worker states into {}",
+                    config.retry_strategy_optimizer.path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_base_args(
+        command: &mut Command,
+        args: &CliArgs,
+        config: &AppConfig,
+        worker_jobs: usize,
+    ) {
+        if let Some(config_path) = args.config.as_ref() {
+            command.arg("--config").arg(config_path);
+        }
+        if let Some(root) = args.root.as_ref() {
+            command.arg("--root").arg(root);
+        }
+        for include in &args.include {
+            command.arg("--include").arg(include);
+        }
+        for exclude in &args.exclude {
+            command.arg("--exclude").arg(exclude);
+        }
+        for enable in &args.enable {
+            command.arg("--enable").arg(enable);
+        }
+        for disable in &args.disable {
+            command.arg("--disable").arg(disable);
+        }
+        if config.check {
+            command.arg("--check");
+        }
+        command.arg("--jobs").arg(worker_jobs.to_string());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_file_shards(files: Vec<PathBuf>, worker_count: usize) -> Vec<Vec<PathBuf>> {
+        let parser_manager = ParserManager::new();
+        let history = DispatchHistoryStore::ephemeral();
+        let mut feature_cache = DispatchFeatureCache::ephemeral();
+        Self::build_file_batches(
+            files,
+            worker_count,
+            DispatchMode::WorkerProcess,
+            &parser_manager,
+            &history,
+            &mut feature_cache,
+        )
+        .into_iter()
+        .map(|batch| batch.paths)
+        .collect()
+    }
+
+    pub(crate) fn build_file_batches(
+        files: Vec<PathBuf>,
+        parallelism: usize,
+        mode: DispatchMode,
+        parser_manager: &ParserManager,
+        history: &DispatchHistoryStore,
+        feature_cache: &mut DispatchFeatureCache,
+    ) -> Vec<DispatchBatch> {
+        DispatchScheduler::plan_batches(
+            files,
+            parallelism,
+            mode,
+            parser_manager,
+            history,
+            feature_cache,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn schedule_files_for_parallel(files: Vec<PathBuf>) -> Vec<PathBuf> {
+        let parser_manager = ParserManager::new();
+        let history = DispatchHistoryStore::ephemeral();
+        let mut feature_cache = DispatchFeatureCache::ephemeral();
+        Self::build_file_batches(
+            files,
+            1,
+            DispatchMode::InProcess,
+            &parser_manager,
+            &history,
+            &mut feature_cache,
+        )
+        .into_iter()
+        .flat_map(|batch| batch.paths)
+        .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path_sort_key(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    pub(crate) fn worker_temp_root() -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fmt_workers_{}_{}",
+            std::process::id(),
+            stamp
+        ))
+    }
+
+    pub(crate) fn worker_log_excerpt(bytes: &[u8], max_lines: usize) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        let mut lines = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            return "<no stderr output>".to_string();
+        }
+        if lines.len() > max_lines.max(1) {
+            let keep = max_lines.max(1);
+            lines = lines.split_off(lines.len() - keep);
+        }
+        lines.join(" | ")
+    }
+
+    pub(crate) fn is_ci_environment() -> bool {
+        std::env::var("CI")
+            .ok()
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !normalized.is_empty() && normalized != "0" && normalized != "false"
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn backup_run_id() -> String {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis().to_string())
+            .unwrap_or_else(|_| "0".to_string())
+    }
+
+    pub(crate) fn cache_fingerprint(config: &AppConfig) -> String {
+        let mut lines = Vec::<String>::new();
+        lines.push(format!("root={}", config.root.display()));
+        lines.push(format!("check={}", config.check));
+        lines.push(format!("clang_binary={}", config.clang_binary));
+        lines.push(format!(
+            "clang_compdb_path={}",
+            config
+                .clang_compdb_path
+                .as_ref()
+                .map(|value| value.display().to_string())
+                .unwrap_or_default()
+        ));
+        lines.push(format!("clang_args_mode={:?}", config.clang_args_mode));
+        lines.push(format!(
+            "semantic_fidelity=require_compdb:{} disable_inferred_includes:{}",
+            config.semantic_require_compdb, config.semantic_no_inferred
+        ));
+        lines.push(format!(
+            "accuracy_gate={}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}:{}",
+            config.accuracy_gate.enabled,
+            config.accuracy_gate.min_precision,
+            config.accuracy_gate.min_recall,
+            config.accuracy_gate.min_samples,
+            config.accuracy_gate.semantic_required,
+            config.accuracy_gate.fail_closed,
+            config.accuracy_gate.profile.as_str(),
+            config.accuracy_gate.rollout_defer_fail_closed_until_stable,
+            config.accuracy_gate.rollout_stable_passes_required,
+            config.accuracy_gate.ci_require_benchmark
+        ));
+        for include in &config.include_patterns {
+            lines.push(format!("include={include}"));
+        }
+        for exclude in &config.exclude_patterns {
+            lines.push(format!("exclude={exclude}"));
+        }
+        for arg in &config.clang_args {
+            lines.push(format!("clang_arg={arg}"));
+        }
+        let mut policy_names = config.policy_settings.keys().cloned().collect::<Vec<_>>();
+        policy_names.sort();
+        for name in policy_names {
+            if let Some(policy) = config.policy_settings.get(name.as_str()) {
+                lines.push(format!(
+                    "policy={}:{:?}:{}",
+                    name, policy.enabled, policy.raw
+                ));
+            }
+        }
+        let payload = lines.join("\n");
+        let checksum = crate::files::crc::hash(payload.as_bytes());
+        format!("{checksum:08x}-{:x}", payload.len())
+    }
+
+    pub(crate) fn path_identity(path: &std::path::Path) -> String {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    pub(crate) fn collect_convergence_pairs(
+        results: &[FileResult],
+    ) -> BTreeMap<(String, String), usize> {
+        let mut pairs = BTreeMap::<(String, String), usize>::new();
+        for result in results {
+            for ((loser, winner), count) in &result.outcome.convergence_pairs {
+                if *count == 0 {
+                    continue;
+                }
+                *pairs.entry((loser.clone(), winner.clone())).or_insert(0) += count;
+            }
+        }
+        pairs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::app::runner::{App, WorkerFileResult};
+    use crate::engine::accuracy_gate::{
+        AccuracyGateDecision, AccuracyGateReason, AccuracyGateStatus,
+    };
+    use crate::model::file_result::{FileMeta, FormatOutcome, FileResult};
+    use crate::runtime::scheduler::DispatchObservation;
+
+    #[test]
+    fn convergence_aggregates_files() {
+        let first = FileResult {
+            meta: FileMeta {
+                path: PathBuf::from("a.hpp"),
+                ..FileMeta::default()
+            },
+            outcome: FormatOutcome {
+                convergence_pairs: BTreeMap::from([(
+                    ("naming_conventions".to_string(), "clang_format".to_string()),
+                    2usize,
+                )]),
+                ..FormatOutcome::default()
+            },
+            ..FileResult::default()
+        };
+        let second = FileResult {
+            meta: FileMeta {
+                path: PathBuf::from("b.hpp"),
+                ..FileMeta::default()
+            },
+            outcome: FormatOutcome {
+                convergence_pairs: BTreeMap::from([
+                    (
+                        ("naming_conventions".to_string(), "clang_format".to_string()),
+                        3usize,
+                    ),
+                    (
+                        ("snake_case".to_string(), "clang_format".to_string()),
+                        1usize,
+                    ),
+                ]),
+                ..FormatOutcome::default()
+            },
+            ..FileResult::default()
+        };
+        let pairs = App::collect_convergence_pairs(&[first, second]);
+        assert_eq!(
+            pairs.get(&("naming_conventions".to_string(), "clang_format".to_string())),
+            Some(&5usize)
+        );
+        assert_eq!(
+            pairs.get(&("snake_case".to_string(), "clang_format".to_string())),
+            Some(&1usize)
+        );
+    }
+
+    #[test]
+    fn workers_caps_parallelism() {
+        let available = App::available_parallelism();
+        let requested = available.saturating_add(8);
+        assert_eq!(App::resolve_effective_workers(requested), available);
+        assert_eq!(App::resolve_effective_workers(0), available);
+    }
+
+    #[test]
+    fn jobs_respects_budget() {
+        let available = App::available_parallelism();
+        let requested = available.saturating_add(8);
+        assert_eq!(App::resolve_effective_jobs(requested), requested);
+        assert_eq!(App::resolve_effective_jobs(0), available);
+    }
+
+    #[test]
+    fn excerpt_empty_stderr() {
+        assert_eq!(App::worker_log_excerpt(&[], 8), "<no stderr output>");
+        assert_eq!(
+            App::worker_log_excerpt(b"\n\n   \n", 8),
+            "<no stderr output>"
+        );
+    }
+
+    #[test]
+    fn dispatch_round_trips() {
+        let observation = DispatchObservation {
+            path_identity: "src/a.cpp".to_string(),
+            observed_size: 128,
+            observed_lines: 16,
+            elapsed_wall_ns: 5_000,
+            total_wall_ns: 7_500,
+            retry_effort_units: 3,
+            retry_penalty_ns: 1_000,
+            error: false,
+        };
+        let encoded = App::to_worker_dispatch_observation(observation.clone());
+        let decoded = App::from_worker_dispatch_observation(encoded);
+        assert_eq!(decoded.path_identity, observation.path_identity);
+        assert_eq!(decoded.observed_size, observation.observed_size);
+        assert_eq!(decoded.observed_lines, observation.observed_lines);
+        assert_eq!(decoded.elapsed_wall_ns, observation.elapsed_wall_ns);
+        assert_eq!(decoded.total_wall_ns, observation.total_wall_ns);
+        assert_eq!(decoded.retry_effort_units, observation.retry_effort_units);
+        assert_eq!(decoded.retry_penalty_ns, observation.retry_penalty_ns);
+        assert_eq!(decoded.error, observation.error);
+    }
+
+    #[test]
+    fn excerpt_keeps_tail() {
+        let sample = b"line1\nline2\nline3\nline4\n";
+        assert_eq!(
+            App::worker_log_excerpt(sample, 2),
+            "line3 | line4".to_string()
+        );
+    }
+
+    #[test]
+    fn multiprocess_sorts_paths() {
+        let expected = vec![
+            PathBuf::from("include/B.hpp"),
+            PathBuf::from("include/A.hpp"),
+            PathBuf::from("src/C.cpp"),
+        ];
+        let results = vec![
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("src/C.cpp"), ..FileMeta::default() },
+                ..FileResult::default()
+            },
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("include/B.hpp"), ..FileMeta::default() },
+                ..FileResult::default()
+            },
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("include/A.hpp"), ..FileMeta::default() },
+                ..FileResult::default()
+            },
+        ];
+        let ordered = App::validate_and_order_multiprocess_results(results, expected.as_slice())
+            .expect("ordered results");
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0].meta.path, PathBuf::from("include/A.hpp"));
+        assert_eq!(ordered[1].meta.path, PathBuf::from("include/B.hpp"));
+        assert_eq!(ordered[2].meta.path, PathBuf::from("src/C.cpp"));
+    }
+
+    #[test]
+    fn multiprocess_rejects_mismatch() {
+        let expected = vec![PathBuf::from("a.cpp"), PathBuf::from("b.cpp")];
+        let results = vec![
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("a.cpp"), ..FileMeta::default() },
+                ..FileResult::default()
+            },
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("a.cpp"), ..FileMeta::default() },
+                ..FileResult::default()
+            },
+        ];
+        let error = App::validate_and_order_multiprocess_results(results, expected.as_slice())
+            .expect_err("coverage mismatch should fail");
+        assert!(error.to_string().contains("deterministic merge mismatch"));
+    }
+
+    #[test]
+    fn shard_accepts_exact() {
+        let expected = vec![PathBuf::from("a.cpp"), PathBuf::from("b.cpp")];
+        let results = vec![
+            WorkerFileResult {
+                path: PathBuf::from("b.cpp"),
+                changed: false,
+                pending_text: None,
+                rename_plans: Vec::new(),
+                convergence_pairs: Vec::new(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                policy_traces: Vec::new(),
+                accuracy_gate: None,
+                error: None,
+                warnings: Vec::new(),
+                elapsed_engine_ms: 0.0,
+                elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
+            },
+            WorkerFileResult {
+                path: PathBuf::from("a.cpp"),
+                changed: false,
+                pending_text: None,
+                rename_plans: Vec::new(),
+                convergence_pairs: Vec::new(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                policy_traces: Vec::new(),
+                accuracy_gate: None,
+                error: None,
+                warnings: Vec::new(),
+                elapsed_engine_ms: 0.0,
+                elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
+            },
+        ];
+        App::validate_worker_shard_coverage(0, results.as_slice(), expected.as_slice())
+            .expect("coverage should match");
+    }
+
+    #[test]
+    fn shard_rejects_duplicates() {
+        let expected = vec![PathBuf::from("a.cpp"), PathBuf::from("b.cpp")];
+        let results = vec![
+            WorkerFileResult {
+                path: PathBuf::from("a.cpp"),
+                changed: false,
+                pending_text: None,
+                rename_plans: Vec::new(),
+                convergence_pairs: Vec::new(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                policy_traces: Vec::new(),
+                accuracy_gate: None,
+                error: None,
+                warnings: Vec::new(),
+                elapsed_engine_ms: 0.0,
+                elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
+            },
+            WorkerFileResult {
+                path: PathBuf::from("a.cpp"),
+                changed: false,
+                pending_text: None,
+                rename_plans: Vec::new(),
+                convergence_pairs: Vec::new(),
+                violations: Vec::new(),
+                edits: Vec::new(),
+                policy_traces: Vec::new(),
+                accuracy_gate: None,
+                error: None,
+                warnings: Vec::new(),
+                elapsed_engine_ms: 0.0,
+                elapsed_total_ms: 0.0,
+                boot_parse_ms: 0.0,
+            },
+        ];
+        let error = App::validate_worker_shard_coverage(0, results.as_slice(), expected.as_slice())
+            .expect_err("coverage mismatch should fail");
+        assert!(error
+            .to_string()
+            .contains("non-deterministic shard coverage"));
+    }
+
+    #[test]
+    fn fingerprint_order_invariant() {
+        let first = vec![
+            PathBuf::from("src/a.cpp"),
+            PathBuf::from("src/b.cpp"),
+            PathBuf::from("src/a.cpp"),
+        ];
+        let second = vec![
+            PathBuf::from("src/b.cpp"),
+            PathBuf::from("src/a.cpp"),
+            PathBuf::from("src/a.cpp"),
+        ];
+        let left = App::coverage_fingerprint(first.as_slice());
+        let right = App::coverage_fingerprint(second.as_slice());
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn fingerprint_multiplicity_changes() {
+        let first = vec![PathBuf::from("src/a.cpp"), PathBuf::from("src/b.cpp")];
+        let second = vec![
+            PathBuf::from("src/a.cpp"),
+            PathBuf::from("src/a.cpp"),
+            PathBuf::from("src/b.cpp"),
+        ];
+        let left = App::coverage_fingerprint(first.as_slice());
+        let right = App::coverage_fingerprint(second.as_slice());
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn schedule_prefers_heavier() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("fmt_sched_{stamp}"));
+        fs::create_dir_all(temp_dir.as_path()).expect("create temp dir");
+        let small = temp_dir.join("small.cpp");
+        let medium = temp_dir.join("medium.cpp");
+        let large = temp_dir.join("large.cpp");
+        fs::write(small.as_path(), vec![b'a'; 32]).expect("write small");
+        fs::write(medium.as_path(), vec![b'b'; 128]).expect("write medium");
+        fs::write(large.as_path(), vec![b'c'; 512]).expect("write large");
+
+        let ordered = App::schedule_files_for_parallel(vec![small.clone(), large.clone(), medium]);
+        assert_eq!(ordered.first(), Some(&large));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn shards_order_invariant() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("fmt_shards_{stamp}"));
+        fs::create_dir_all(temp_dir.as_path()).expect("create temp dir");
+        let files = [
+            ("a.cpp", 32usize),
+            ("b.cpp", 400usize),
+            ("c.cpp", 96usize),
+            ("d.cpp", 512usize),
+            ("e.cpp", 24usize),
+            ("f.cpp", 280usize),
+        ]
+        .into_iter()
+        .map(|(name, size)| {
+            let path = temp_dir.join(name);
+            fs::write(path.as_path(), vec![b'x'; size]).expect("write fixture");
+            path
+        })
+        .collect::<Vec<_>>();
+        let mut reversed = files.clone();
+        reversed.reverse();
+
+        let left = App::build_file_shards(files, 3)
+            .into_iter()
+            .map(|mut shard| {
+                shard.sort();
+                shard
+                    .into_iter()
+                    .map(|path| App::path_sort_key(path.as_path()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let right = App::build_file_shards(reversed, 3)
+            .into_iter()
+            .map(|mut shard| {
+                shard.sort();
+                shard
+                    .into_iter()
+                    .map(|path| App::path_sort_key(path.as_path()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(left, right);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn shards_keep_paired() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("fmt_unit_shards_{stamp}"));
+        let include_dir = temp_dir.join("include");
+        let src_dir = temp_dir.join("src");
+        fs::create_dir_all(include_dir.as_path()).expect("create include dir");
+        fs::create_dir_all(src_dir.as_path()).expect("create src dir");
+        let pair_header = include_dir.join("Widget.hpp");
+        let pair_impl = src_dir.join("Widget.cpp");
+        let heavy = temp_dir.join("Heavy.cpp");
+        let light = temp_dir.join("Light.hpp");
+        fs::write(pair_header.as_path(), vec![b'a'; 64]).expect("write pair header");
+        fs::write(pair_impl.as_path(), vec![b'b'; 96]).expect("write pair impl");
+        fs::write(heavy.as_path(), vec![b'c'; 1024]).expect("write heavy");
+        fs::write(light.as_path(), vec![b'd'; 48]).expect("write light");
+
+        let shards = App::build_file_shards(
+            vec![
+                pair_header.clone(),
+                pair_impl.clone(),
+                heavy.clone(),
+                light.clone(),
+            ],
+            2,
+        );
+        assert!(shards
+            .iter()
+            .any(|shard| { shard.contains(&pair_header) && shard.contains(&pair_impl) }));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn gate_renders_boundary() {
+        let decision = AccuracyGateDecision {
+            status: AccuracyGateStatus::WarningOnly,
+            precision: 0.923,
+            recall: 0.811,
+            reasons: vec![
+                AccuracyGateReason::SemanticRequiredUnmet,
+                AccuracyGateReason::PrecisionBelowThreshold {
+                    actual: 0.923,
+                    minimum: 0.940,
+                },
+            ],
+        };
+        assert_eq!(
+            decision.summary(),
+            "accuracy_gate: precision=0.923 recall=0.811 reasons=[semantic_required_unmet,precision_below_threshold(0.923 < 0.940)]"
+        );
+    }
+
+    #[test]
+    fn collects_rollout_signal() {
+        let results = vec![
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("a.cpp"), ..FileMeta::default() },
+                outcome: FormatOutcome {
+                    accuracy_gate: Some(AccuracyGateDecision {
+                        status: AccuracyGateStatus::WarningOnly,
+                        precision: 1.0,
+                        recall: 1.0,
+                        reasons: vec![AccuracyGateReason::SemanticRequiredUnmet],
+                    }),
+                    ..FormatOutcome::default()
+                },
+                ..FileResult::default()
+            },
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("b.cpp"), ..FileMeta::default() },
+                outcome: FormatOutcome {
+                    accuracy_gate: Some(AccuracyGateDecision {
+                        status: AccuracyGateStatus::FailedClosed,
+                        precision: 0.3,
+                        recall: 0.2,
+                        reasons: vec![AccuracyGateReason::PrecisionBelowThreshold {
+                            actual: 0.3,
+                            minimum: 0.920,
+                        }],
+                    }),
+                    ..FormatOutcome::default()
+                },
+                error: Some("pipeline failed: accuracy gate fail-closed for b.cpp".to_string()),
+                ..FileResult::default()
+            },
+            FileResult {
+                meta: FileMeta { path: PathBuf::from("c.cpp"), ..FileMeta::default() },
+                error: None,
+                ..FileResult::default()
+            },
+        ];
+        let signal = App::collect_accuracy_gate_rollout_signal(results.as_slice())
+            .expect("gate rollout signal");
+        assert_eq!(signal.considered_files, 3);
+        assert_eq!(signal.failing_files, 2);
+        assert_eq!(signal.semantic_required_unmet_files, 1);
+        assert!((signal.precision - ((1.0 + 0.3 + 1.0) / 3.0)).abs() <= 1e-9);
+        assert!((signal.recall - ((1.0 + 0.2 + 1.0) / 3.0)).abs() <= 1e-9);
+        assert!((signal.match_ratio - (1.0 / 3.0)).abs() <= 1e-9);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_reports_hung() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleepy worker");
+        let err = App::wait_worker_output_with_timeout(
+            child,
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+        )
+        .expect_err("worker should time out");
+        assert!(err.to_string().contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_collects_output() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("printf ok")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn quick worker");
+        let output = App::wait_worker_output_with_timeout(
+            child,
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+        )
+        .expect("worker should complete");
+        assert!(output.status.success());
+    }
+}

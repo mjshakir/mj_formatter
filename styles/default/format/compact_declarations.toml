@@ -1,8 +1,0 @@
-[policy]
-name = "compact_declarations"
-enabled = true
-type = "python"
-touch_contract = "code_only"
-
-# Minimum consecutive declarations needed before compaction.
-min_group_size = 3

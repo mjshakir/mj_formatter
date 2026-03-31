@@ -1,375 +1,238 @@
-# MJ Formatter
+# formatter
 
-Policy-driven C/C++ formatter with hybrid parsing support (clang + tree-sitter + Lua policies), backups, cache, and profiling.
+Adaptive C/C++ code formatter with a semantic policy pipeline, built in Rust.
 
-This project requires both parser backends:
-- `clang` / `libclang`
-- `tree-sitter` (`tree-sitter`, `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-languages`)
+## Key Features
 
-## Platform Setup (Python + Pip)
+**Semantic awareness**
+- Tree-sitter incremental parsing for structural analysis of C and C++
+- libclang semantic extraction for type-aware policies like `naming_conventions`
+- Dual-parser architecture: tree-sitter provides the hard correctness gate, libclang provides semantic depth
 
-This section installs Python from the command line on each OS, then installs `mj_formatter` and runs it.
+**Adaptive trust model**
+- 5-dimensional Kalman filter with Sage-Husa adaptive Q/R tracking structural, semantic, coverage, richness, and edit-success confidence per policy
+- All decision derivations (penalties, bonuses, radii, tolerances) computed directly from Kalman estimates and covariance -- no fixed thresholds anywhere
+- The system learns what to trust from observation and run history
 
-### Ubuntu (CLI)
+**Pipeline architecture**
+- 6-stage policy pipeline: initialize, parse, prepare, execute, coordinate, commit
+- Compile-time enum dispatch for all policies (no trait-object vtables in the hot path)
+- Per-policy checkpoint via tree-sitter re-parse -- the only hard gate in the system
 
-1. Install Python, `venv`, and pip:
+**Concurrency**
+- FIFO thread pool on `crossbeam-channel` with multi-process worker mode
+- Adaptive dispatch scheduling with history-based cost estimation
+- No GIL, no garbage collector pauses
 
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip
-```
+**Safety and recoverability**
+- Atomic file writes via tempfile + rename
+- ECC backup with Reed-Solomon erasure coding
+- `--undo` / `--undo-run` to restore any previous formatting run
+- Post-edit semantic verification catches regressions before they hit disk
 
-2. Verify Python + pip:
+**Project-graph learning**
+- Cross-run convergence tracking persisted to disk
+- Configurable retention, pruning, and tombstone decay
+- Semantic relationship graph informs future formatting decisions
 
-```bash
-python3 --version
-python3 -m pip --version
-```
+## Why Rust, Why Not Python
 
-### macOS (Homebrew)
+This project started as a Python prototype. Python was great for rapid policy iteration but could not scale to production C++ codebases:
 
-1. Install Python with Homebrew:
+- **The GIL blocks parallelism.** Python's Global Interpreter Lock made true parallel file processing impossible. On large codebases with thousands of files, wall-clock time was unacceptable.
+- **Runtime errors, not compile-time safety.** A typo in a policy could silently corrupt source files. Rust's type system and ownership model catch entire classes of bugs -- data races, null dereferences, type mismatches -- at compile time.
+- **Fragile FFI.** Python bindings to tree-sitter and libclang (via ctypes/cffi) were brittle and hard to debug. Rust's `tree-sitter` and `clang-sys` crates provide first-class, type-safe FFI with zero overhead.
+- **Deployment complexity.** Python required a virtualenv, pip dependencies, and a compatible interpreter on every machine. Rust produces a single statically-linked binary.
 
-```bash
-brew update
-brew install python@3.12
-```
+The Rust rewrite preserved every policy's behavior while eliminating an entire class of runtime bugs and delivering significantly higher throughput on multi-core machines.
 
-2. Verify Python + pip:
+## Getting Started
 
-```bash
-python3 --version
-python3 -m pip --version
-```
+### Step 1: Install Rust
 
-### Windows (vcpkg / "vpkg", PowerShell)
-
-1. Install vcpkg (if not already installed):
-
-```powershell
-git clone https://github.com/microsoft/vcpkg.git
-cd vcpkg
-.\bootstrap-vcpkg.bat
-```
-
-2. Install Python from vcpkg:
-
-```powershell
-.\vcpkg install python3:x64-windows
-```
-
-3. Find the installed Python executable:
-
-```powershell
-Get-ChildItem .\installed\x64-windows\tools\python3 -Recurse -Filter python.exe
-```
-
-Use the returned `python.exe` path in the project setup commands below.
-
-## Project Setup (All Platforms)
-
-1. From the repo root, create and activate virtual environment:
-
-Linux/macOS:
+If you have never used Rust before, install it with `rustup`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustc --version   # verify installation
 ```
 
-Windows PowerShell:
+Follow the on-screen prompts and select the default installation. This installs `rustc` (the compiler), `cargo` (the build tool), and `rustup` (the toolchain manager).
 
-```powershell
-<path-to-python.exe> -m venv .venv
-.\.venv\Scripts\Activate.ps1
+### Step 2: Install System Dependencies
+
+The formatter uses libclang at runtime for semantic extraction and needs a C compiler for tree-sitter's generated parser code.
+
+**Debian / Ubuntu:**
+```bash
+sudo apt-get update
+sudo apt-get install -y libclang-dev clang build-essential
 ```
 
-2. Upgrade packaging tools:
+**Fedora:**
+```bash
+sudo dnf install clang-devel clang gcc
+```
+
+**macOS:**
+```bash
+xcode-select --install
+```
+libclang ships with Xcode Command Line Tools.
+
+### Step 3: Clone and Build
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+git clone <repo-url>
+cd mj_formatter
+cargo build --release
 ```
 
-3. Install formatter:
+The release binary lands at `target/release/formatter`. The release profile uses thin LTO, single codegen unit, and `-O3` for a compact, optimized binary.
+
+### Step 4: Configure
+
+Create or edit `config/config.toml` with the minimum required settings:
+
+```toml
+[formatter]
+root = "/path/to/your/cpp/project"
+include = ["**/*.hpp", "**/*.cpp", "**/*.h", "**/*.c"]
+```
+
+See the [Configuration](#configuration) section for the full set of options.
+
+### Step 5: Run
 
 ```bash
-pip install -e .
+# Dry run -- report what would change without modifying files
+cargo run --release -- --config config/config.toml --check
+
+# Apply formatting
+cargo run --release -- --config config/config.toml
+
+# Apply with verbose diagnostics
+cargo run --release -- --config config/config.toml --verbose
+
+# Undo the last run (restore from backup)
+cargo run --release -- --config config/config.toml --undo
+
+# List active policies and exit
+cargo run --release -- --config config/config.toml --list-policies
 ```
 
-4. Optional extras:
+Or run the binary directly:
 
 ```bash
-pip install -e .[lua]
+./target/release/formatter --root /path/to/project --processes 4 --jobs 12 --verbose
 ```
 
-5. Or install from requirements directly:
+## CLI Reference
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--config <PATH>` | Path to configuration TOML file | None (optional) |
+| `--root <PATH>` | Project root directory to format | From config, or `.` |
+| `--include <GLOB>` | File include glob pattern (repeatable) | From config |
+| `--exclude <GLOB>` | File exclude glob pattern (repeatable) | From config |
+| `--enable <POLICY>` | Enable a specific policy (repeatable) | All enabled |
+| `--disable <POLICY>` | Disable a specific policy (repeatable) | None |
+| `--jobs <N>` | Total number of parallel jobs | CPU cores x 4 |
+| `--processes <N\|"max">` | Number of worker processes; `"max"` for all CPU cores | `1` |
+| `--threads-per-process <N>` | Threads per worker process; overrides `--jobs` (total = processes x N) | Derived from `--jobs` |
+| `--check` | Dry-run mode: report issues without modifying files | `false` |
+| `--undo` | Restore files from the most recent backup run | `false` |
+| `--undo-run <RUN_ID>` | Restore files from a specific backup run ID | None |
+| `--verbose` | Enable verbose diagnostic output | `false` |
+| `--list-policies` | List active policies with parse modes and exit | `false` |
+| `--worker-timeout <SECS>` | Worker process timeout in seconds | `900` |
+
+## Policies
+
+| Policy | Category | Description |
+|--------|----------|-------------|
+| `dash_comment_normalizer` | Comments | Normalize dash-style comment separators |
+| `section_title_normalizer` | Comments | Standardize section title comment blocks |
+| `namespace_end_comments` | Comments | Add or normalize closing comments for namespaces, classes, and control blocks |
+| `pragma_once_spacing` | Headers | Enforce blank-line spacing after `#pragma once` |
+| `include_guards` | Headers | Enforce include guard or pragma-once conventions |
+| `include_order` | Headers | Sort and group `#include` directives by category |
+| `declaration_alignment` | Structure | Align assignment operators, `= delete`, and `= default` |
+| `compact_declarations` | Structure | Group consecutive same-type variable declarations |
+| `class_layout` | Structure | Organize class members by access specifier with section comments |
+| `operator_overload_spacing` | Spacing | Normalize spacing in operator overload signatures |
+| `lua_macro_spacing` | Spacing | Enforce spacing around Lua-binding and user-defined macro blocks |
+| `numeric_literal_suffix` | Spacing | Normalize numeric literal suffixes (`U`, `L`, `ULL`, `f`, etc.) |
+| `function_void_params` | Semantic | Normalize `void` in empty C/C++ parameter lists |
+| `logical_keyword_operators` | Semantic | Replace `&&`/`||`/`!` with `and`/`or`/`not` (or vice versa) |
+| `snake_case` | Semantic | Enforce snake_case naming for functions and variables |
+| `naming_conventions` | Semantic | Semantic rename with prefix conventions and project-wide reference propagation |
+| `clang_format` | Integration | Run clang-format as a pipeline stage with semantic safety gates |
+
+Policies can be selectively enabled or disabled via `--enable` / `--disable` CLI flags or in the `config.toml` configuration file.
+
+## Configuration
+
+Runtime configuration lives in `config/config.toml`:
+
+- `[formatter]` -- root path, include/exclude globs, parallelism, backup settings, clang binary paths, cache settings, worker timeout
+- Style and policy TOML files under `styles/<style>/format/*.toml` and `styles/<style>/enable/enable.toml`
+
+Key config-only settings (not exposed as CLI flags):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `formatter.backup` | `true` | Enable file backups before formatting |
+| `formatter.backup_dir` | `var/backups` | Backup storage directory |
+| `formatter.report_path` | `var/reports/run.ndjson` | Run report output path |
+| `formatter.clang_binary` | `clang` | Path to clang executable |
+| `formatter.clang_format_binary` | `clang-format` | Path to clang-format executable |
+| `formatter.cache.enabled` | `true` | Enable result caching between runs |
+| `formatter.cache.path` | `var/cache/check_results.bin` | Cache file path |
+| `formatter.cache.l1_size` | `2048` | L1 in-memory cache size |
+
+Project-graph lifecycle settings:
+- `project_graph_prune_enabled`, `project_graph_retention_days`, `project_graph_max_nodes`, `project_graph_max_edges`
+- `project_graph_tombstone_enabled`, `project_graph_tombstone_retention_days`, `project_graph_tombstone_decay_days`
+
+## Feedback Loop Workflow
+
+Use the built-in helper script for iterative apply/review/restore runs:
 
 ```bash
-pip install -r requirements.txt
+# Run the formatter
+scripts/feedback.sh run --root ../HazardSystem --processes 4 --jobs 8
+
+# Restore the latest backup batch
+scripts/feedback.sh restore-latest
+
+# Restore a specific file from the latest batch
+scripts/feedback.sh restore-latest --only BitmaskTable.hpp
+
+# Show latest backup and report status
+scripts/feedback.sh status
 ```
 
-6. Verify install:
-
-```bash
-python -m mj_formatter.main --list-policies --config config/config.toml
-```
-
-## Run
-
-### Quick Run Checklist
-
-1. Validate policy registry:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --validate-registry
-```
-
-2. Show active policies:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --list-policies
-```
-
-3. Dry run (check mode, no writes):
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root . --check --verbose
-```
-
-4. Apply changes:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root . --verbose
-```
-
-5. Undo from backup if needed:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --undo
-```
-
-If editable install added the CLI entrypoint:
-
-```bash
-mj_formatter --config config/config.toml --root . --check
-```
-
-Module form (always works from repo root):
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root . --check
-```
-
-Apply changes:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root .
-```
-
-Run on `HazardSystem`:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root ../HazardSystem
-```
-
-Run on `HazardSystem` with safety + diagnostics:
-
-```bash
-python -m mj_formatter.main \
-  --config config/config.toml \
-  --root ../HazardSystem \
-  --check \
-  --verbose \
-  --profile
-```
-
-## CLI Options
-
-| Option | Description |
-| --- | --- |
-| `--config PATH` | Config TOML path |
-| `--style NAME` | Style folder under `styles/` |
-| `--root PATH` | Project root for file discovery |
-| `--include GLOB` | Include glob (repeatable) |
-| `--exclude GLOB` | Exclude glob (repeatable) |
-| `--enable LIST` | Enable policies (CSV or repeated) |
-| `--disable LIST` | Disable policies (CSV or repeated) |
-| `--jobs N` | Worker processes (`0` = auto) |
-| `--check` | Check only; no writes |
-| `--verbose` | Print per-file violations/warnings |
-| `--profile` | Aggregate per-policy timing (ms) in summary |
-| `--parser-strategy hybrid` | Parser strategy (hybrid only; retained for CLI compatibility) |
-| `--parse-pool-workers N` | Per-process parse thread workers |
-| `--post-edit-check / --no-post-edit-check` | Enable/disable post-edit validation |
-| `--batch-autotune / --no-batch-autotune` | Enable/disable worker batch autotuning |
-| `--report PATH` | JSONL report output |
-| `--log-level LEVEL` | Log level |
-| `--log-file PATH` | Log file output |
-| `--backup` / `--no-backup` | Enable/disable backups |
-| `--cache` / `--no-cache` | Enable/disable cache |
-| `--list-styles` | List styles and exit |
-| `--list-policies` | List policies and status table |
-| `--validate-registry` | Validate policy registry |
-| `--undo` | Restore latest backup and delete backup files |
-| `--undo-no-delete` | Restore latest backup and keep backup files |
-
-## Style Packs
-
-Style configuration lives under:
-
-```text
-styles/<style_name>/
-  enable/enable.toml
-  format/*.toml
-```
-
-Per-policy safety contract (optional in each `format/*.toml`):
-
-- `touch_contract = "any"`
-- `touch_contract = "code_only"`
-- `touch_contract = "preprocessor_only"`
-- `touch_contract = "whitespace_only"`
-
-Project-level runtime config:
-
-```text
-config/config.toml
-```
-
-## Parsing and Policy Backends
-
-- `parse_mode = "text"`: text-based policies.
-- `parse_mode = "tree_sitter"`: syntax-tree policies.
-- `parse_mode = "clang"`: semantic/clang-backed policies.
-- `type = "lua"`: Lua policy scripts.
-
-Default parser strategy is hybrid and uses policy needs to decide parse work.
-For parser-required policies (`tree_sitter` / `clang`), backend fallback-to-text is disabled; if the backend is unavailable the policy is skipped with a warning.
-
-Relevant runtime controls in `config/config.toml`:
-
-- `post_edit_check_enabled = true`: re-parse before/after and block unsafe output.
-- `post_edit_retry_enabled = true`: retry failed post-edit checks from original text.
-- `post_edit_retry_max_attempts = 6`
-- `post_edit_retry_confidence_step = 0.05`
-- `post_edit_retry_confidence_max = 1.00`
-- `confidence_blocking_enabled = true`
-- `confidence_blocking_min = 0.70`
-- `confidence_blocking_policies = ["naming_conventions", "snake_case"]`
-- Both parsers are mandatory at runtime. Startup fails if either tree-sitter or clang is unavailable.
-- `confidence_default_enforcement = "hard"`: default enforcement (`must`, `hard`, `soft`, `advisory`)
-- `confidence_strict_delta = 0.05`: threshold added for `hard`
-- `confidence_relaxed_delta = 0.10`: threshold subtracted for `advisory`
-- `confidence_context_bonus_cap = 0.08`: max context bonus added to hybrid confidence score
-- `run_journal_dir = "scripts/mj_formatter/runs"`: per-run state journal (`RUNNING`/`COMPLETED`/`FAILED`).
-
-`naming_conventions` now runs in clang-semantic mode only (no tree/text rename fallback).
-Parser runtime is hybrid-only: both clang and tree-sitter are required and context is built from both backends.
-
-Per-policy override in style TOML (`styles/<style>/format/*.toml`):
-
-- `enforcement = "must"`: always apply (post-edit safety still enforced)
-- `enforcement = "hard"`: strict by default, can relax by context
-- `enforcement = "soft"`: adaptable default behavior, can harden by context
-- `enforcement = "advisory"`: report-first; apply only in high-confidence contexts
-
-Durability/fail-safe notes:
-
-- cache/report/metrics/manifest writes are atomic (`temp -> fsync -> replace`)
-- parser workers use thread-local parser instances for safer multi-threaded parse execution
-- async metrics/log queues track and warn on dropped events under backpressure
-
-## Core Package Layout
-
-`core/` has been split by concern:
-
-- `core/config/`: config and `.editorconfig` resolution
-- `core/processing/`: formatter engine and per-file processor
-- `core/parsing/`: clang/tree-sitter parse utilities
-- `core/policy/`: policy selection/cache/conflict detection
-- `core/files/`: I/O, cache file, backup, undo, report writing
-- `core/reporting/`: metrics process/client and table output
-- `core/runtime/`: process orchestration and run lifecycle
-- `core/engine/context/`: context engine (code context builder, edit guard, post-edit checker)
-- `core/types/`, `core/utilities/`, `core/logging/`: shared support modules
-
-## Performance and Profiling
-
-Profile run:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root ../HazardSystem --check --no-cache --profile
-```
-
-Profile matrix run (reads `[profiling]` and `[[profiling.matrix]]` from `config/config.toml`):
-
-```bash
-python scripts/profile_matrix.py --config config/config.toml
-```
-
-Artifacts:
-
-- CSV: `scripts/mj_formatter/profile_matrix/profile_matrix.csv`
-- Markdown: `scripts/mj_formatter/profile_matrix/profile_matrix.md`
-- Raw `.log`/`.json` artifacts are kept temporary and cleaned after each run.
-
-Summary includes:
-
-- `elapsed`, `throughput`, cache hits
-- top policy counts
-- top policy times (`top policy times (ms): ...`)
-
-Recent optimization included:
-
-- naming-conventions semantic rename now precomputes identifier occurrence counts once per file instead of rescanning text per symbol.
-
-## Cache, Reports, and Backups
-
-- Policy cache path: `styles/cache` (configurable)
-- Report JSONL: `scripts/mj_formatter/reports/format_report.jsonl`
-- Summary JSON: `*.summary.json`
-- Backups: suffix or mirror-directory mode (configurable)
-
-## Undo
-
-```bash
-python -m mj_formatter.main --config config/config.toml --undo
-python -m mj_formatter.main --config config/config.toml --undo-no-delete
-```
-
-## Tests
-
-Install test dependencies:
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-Run all tests:
-
-```bash
-python -m pytest -q
-```
-
-Run behavior test only:
-
-```bash
-python -m pytest -q tests/test_behavior_end_to_end.py::test_behavior_end_to_end
-```
-
-Run parser/context critical tests:
-
-```bash
-python -m pytest -q \
-  tests/test_naming_semantic.py \
-  tests/test_edit_guard_and_parse_control.py \
-  tests/test_post_edit_checker.py \
-  tests/test_worker_runner_batching.py
-```
-
-Run formatter against a real target and then restore:
-
-```bash
-python -m mj_formatter.main --config config/config.toml --root ../HazardSystem --verbose
-python -m mj_formatter.main --config config/config.toml --undo
-```
+## Architecture
+
+- `PolicyPipeline` is stage-based (`initialize -> parse -> prepare -> execute -> coordinate -> commit`) with a shared run-state object.
+- `ParserManager` is an orchestration facade over focused parser modules:
+  - `clang_service` (singleton worker service)
+  - `arg_resolver` (clang args + probe cache)
+  - `compdb_index` (exact + consensus compile_commands resolution)
+  - `consensus` (header/source consensus arbitration)
+  - `semantic_extractor` (libclang semantic extraction)
+- Semantic integrity checks are decomposed into focused stages:
+  - `semantic_contract/{readiness, snapshot, context, transition}`
+  - `post_check/{baseline, delta, verdict}`
+- Policy metadata is centralized in a singleton `PolicyCatalog`.
+- Internal identifiers use typed enums/newtypes (`PolicyId`, parse mode, retry scope, risk tier, zone, candidate outcome); JSON report artifacts remain string-compatible at boundaries.
+- Safe Rust throughout (no `unsafe` blocks in project code).
+- Compile-time dispatch for policy execution (enum-based, no trait-object virtual dispatch in the pipeline).
+- FIFO thread pool built on `crossbeam-channel`.
+- Atomic file writes with ECC backup support.
+
+## License
+
+MIT

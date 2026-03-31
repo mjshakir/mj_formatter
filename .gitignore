@@ -1,40 +1,33 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.pytest_cache
-*.benchmarks
-# Virtual env
-venv/
-.venv/
-
 # Caches & logs
 .cache/
 logs/
 *.log
+__pycache__/
+.pytest_cache/
+.benchmarks/
 *.luac
 styles/**/cache/*
 !styles/**/cache/.gitkeep
-behavior_test/**/project_index_cache.bin
+tests/**/project_index_cache.bin
 
 # Reports & backups
 reports/
 backups/
-scripts/mj_formatter/.cache/
-scripts/mj_formatter/reports/
-scripts/mj_formatter/backups/
-scripts/mj_formatter/logs/
-scripts/mj_formatter/profile_matrix/
-scripts/mj_formatter/runs/
-*.bak
+var/
+docs/
 
 # Local config overrides
 .env
-/conda/
-# ignore build files
-mj_formatter.egg-info/
 
-# Testing
+# Testing fixtures (HazardSystem copies — use ../HazardSystem/ directly)
 /include/
-/src/
+
+# Legacy runtime output (moved to var/)
+scripts/mj_formatter/
+
+# Profiling artifacts
+heaptrack.*.zst
+massif.out
+
+# Rust
+/target/
