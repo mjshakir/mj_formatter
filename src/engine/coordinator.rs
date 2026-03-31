@@ -140,14 +140,17 @@ impl FormatterEngine {
             ));
         }
 
+        if baseline_required {
+            self.observe_adaptive(post_edit_baseline.as_ref(), 1.0);
+        }
+
         let project_graph_snapshot = self
             .project_graph
             .as_ref()
             .map(|runtime| runtime.snapshot());
-        let obs_only = self.observation_only.load(Ordering::Relaxed);
         let options_1 = PolicyRunOptions {
             project_graph_snapshot: project_graph_snapshot.clone(),
-            observation_only: obs_only,
+            observation_only: false,
             ..Default::default()
         };
         let mut pass_result = self.pipeline.run_with_options(text, path, &options_1)?;

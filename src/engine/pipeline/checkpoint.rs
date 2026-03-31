@@ -22,13 +22,20 @@ impl PolicyPipeline {
             .map(|t| crate::parser::ts_traversal::tree_error_stats(t).error_nodes)
             .unwrap_or(0);
 
-        let after_tree = self
-            .parser_manager
-            .reparse_tree(
+        let after_tree = if let Some(old_tree) = state.parse.tree.as_ref() {
+            self.parser_manager.reparse_tree_incremental(
+                &state.current,
                 &coordinated.result.text,
                 state.path,
-                state.parse.tree.as_ref(),
-            );
+                old_tree,
+            )
+        } else {
+            self.parser_manager.reparse_tree(
+                &coordinated.result.text,
+                state.path,
+                None,
+            )
+        };
 
         match after_tree {
             Ok(tree) => {
@@ -127,10 +134,15 @@ impl PolicyPipeline {
         }
         let recovered = Self::apply_edits_lenient(&state.current, &safe_edits);
         let recovered_text = recovered?;
-        let recovered_tree = self
-            .parser_manager
-            .reparse_tree(&recovered_text, state.path, state.parse.tree.as_ref())
-            .ok()?;
+        let recovered_tree = if let Some(old_tree) = state.parse.tree.as_ref() {
+            self.parser_manager
+                .reparse_tree_incremental(&state.current, &recovered_text, state.path, old_tree)
+                .ok()?
+        } else {
+            self.parser_manager
+                .reparse_tree(&recovered_text, state.path, None)
+                .ok()?
+        };
         let recovered_errors =
             crate::parser::ts_traversal::tree_error_stats(&recovered_tree).error_nodes;
         if recovered_errors > before_errors {

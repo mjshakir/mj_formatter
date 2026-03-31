@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use moka::sync::Cache;
-use tree_sitter::{ParseOptions, Parser, Tree};
+use tree_sitter::{InputEdit, ParseOptions, Parser, Point, Tree};
 
 const C_EXTENSIONS: &[&str] = &["c", "h"];
 
@@ -55,6 +55,40 @@ fn parse_with_timeout(
         old_tree,
         Some(options),
     )
+}
+
+pub fn compute_input_edit(old_text: &str, new_text: &str) -> InputEdit {
+    let old_bytes = old_text.as_bytes();
+    let new_bytes = new_text.as_bytes();
+    let common_prefix = old_bytes.iter().zip(new_bytes.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or(old_bytes.len().min(new_bytes.len()));
+    let old_suffix_start = old_bytes.len();
+    let new_suffix_start = new_bytes.len();
+    let max_suffix = (old_suffix_start - common_prefix).min(new_suffix_start - common_prefix);
+    let common_suffix = (0..max_suffix)
+        .take_while(|&i| {
+            old_bytes[old_suffix_start - 1 - i] == new_bytes[new_suffix_start - 1 - i]
+        })
+        .count();
+    let start_byte = common_prefix;
+    let old_end_byte = old_suffix_start - common_suffix;
+    let new_end_byte = new_suffix_start - common_suffix;
+    InputEdit {
+        start_byte,
+        old_end_byte,
+        new_end_byte,
+        start_position: byte_offset_to_point(old_text, start_byte),
+        old_end_position: byte_offset_to_point(old_text, old_end_byte),
+        new_end_position: byte_offset_to_point(new_text, new_end_byte),
+    }
+}
+
+fn byte_offset_to_point(text: &str, byte_offset: usize) -> Point {
+    let slice = &text.as_bytes()[..byte_offset];
+    let row = memchr::memchr_iter(b'\n', slice).count();
+    let last_newline = memchr::memrchr(b'\n', slice).map(|i| i + 1).unwrap_or(0);
+    Point { row, column: byte_offset - last_newline }
 }
 
 const TREE_SITTER_PARSE_CACHE_VERSION: u8 = 1;
@@ -196,6 +230,32 @@ impl ParserManager {
                 parsed.ok_or_else(|| anyhow!("tree-sitter parse failed"))
             })
             .map_err(|e| anyhow!("{e}"))
+    }
+
+    pub fn reparse_tree_incremental(
+        &self,
+        old_text: &str,
+        new_text: &str,
+        path: &Path,
+        old_tree: &Tree,
+    ) -> Result<Tree> {
+        if !self.tree_sitter_available {
+            return Err(anyhow!("tree-sitter unavailable"));
+        }
+        let mut tree = old_tree.clone();
+        let edit = compute_input_edit(old_text, new_text);
+        tree.edit(&edit);
+        let extension = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .map(|v| v.to_lowercase())
+            .unwrap_or_default();
+        let parsed = if C_EXTENSIONS.contains(&extension.as_str()) {
+            C_PARSER.with(|parser| parse_with_timeout(&mut parser.borrow_mut(), new_text, Some(&tree)))
+        } else {
+            CPP_PARSER.with(|parser| parse_with_timeout(&mut parser.borrow_mut(), new_text, Some(&tree)))
+        };
+        parsed.ok_or_else(|| anyhow!("tree-sitter incremental parse failed"))
     }
 
     #[tracing::instrument(skip(self, text), fields(file = %path.display()))]
