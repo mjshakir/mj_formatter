@@ -77,6 +77,12 @@ pub struct PolicyPipeline {
     context_tracker: ArcSwap<PolicyContextTracker>,
     query_cache: TsQueryCache,
     adaptive_state: Arc<ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
+    interference_state: Arc<ArcSwap<crate::engine::policy_interference::PolicyInterferenceState>>,
+    /// Snapshot of dynamic ordering computed once at construction time.
+    /// Prevents cascading repair passes across files within a single run.
+    dynamic_order: Vec<usize>,
+    /// Snapshot of repair candidates computed once at construction time.
+    repair_candidates: Vec<usize>,
 }
 
 
@@ -264,10 +270,11 @@ impl PolicyPipeline {
         conflict_detection_enabled: bool,
         conflict_touch_threshold: usize,
         adaptive_state: Arc<ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
+        interference_state: Arc<ArcSwap<crate::engine::policy_interference::PolicyInterferenceState>>,
     ) -> Self {
         let convergence_profiles = Arc::new(Self::build_convergence_profiles(&policy_settings));
         let query_cache = TsQueryCache::new(tree_sitter_cpp::LANGUAGE.into());
-        Self {
+        let mut pipeline = Self {
             policies,
             parser_manager,
             policy_settings,
@@ -279,11 +286,65 @@ impl PolicyPipeline {
             context_tracker: ArcSwap::new(Arc::new(PolicyContextTracker::new())),
             query_cache,
             adaptive_state,
-        }
+            interference_state,
+            dynamic_order: Vec::new(),
+            repair_candidates: Vec::new(),
+        };
+        pipeline.dynamic_order = pipeline.compute_dynamic_order();
+        pipeline.repair_candidates = pipeline.collect_repair_candidates();
+        pipeline
     }
 
     pub fn adaptive_state(&self) -> &Arc<ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>> {
         &self.adaptive_state
+    }
+
+    #[allow(dead_code)] // public API for multi-process shard aggregation
+    pub fn interference_state(&self) -> &Arc<ArcSwap<crate::engine::policy_interference::PolicyInterferenceState>> {
+        &self.interference_state
+    }
+
+    fn compute_dynamic_order(&self) -> Vec<usize> {
+        let interference = self.interference_state.load();
+        let adaptive = self.adaptive_state.load();
+        let edit_success = adaptive.edit_success();
+        let catalog = crate::engine::catalog::policy_catalog();
+
+        let mut indexed: Vec<(usize, f64)> = self
+            .policies
+            .iter()
+            .enumerate()
+            .map(|(i, policy)| {
+                let base = catalog.behavior(&policy.id()).execution_priority;
+                let dp = interference.dynamic_priority(policy.name(), base, edit_success);
+                (i, dp)
+            })
+            .collect();
+        indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        indexed.into_iter().map(|(i, _)| i).collect()
+    }
+
+    fn collect_repair_candidates(&self) -> Vec<usize> {
+        let interference = self.interference_state.load();
+        let adaptive = self.adaptive_state.load();
+        let edit_success = adaptive.edit_success();
+        let catalog = crate::engine::catalog::policy_catalog();
+
+        let mut candidates: Vec<(usize, f64)> = self
+            .policies
+            .iter()
+            .enumerate()
+            .filter_map(|(i, policy)| {
+                let caps = catalog.capabilities(&policy.id());
+                if !caps.whitespace_safe {
+                    return None;
+                }
+                let w = interference.repair_weight(policy.name(), edit_success);
+                if w > 0.0 { Some((i, w)) } else { None }
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.into_iter().map(|(i, _)| i).collect()
     }
 
     pub fn set_context_tracker(&self, tracker: PolicyContextTracker) {
@@ -319,8 +380,15 @@ impl PolicyPipeline {
         }
         self.record_initial_fidelity_warnings(&mut state);
 
-        for policy in &self.policies {
-            self.run_policy_stage(&mut state, policy.as_ref())?;
+        // Use precomputed ordering and repair candidates (snapshotted at
+        // pipeline construction from the loaded interference state). This
+        // prevents cascading repair passes across files within a single run.
+        for &idx in &self.dynamic_order {
+            self.run_policy_stage(&mut state, self.policies[idx].as_ref())?;
+        }
+
+        for &idx in &self.repair_candidates {
+            self.run_policy_stage(&mut state, self.policies[idx].as_ref())?;
         }
 
         PolicyTelemetry::record_batch(&state.telem.samples);
@@ -329,6 +397,41 @@ impl PolicyPipeline {
             state.all_violations,
             state.all_warnings,
         );
+
+        // Observe interference metrics into per-policy Kalman filters.
+        // These observations accumulate across files in this run but do NOT
+        // affect ordering/repair within this run (ordering was computed from
+        // the snapshot loaded at run start).
+        {
+            let metrics = &finalized.interference_metrics;
+            let mut int_state = (**self.interference_state.load()).clone();
+
+            // For each policy that claimed lines: measure how many of ITS
+            // claimed lines were later suppressed by higher-priority policies.
+            // This is the interference ratio — "how much did this policy's
+            // edits get overwritten by later policies?"
+            for (policy, &claimed) in &metrics.lines_claimed {
+                if claimed == 0 {
+                    continue;
+                }
+                let own_suppressed = metrics.lines_suppressed
+                    .get(policy)
+                    .copied()
+                    .unwrap_or(0);
+                let ratio = own_suppressed as f64 / claimed as f64;
+                int_state.observe_interference(policy, ratio.min(1.0));
+            }
+
+            // For each policy that had edits dropped by convergence (lost to
+            // a higher-priority claim): measure repair need.
+            for (policy, &dropped) in &metrics.lines_dropped {
+                let claimed = metrics.lines_claimed.get(policy).copied().unwrap_or(1).max(1);
+                let ratio = dropped as f64 / claimed as f64;
+                int_state.observe_repair_need(policy, ratio.min(1.0));
+            }
+
+            self.interference_state.store(Arc::new(int_state));
+        }
         let mut final_warnings = finalized.warnings;
         let final_text = Self::stabilize_output_text(
             text,

@@ -23,6 +23,7 @@ use crate::config::types::RetryOptimizerConfig;
 /// Environment variable used by worker subprocesses to locate the adaptive state file.
 pub const ADAPTIVE_CONFIDENCE_STATE_PATH_ENV: &str = "FMT_ADAPTIVE_STATE_PATH";
 pub const RETRY_STRATEGY_OPTIMIZER_STATE_PATH_ENV: &str = "FMT_RETRY_OPTIMIZER_PATH";
+pub const POLICY_INTERFERENCE_STATE_PATH_ENV: &str = "FMT_INTERFERENCE_STATE_PATH";
 
 #[derive(Clone, Copy)]
 struct AccuracyProfileDefaults {

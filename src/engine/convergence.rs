@@ -59,6 +59,14 @@ pub struct ConvergenceFinalizeResult {
     pub violations: Vec<Violation>,
     pub warnings: Vec<String>,
     pub convergence_pairs: BTreeMap<(String, String), usize>,
+    pub interference_metrics: ConvergenceInterferenceMetrics,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConvergenceInterferenceMetrics {
+    pub lines_claimed: FxHashMap<String, usize>,
+    pub lines_suppressed: FxHashMap<String, usize>,
+    pub lines_dropped: FxHashMap<String, usize>,
 }
 
 // ── Internal state ─────────────────────────────────────────────────────────
@@ -78,6 +86,10 @@ pub struct ConvergenceController {
     /// outranked by a later one; its text changes are already in state.current
     /// but the edit is excluded from the final report).
     suppressed_lines_by_policy: FxHashMap<String, BTreeSet<usize>>,
+    /// Per-policy count of lines claimed (for interference tracking).
+    lines_claimed_count: FxHashMap<String, usize>,
+    /// Per-policy count of lines dropped by convergence (this policy lost).
+    lines_dropped_count: FxHashMap<String, usize>,
 }
 
 impl ConvergencePolicyProfile {
@@ -126,6 +138,8 @@ impl ConvergenceController {
             policy_profiles,
             claimed_lines: FxHashMap::default(),
             suppressed_lines_by_policy: FxHashMap::default(),
+            lines_claimed_count: FxHashMap::default(),
+            lines_dropped_count: FxHashMap::default(),
         }
     }
 
@@ -170,6 +184,7 @@ impl ConvergenceController {
         }
 
         if !dropped_lines.is_empty() {
+            *self.lines_dropped_count.entry(policy_name.to_string()).or_default() += dropped_lines.len();
             result = Self::apply_line_suppression(before_text, result, &dropped_lines);
             result.warnings.push(format!(
                 "convergence_controller: dropped {} conflicting line edit(s) for '{}' (superseded by higher-priority policy on same line)",
@@ -179,6 +194,7 @@ impl ConvergenceController {
         }
 
         // Claim all winning lines for this policy.
+        let mut claimed_count = 0usize;
         for edit in &result.edits {
             if edit.line == 0 || edit.before == edit.after {
                 continue;
@@ -190,6 +206,10 @@ impl ConvergenceController {
                     priority: current_priority,
                 },
             );
+            claimed_count += 1;
+        }
+        if claimed_count > 0 {
+            *self.lines_claimed_count.entry(policy_name.to_string()).or_default() += claimed_count;
         }
 
         result
@@ -211,11 +231,22 @@ impl ConvergenceController {
             .into_iter()
             .filter(|v| !self.is_suppressed(v.policy.as_str(), v.line))
             .collect::<Vec<_>>();
+        let mut lines_suppressed = FxHashMap::default();
+        for (policy, lines) in &self.suppressed_lines_by_policy {
+            if !lines.is_empty() {
+                lines_suppressed.insert(policy.clone(), lines.len());
+            }
+        }
         ConvergenceFinalizeResult {
             edits: filtered_edits,
             violations: filtered_violations,
             warnings,
             convergence_pairs: BTreeMap::new(),
+            interference_metrics: ConvergenceInterferenceMetrics {
+                lines_claimed: self.lines_claimed_count,
+                lines_suppressed,
+                lines_dropped: self.lines_dropped_count,
+            },
         }
     }
 

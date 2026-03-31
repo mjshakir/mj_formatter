@@ -10,6 +10,7 @@ pub mod edit_candidate;
 pub mod gate_decision;
 pub mod mat5;
 pub mod pipeline;
+pub mod policy_interference;
 pub mod post_check;
 pub mod proposer;
 pub mod retry_optimizer;

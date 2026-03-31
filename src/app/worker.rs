@@ -19,6 +19,7 @@ use crate::cli::args::CliArgs;
 use crate::config::app_config::AppConfig;
 use crate::config::loader::{
     ADAPTIVE_CONFIDENCE_STATE_PATH_ENV,
+    POLICY_INTERFERENCE_STATE_PATH_ENV,
     RETRY_STRATEGY_OPTIMIZER_STATE_PATH_ENV,
 };
 use crate::engine::coordinator::FormatterEngine;
@@ -45,6 +46,7 @@ use crate::runtime::retry_telemetry::RetryLearningTelemetry;
 pub(crate) struct WorkerSpawnConfig<'a> {
     pub adaptive_state_path: &'a Path,
     pub retry_optimizer_state_path: &'a Path,
+    pub interference_state_path: &'a Path,
     pub population_measurements_path: Option<&'a Path>,
     pub worker_jobs: usize,
     pub worker_slot: usize,
@@ -222,6 +224,7 @@ impl App {
             }
         }
         Self::save_adaptive_state_to_ipc(&adaptive_state);
+        // Interference state is saved through the pipeline's Arc<ArcSwap> via IPC env var
         Ok(())
     }
 
@@ -318,7 +321,7 @@ impl App {
         project_graph_runtime: Option<Arc<ProjectGraphRuntime>>,
         allow_check_result_cache: bool,
         adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
-    ) -> (usize, ParserManager, Arc<FormatterEngine>, FileProcessor, Option<Arc<CheckResultCache>>) {
+    ) -> (usize, ParserManager, Arc<FormatterEngine>, FileProcessor, Option<Arc<CheckResultCache>>, std::sync::Arc<arc_swap::ArcSwap<crate::engine::policy_interference::PolicyInterferenceState>>) {
         let effective_jobs = Self::resolve_effective_jobs(config.jobs);
         ClangParseService::configure(effective_jobs);
         crate::policy::clang_format_service::ClangFormatService::configure(effective_jobs);
@@ -336,6 +339,10 @@ impl App {
             !config.semantic_no_inferred,
         );
         let policies = PolicyRegistry::build_enabled(config);
+        let loaded_interference = Self::load_interference_state_from_ipc();
+        let interference_state = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            loaded_interference,
+        )));
         let pipeline = PolicyPipeline::new(
             policies,
             parser_manager.clone(),
@@ -344,6 +351,7 @@ impl App {
             config.conflict_enabled,
             config.conflict_touch_threshold,
             adaptive_state.clone(),
+            interference_state.clone(),
         );
         let engine = FormatterEngine::new(
             pipeline,
@@ -374,7 +382,7 @@ impl App {
             };
         let processor =
             FileProcessor::new(engine.clone(), file_io, config.check, check_result_cache.clone());
-        (effective_jobs, parser_manager, engine, processor, check_result_cache)
+        (effective_jobs, parser_manager, engine, processor, check_result_cache, interference_state)
     }
 
     fn aggregate_pass_results(
@@ -454,7 +462,7 @@ impl App {
         record_dispatch_history: bool,
         adaptive_state: std::sync::Arc<arc_swap::ArcSwap<crate::engine::certainty_filter::CertaintyFilterState>>,
     ) -> Result<ProcessingPassResult> {
-        let (effective_jobs, parser_manager, engine, processor, check_result_cache) =
+        let (effective_jobs, parser_manager, engine, processor, check_result_cache, interference_state) =
             Self::setup_processing_environment(
                 config, project_graph_runtime, allow_check_result_cache, adaptive_state,
             );
@@ -481,13 +489,15 @@ impl App {
             .iter()
             .map(|b| (b.estimated_cost, b.paths.len()))
             .collect();
-        let flat_tasks: Vec<_> = scheduled_batches
+        let mut flat_tasks: Vec<_> = scheduled_batches
             .into_iter()
             .enumerate()
             .flat_map(|(batch_index, batch)| {
-                batch.paths.into_iter().map(move |path| (batch_index, path))
+                let cost = batch.estimated_cost;
+                batch.paths.into_iter().map(move |path| (batch_index, cost, path))
             })
             .collect();
+        flat_tasks.sort_unstable_by(|a, b| b.1.cmp(&a.1));
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(effective_jobs.max(1))
             .build()
@@ -500,7 +510,7 @@ impl App {
             pool.install(|| {
                 flat_tasks
                     .into_par_iter()
-                    .map(|(batch_index, path)| (batch_index, processor.process(path)))
+                    .map(|(batch_index, _cost, path)| (batch_index, processor.process(path)))
                     .collect()
             })
         };
@@ -508,6 +518,8 @@ impl App {
             .elapsed()
             .as_nanos()
             .min(u64::MAX as u128) as u64;
+
+        Self::save_interference_state_to_ipc(&interference_state);
 
         Self::aggregate_pass_results(
             config, &engine, &check_result_cache, file_outcomes,
@@ -619,9 +631,12 @@ impl App {
                         temp_root.join(format!("worker_slot_{worker_slot}.adaptive_state.json"));
                     let retry_optimizer_state_path = temp_root
                         .join(format!("worker_slot_{worker_slot}.retry_optimizer_state.json"));
+                    let interference_state_path = temp_root
+                        .join(format!("worker_slot_{worker_slot}.interference_state.bin"));
                     let spawn_cfg = WorkerSpawnConfig {
                         adaptive_state_path: adaptive_state_path.as_path(),
                         retry_optimizer_state_path: retry_optimizer_state_path.as_path(),
+                        interference_state_path: interference_state_path.as_path(),
                         population_measurements_path: pop_path,
                         worker_jobs,
                         worker_slot,
@@ -879,6 +894,10 @@ impl App {
             .env(
                 RETRY_STRATEGY_OPTIMIZER_STATE_PATH_ENV,
                 spawn_cfg.retry_optimizer_state_path.as_os_str(),
+            )
+            .env(
+                POLICY_INTERFERENCE_STATE_PATH_ENV,
+                spawn_cfg.interference_state_path.as_os_str(),
             );
         if let Some(pop_path) = spawn_cfg.population_measurements_path {
             command.env("FMT_POPULATION_PATH", pop_path.as_os_str());
@@ -1050,6 +1069,28 @@ impl App {
             let state = adaptive_state.load();
             if let Err(err) = state.save_to_path(&p) {
                 warn!(error = %err, "worker: failed to save adaptive state shard");
+            }
+        }
+    }
+
+    fn load_interference_state_from_ipc() -> crate::engine::policy_interference::PolicyInterferenceState {
+        if let Ok(path) = std::env::var(POLICY_INTERFERENCE_STATE_PATH_ENV) {
+            let p = std::path::PathBuf::from(&path);
+            if let Some(state) = crate::engine::policy_interference::PolicyInterferenceState::load_from_path(&p) {
+                return state;
+            }
+        }
+        crate::engine::policy_interference::PolicyInterferenceState::new()
+    }
+
+    fn save_interference_state_to_ipc(
+        interference_state: &std::sync::Arc<arc_swap::ArcSwap<crate::engine::policy_interference::PolicyInterferenceState>>,
+    ) {
+        if let Ok(path) = std::env::var(POLICY_INTERFERENCE_STATE_PATH_ENV) {
+            let p = std::path::PathBuf::from(&path);
+            let state = interference_state.load();
+            if let Err(err) = state.save_to_path(&p) {
+                warn!(error = %err, "worker: failed to save interference state shard");
             }
         }
     }

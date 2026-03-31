@@ -64,6 +64,7 @@ pub(crate) struct RunContext {
     pub(crate) multi_process_enabled: bool,
     pub(crate) adaptive_state: std::sync::Arc<arc_swap::ArcSwap<CertaintyFilterState>>,
     pub(crate) adaptive_state_path: PathBuf,
+    pub(crate) interference_state_path: PathBuf,
     pub(crate) accuracy_rollout_state: AccuracyRolloutState,
     pub(crate) requested_rollout_profile: crate::config::rollout_profile::AccuracyRolloutProfile,
     pub(crate) requested_fail_closed: bool,
@@ -415,12 +416,13 @@ impl App {
             );
         }
 
-        let adaptive_state_path = config
+        let cache_dir = config
             .retry_strategy_optimizer
             .path
             .parent()
-            .unwrap_or_else(|| Path::new("var/cache"))
-            .join("certainty_filter_state.bin");
+            .unwrap_or_else(|| Path::new("var/cache"));
+        let adaptive_state_path = cache_dir.join("certainty_filter_state.bin");
+        let interference_state_path = cache_dir.join("policy_interference_state.bin");
         let loaded_state = CertaintyFilterState::load_from_path(&adaptive_state_path)
             .unwrap_or_default();
         if config.verbose && loaded_state.observation_count > 0 {
@@ -446,6 +448,7 @@ impl App {
             multi_process_enabled,
             adaptive_state,
             adaptive_state_path,
+            interference_state_path,
             accuracy_rollout_state,
             requested_rollout_profile,
             requested_fail_closed,
@@ -456,45 +459,15 @@ impl App {
     fn run_observation_and_engine(
         ctx: &mut RunContext,
     ) -> Result<(Vec<FileResult>, f64, Instant)> {
-        let observation_started = Instant::now();
-        {
-            if ctx.config.verbose {
-                info!("dry-run: building observations (cold start)");
-            }
-            let mut obs_config = ctx.config.clone();
-            obs_config.check = true;
-            obs_config.observation_only = true;
-
-            let _obs_results = if ctx.multi_process_enabled {
-                Self::run_multiprocess_pass(
-                    &ctx.args,
-                    &obs_config,
-                    ctx.files.clone(),
-                    ctx.effective_processes,
-                    false,
-                    ctx.adaptive_state.clone(),
-                )?
-            } else {
-                Self::run_processing_pass(
-                    &obs_config,
-                    ctx.files.clone(),
-                    ctx.project_graph_runtime.clone(),
-                    false,
-                    true,
-                    ctx.adaptive_state.clone(),
-                )?
-            };
-        }
-        let adaptive_snapshot = ctx.adaptive_state.load();
+        let observation_ms = 0.0;
         if ctx.config.verbose {
+            let adaptive_snapshot = ctx.adaptive_state.load();
             info!(
                 files = ctx.files.len(),
                 observation_count = adaptive_snapshot.observation_count,
-                elapsed_ms = observation_started.elapsed().as_millis() as u64,
-                "observation phase complete"
+                "observation fused into engine boot parse"
             );
         }
-        let observation_ms = observation_started.elapsed().as_secs_f64() * 1000.0;
 
         let engine_wall_started = Instant::now();
         let mut results = if ctx.multi_process_enabled {
@@ -933,6 +906,21 @@ impl App {
                     path = %ctx.adaptive_state_path.display(),
                     "saved adaptive state to disk (no worker shards)"
                 );
+            }
+        }
+
+        // Persist interference state (merge shards if multi-process, or load from IPC)
+        {
+            use crate::engine::policy_interference::PolicyInterferenceState;
+            if let Some(state) = PolicyInterferenceState::load_from_path(&ctx.interference_state_path) {
+                if ctx.config.verbose {
+                    let count: u32 = state.interference.values().map(|s| s.observation_count).sum();
+                    info!(
+                        total_interference_observations = count,
+                        path = %ctx.interference_state_path.display(),
+                        "interference state persisted"
+                    );
+                }
             }
         }
 
