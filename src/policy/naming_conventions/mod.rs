@@ -559,18 +559,29 @@ impl Policy for NamingConventionsPolicy {
                     }
                     if let Some(name_node) = ts_traversal::declarator_identifier(node) {
                         let name = name_node.utf8_text(context.text.as_bytes()).unwrap_or("");
+                        if Self::is_cpp_keyword(name) {
+                            break 'process;
+                        }
                         let line = name_node.start_position().row + 1;
                         let source_column = name_node.start_position().column + 1;
-                        let sym = semantic_file_context
-                            .and_then(|ctx| ctx.symbol_on_line(name, line, &[]))
-                            .filter(|decl| {
-                                matches!(
-                                        decl.kind,
-                                        clang_sys::CXCursor_VarDecl
-                                            | clang_sys::CXCursor_FieldDecl
-                                            | clang_sys::CXCursor_ParmDecl
-                                    )
-                            });
+                        let raw_sym = semantic_file_context
+                            .and_then(|ctx| ctx.symbol_on_line(name, line, &[]));
+                        if raw_sym.is_some_and(|d| !matches!(
+                            d.kind,
+                            clang_sys::CXCursor_VarDecl
+                                | clang_sys::CXCursor_FieldDecl
+                                | clang_sys::CXCursor_ParmDecl
+                        )) {
+                            break 'process;
+                        }
+                        let sym = raw_sym.filter(|decl| {
+                            matches!(
+                                    decl.kind,
+                                    clang_sys::CXCursor_VarDecl
+                                        | clang_sys::CXCursor_FieldDecl
+                                        | clang_sys::CXCursor_ParmDecl
+                                )
+                        });
                         if sym.is_some_and(|d| d.kind == clang_sys::CXCursor_ParmDecl) {
                             break 'process;
                         }
